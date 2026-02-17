@@ -8,6 +8,12 @@ class ConsoleChatController(
     private var systemPrompt: String,
     private val io: CliIO = StdCliIO,
 ) {
+    private val configTabs = listOf("Format", "Size", "Stop")
+    private val configDescriptions = listOf(
+        "Select output format",
+        "Restrict output size",
+        "Define stop sequence instructions",
+    )
     private val history = mutableListOf(ConversationMessage.system(systemPrompt))
     private val dialogBlocks = mutableListOf<String>()
     private val inputDivider = "─".repeat(80)
@@ -77,6 +83,14 @@ class ConsoleChatController(
                 true
             }
 
+            input == "/config" -> {
+                io.openConfigMenu(
+                    tabs = configTabs,
+                    descriptions = configDescriptions,
+                )
+                true
+            }
+
             input == "/reset" -> {
                 resetConversation()
                 dialogBlocks.clear()
@@ -119,7 +133,7 @@ class ConsoleChatController(
         io.writeLine(logoBanner())
         io.writeLine()
         io.writeLine("    type your prompt and press Enter")
-        io.writeLine("    commands: /help, /reset, /system <prompt>, /exit")
+        io.writeLine("    commands: /help, /config, /reset, /system <prompt>, /exit")
         io.writeLine()
 
         dialogBlocks.forEachIndexed { index, block ->
@@ -146,6 +160,7 @@ class ConsoleChatController(
     private fun helpText(): String = """
         Available commands:
         /help                show this help message
+        /config              open config menu (ESC to close)
         /reset               clear conversation and keep current system prompt
         /system <prompt>     replace system prompt and clear conversation
         /exit                close the application
