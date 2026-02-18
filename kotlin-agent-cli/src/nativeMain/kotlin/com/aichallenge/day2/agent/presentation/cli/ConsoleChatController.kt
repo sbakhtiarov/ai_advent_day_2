@@ -30,15 +30,16 @@ class ConsoleChatController(
                     prompt = "> ",
                     divider = inputDivider,
                     systemPromptText = systemPrompt,
-                )?.trim() ?: break
-                if (input.isEmpty()) {
+                ) ?: break
+                if (input.isBlank()) {
                     continue
                 }
 
                 io.hideCursor()
 
-                if (input.startsWith("/")) {
-                    val shouldContinue = handleCommand(input)
+                val commandInput = input.trim()
+                if (commandInput.startsWith("/")) {
+                    val shouldContinue = handleCommand(commandInput)
                     if (!shouldContinue) {
                         break
                     }

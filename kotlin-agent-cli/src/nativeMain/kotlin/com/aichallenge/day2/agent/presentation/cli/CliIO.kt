@@ -84,6 +84,7 @@ object StdCliIO : CliIO {
 
     override fun readLineInFooter(prompt: String, divider: String, systemPromptText: String): String? {
         val input = StringBuilder()
+        val pendingKeys = ArrayDeque<Int>()
         val terminalWidth = detectTerminalWidth().coerceAtLeast(prompt.length + 1)
         val dividerChar = divider.firstOrNull() ?: '─'
         val dividerLine = dividerChar.toString().repeat(terminalWidth)
@@ -112,13 +113,46 @@ object StdCliIO : CliIO {
             var result: String? = null
 
             loop@ while (true) {
-                when (val key = readByte()) {
+                val key = if (pendingKeys.isNotEmpty()) pendingKeys.removeFirst() else readByte()
+                when (key) {
                     null -> {
                         result = null
                         break@loop
                     }
 
                     ENTER_CR, ENTER_LF -> {
+                        val nextKey = readOptionalByte(timeoutDeciseconds = PASTE_ENTER_LOOKAHEAD_DECISECONDS)
+                        if (nextKey != null) {
+                            if (key == ENTER_CR && nextKey == ENTER_LF) {
+                                val afterLf = readOptionalByte(timeoutDeciseconds = PASTE_ENTER_LOOKAHEAD_DECISECONDS)
+                                if (afterLf == null) {
+                                    // Treat an isolated CRLF as a regular Enter key press.
+                                    print("\u001B8")
+                                    print('\r')
+                                    print("\u001B[J")
+                                    print(prompt)
+                                    print(input.toString())
+                                    print('\n')
+                                    print(coloredDividerLine)
+                                    result = input.toString()
+                                    break@loop
+                                }
+                                input.append('\n')
+                                pendingKeys.addLast(afterLf)
+                            } else {
+                                input.append('\n')
+                                pendingKeys.addLast(nextKey)
+                            }
+                            redrawFooterFromPromptAnchor(
+                                prompt = prompt,
+                                input = input,
+                                divider = coloredDividerLine,
+                                width = terminalWidth,
+                                systemLine = systemLine,
+                            )
+                            continue@loop
+                        }
+
                         print("\u001B8")
                         print('\r')
                         print("\u001B[J")
@@ -149,7 +183,7 @@ object StdCliIO : CliIO {
                             val csiFirst = readOptionalByte(timeoutDeciseconds = 1) ?: continue@loop
                             val pasted = readBracketedPasteIfPresent(csiFirst)
                             if (!pasted.isNullOrEmpty()) {
-                                input.append(sanitizeSingleLineInput(pasted))
+                                input.append(sanitizeMultilineInput(pasted))
                                 redrawFooterFromPromptAnchor(
                                     prompt = prompt,
                                     input = input,
@@ -173,7 +207,7 @@ object StdCliIO : CliIO {
                     CTRL_V -> {
                         val clipboardText = readClipboardText()
                         if (!clipboardText.isNullOrEmpty()) {
-                            input.append(sanitizeSingleLineInput(clipboardText))
+                            input.append(sanitizeMultilineInput(clipboardText))
                             redrawFooterFromPromptAnchor(
                                 prompt = prompt,
                                 input = input,
@@ -412,6 +446,9 @@ object StdCliIO : CliIO {
         width: Int,
         systemLine: String,
     ) {
+        val inputPreview = buildInputPreview(input.toString())
+        val continuationPrefix = " ".repeat(prompt.length)
+
         // Keep cursor hidden during repaint to avoid visible jump at prompt start.
         print("\u001B[?25l")
         print("\u001B8")
@@ -419,21 +456,44 @@ object StdCliIO : CliIO {
         print("\u001B7")
         print("\u001B[J")
         print(prompt)
-        print(input.toString())
+        print(inputPreview.visibleLines.firstOrNull().orEmpty())
+        inputPreview.visibleLines.drop(1).forEach { line ->
+            print('\n')
+            print(continuationPrefix)
+            print(line)
+        }
         print('\n')
         print(divider)
         print('\n')
         print(systemLine)
         print("\u001B8")
-        moveCursorToPromptOffset(offset = prompt.length + input.length, width = width)
+        moveCursorToPreviewEnd(
+            prompt = prompt,
+            preview = inputPreview,
+            continuationPrefix = continuationPrefix,
+            width = width,
+        )
         print("\u001B[?25h")
     }
 
-    private fun moveCursorToPromptOffset(offset: Int, width: Int) {
+    private fun moveCursorToPreviewEnd(
+        prompt: String,
+        preview: InputPreview,
+        continuationPrefix: String,
+        width: Int,
+    ) {
         val safeWidth = width.coerceAtLeast(1)
-        val safeOffset = offset.coerceAtLeast(0)
-        val rowOffset = safeOffset / safeWidth
-        val column = (safeOffset % safeWidth) + 1
+        val visibleLines = preview.visibleLines.ifEmpty { listOf("") }
+        val rowsBeforeLastLine = visibleLines.dropLast(1).mapIndexed { index, line ->
+            val prefixLength = if (index == 0) prompt.length else continuationPrefix.length
+            calculateVisualLineCount(prefixLength + line.length, safeWidth)
+        }.sum()
+        val lastLinePrefixLength = if (visibleLines.size == 1) prompt.length else continuationPrefix.length
+        val rowOffset = rowsBeforeLastLine + calculateVisualLineCount(
+            length = lastLinePrefixLength + visibleLines.last().length,
+            width = safeWidth,
+        ) - 1
+        val column = ((lastLinePrefixLength + visibleLines.last().length) % safeWidth) + 1
         if (rowOffset > 0) {
             print("\u001B[${rowOffset}B")
         }
@@ -484,6 +544,14 @@ object StdCliIO : CliIO {
             .filter { it.code in 32..126 }
     }
 
+    private fun sanitizeMultilineInput(text: String?): String {
+        if (text.isNullOrEmpty()) return ""
+        return text
+            .replace("\r\n", "\n")
+            .replace('\r', '\n')
+            .filter { it == '\n' || it.code in 32..126 }
+    }
+
     private fun sanitizeDigitsOnly(text: String?): String {
         if (text.isNullOrEmpty()) return ""
         return text.filter { it in '0'..'9' }
@@ -521,11 +589,16 @@ object StdCliIO : CliIO {
         return true
     }
 
+    @OptIn(ExperimentalForeignApi::class)
     private inline fun <T> withRawInput(block: () -> T): T {
+        print("\u001B[?2004h")
+        fflush(stdout)
         system("stty -echo -icanon -isig min 1 time 0")
         return try {
             block()
         } finally {
+            print("\u001B[?2004l")
+            fflush(stdout)
             system("stty sane")
         }
     }
@@ -645,6 +718,22 @@ object StdCliIO : CliIO {
 
     private fun stripAnsi(text: String): String = ANSI_ESCAPE_REGEX.replace(text, "")
 
+    private fun buildInputPreview(text: String): InputPreview {
+        val lines = text.split('\n')
+        if (lines.size <= MAX_VISIBLE_INPUT_LINES) {
+            return InputPreview(visibleLines = lines)
+        }
+
+        val visible = lines.take(MAX_VISIBLE_INPUT_LINES).toMutableList()
+        val hiddenLines = lines.size - MAX_VISIBLE_INPUT_LINES
+        visible += "[+ $hiddenLines more lines]"
+        return InputPreview(visibleLines = visible)
+    }
+
+    private data class InputPreview(
+        val visibleLines: List<String>,
+    )
+
     private const val ENTER_CR = 13
     private const val ENTER_LF = 10
     private const val BACKSPACE = 8
@@ -667,5 +756,7 @@ object StdCliIO : CliIO {
     private const val BRACKETED_PASTE_START_MARKER = "200~"
     private const val BRACKETED_PASTE_END_SEQUENCE = "\u001B[201~"
     private const val BRACKETED_PASTE_MAX_LENGTH = 8192
+    private const val PASTE_ENTER_LOOKAHEAD_DECISECONDS = 5
+    private const val MAX_VISIBLE_INPUT_LINES = 10
     private val ANSI_ESCAPE_REGEX = Regex("\u001B\\[[0-9;?]*[ -/]*[@-~]")
 }
