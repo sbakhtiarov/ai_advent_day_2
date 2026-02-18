@@ -35,7 +35,7 @@ private suspend fun runApp(args: Array<String>): Int {
     val container = AppContainer(config)
     val controller = ConsoleChatController(
         sendPromptUseCase = container.sendPromptUseCase,
-        systemPrompt = config.systemPrompt,
+        initialSystemPrompt = config.systemPrompt,
     )
 
     return try {

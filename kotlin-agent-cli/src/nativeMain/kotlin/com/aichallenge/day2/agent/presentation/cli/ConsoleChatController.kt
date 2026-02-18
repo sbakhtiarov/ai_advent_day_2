@@ -5,15 +5,18 @@ import com.aichallenge.day2.agent.domain.usecase.SendPromptUseCase
 
 class ConsoleChatController(
     private val sendPromptUseCase: SendPromptUseCase,
-    private var systemPrompt: String,
+    initialSystemPrompt: String,
     private val io: CliIO = StdCliIO,
 ) {
     private val configTabs = listOf("Format", "Size", "Stop")
     private val configDescriptions = listOf(
         "Select output format",
-        "Restrict output size",
+        "Set max output tokens",
         "Define stop sequence instructions",
     )
+    private var baseSystemPrompt = initialSystemPrompt
+    private var configSelection = ConfigMenuSelection.default()
+    private var systemPrompt = buildSystemPrompt(baseSystemPrompt, configSelection)
     private val history = mutableListOf(ConversationMessage.system(systemPrompt))
     private val dialogBlocks = mutableListOf<String>()
     private val inputDivider = "─".repeat(80)
@@ -23,7 +26,11 @@ class ConsoleChatController(
             while (true) {
                 renderScreen()
 
-                val input = io.readLineInFooter(prompt = "> ", divider = inputDivider)?.trim() ?: break
+                val input = io.readLineInFooter(
+                    prompt = "> ",
+                    divider = inputDivider,
+                    systemPromptText = systemPrompt,
+                )?.trim() ?: break
                 if (input.isEmpty()) {
                     continue
                 }
@@ -84,10 +91,14 @@ class ConsoleChatController(
             }
 
             input == "/config" -> {
-                io.openConfigMenu(
+                configSelection = io.openConfigMenu(
                     tabs = configTabs,
                     descriptions = configDescriptions,
+                    currentSelection = configSelection,
                 )
+                systemPrompt = buildSystemPrompt(baseSystemPrompt, configSelection)
+                resetConversation()
+                dialogBlocks += "system> configuration applied"
                 true
             }
 
@@ -95,19 +106,6 @@ class ConsoleChatController(
                 resetConversation()
                 dialogBlocks.clear()
                 dialogBlocks += "system> conversation has been reset"
-                true
-            }
-
-            input.startsWith("/system ") -> {
-                val newPrompt = input.removePrefix("/system ").trim()
-                if (newPrompt.isBlank()) {
-                    dialogBlocks += "system> usage: /system <new prompt>"
-                } else {
-                    systemPrompt = newPrompt
-                    resetConversation()
-                    dialogBlocks.clear()
-                    dialogBlocks += "system> updated system prompt and reset history"
-                }
                 true
             }
 
@@ -133,7 +131,7 @@ class ConsoleChatController(
         io.writeLine(logoBanner())
         io.writeLine()
         io.writeLine("    type your prompt and press Enter")
-        io.writeLine("    commands: /help, /config, /reset, /system <prompt>, /exit")
+        io.writeLine("    commands: /help, /config, /reset, /exit")
         io.writeLine()
 
         dialogBlocks.forEachIndexed { index, block ->
@@ -149,12 +147,12 @@ class ConsoleChatController(
     }
 
     private fun logoBanner(): String = """
-        █████╗  ██████╗ ███████╗███╗   ██╗████████╗       ██████╗██╗     ██╗
-       ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝      ██╔════╝██║     ██║
-       ███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║         ██║     ██║     ██║
-       ██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║         ██║     ██║     ██║
-       ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║         ╚██████╗███████╗██║
-       ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝          ╚═════╝╚══════╝╚═╝
+        █████╗ ██╗     █████╗ ██████╗ ██╗   ██╗███████╗███╗   ██╗████████╗
+       ██╔══██╗██║    ██╔══██╗██╔══██╗██║   ██║██╔════╝████╗  ██║╚══██╔══╝
+       ███████║██║    ███████║██║  ██║██║   ██║█████╗  ██╔██╗ ██║   ██║
+       ██╔══██║██║    ██╔══██║██║  ██║╚██╗ ██╔╝██╔══╝  ██║╚██╗██║   ██║
+       ██║  ██║██║    ██║  ██║██████╔╝ ╚████╔╝ ███████╗██║ ╚████║   ██║
+       ╚═╝  ╚═╝╚═╝    ╚═╝  ╚═╝╚═════╝   ╚═══╝  ╚══════╝╚═╝  ╚═══╝   ╚═╝
     """.trimIndent().lineSequence().joinToString(separator = "\n") { line -> "    $line" }
 
     private fun helpText(): String = """
@@ -162,7 +160,6 @@ class ConsoleChatController(
         /help                show this help message
         /config              open config menu (ESC to close)
         /reset               clear conversation and keep current system prompt
-        /system <prompt>     replace system prompt and clear conversation
         /exit                close the application
     """.trimIndent()
 
@@ -204,5 +201,47 @@ class ConsoleChatController(
                 append(line)
             }
         }
+    }
+
+    private fun buildSystemPrompt(
+        basePrompt: String,
+        selection: ConfigMenuSelection,
+    ): String {
+        val formatInstruction = when (selection.format) {
+            OutputFormatOption.PLAIN_TEXT -> "Respond in plain text only. Do not use Markdown."
+            OutputFormatOption.MARKDOWN -> "Respond using Markdown formatting."
+            OutputFormatOption.JSON -> "Respond with valid JSON only and no extra prose."
+            OutputFormatOption.TABLE -> "Respond as a table."
+        }
+
+        val sizeInstruction = selection.maxOutputTokens?.let { tokens ->
+            "Use max_output_tokens=$tokens."
+        } ?: "No explicit max_output_tokens limit."
+
+        val stopInstruction = if (selection.stopSequence.isBlank()) {
+            "No explicit stop sequence."
+        } else {
+            "Stop generating before the sequence \"${selection.stopSequence}\" and never print it."
+        }
+
+        return """
+            $basePrompt
+            
+            Output rules:
+            - Format: ${selection.format.readableName()}
+            - Max output tokens: ${selection.maxOutputTokens?.toString() ?: "(none)"}
+            - Stop sequence: ${selection.stopSequence.ifBlank { "(none)" }}
+            
+            $formatInstruction
+            $sizeInstruction
+            $stopInstruction
+        """.trimIndent()
+    }
+
+    private fun OutputFormatOption.readableName(): String = when (this) {
+        OutputFormatOption.PLAIN_TEXT -> "Plain text"
+        OutputFormatOption.MARKDOWN -> "Markdown"
+        OutputFormatOption.JSON -> "JSON"
+        OutputFormatOption.TABLE -> "Table"
     }
 }

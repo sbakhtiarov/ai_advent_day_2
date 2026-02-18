@@ -17,13 +17,25 @@ class OpenAiRemoteDataSource(
     private val config: AppConfig,
 ) {
     suspend fun fetchAssistantReply(conversation: List<ConversationMessage>): String {
+        val instructions = conversation
+            .asSequence()
+            .filter { it.role == MessageRole.SYSTEM }
+            .map { it.content.trim() }
+            .filter { it.isNotEmpty() }
+            .joinToString(separator = "\n\n")
+            .ifBlank { null }
+        val inputMessages = conversation.filter { it.role != MessageRole.SYSTEM }
+        val maxOutputTokens = deriveMaxOutputTokens(instructions)
+
         val response = httpClient.post("${config.baseUrl}/responses") {
             header(HttpHeaders.Authorization, "Bearer ${config.apiKey}")
             contentType(ContentType.Application.Json)
             setBody(
                 ResponsesApiRequest(
                     model = config.model,
-                    input = conversation.map { message ->
+                    instructions = instructions,
+                    maxOutputTokens = maxOutputTokens,
+                    input = inputMessages.map { message ->
                         RequestMessage(
                             role = message.role.toApiRole(),
                             content = listOf(
@@ -64,7 +76,17 @@ class OpenAiRemoteDataSource(
             .filter { it.isNotEmpty() }
             .joinToString(separator = "\n")
     }
+
+    private fun deriveMaxOutputTokens(instructions: String?): Int? {
+        val normalized = instructions ?: return null
+        val match = MAX_OUTPUT_TOKENS_REGEX.find(normalized) ?: return null
+        return match.groupValues[1].toIntOrNull()?.takeIf { it > 0 }
+    }
 }
+
+private val MAX_OUTPUT_TOKENS_REGEX = Regex(
+    pattern = """(?i)max output tokens:\s*(\d+)""",
+)
 
 private fun MessageRole.toApiRole(): String = when (this) {
     MessageRole.SYSTEM -> "system"
