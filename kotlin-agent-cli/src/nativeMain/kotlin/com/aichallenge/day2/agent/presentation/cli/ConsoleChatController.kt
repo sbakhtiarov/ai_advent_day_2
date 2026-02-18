@@ -207,22 +207,9 @@ class ConsoleChatController(
         basePrompt: String,
         selection: ConfigMenuSelection,
     ): String {
-        val formatInstruction = when (selection.format) {
-            OutputFormatOption.PLAIN_TEXT -> "Respond in plain text only. Do not use Markdown."
-            OutputFormatOption.MARKDOWN -> "Respond using Markdown formatting."
-            OutputFormatOption.JSON -> "Respond with valid JSON only and no extra prose."
-            OutputFormatOption.TABLE -> "Respond as a table."
-        }
-
-        val sizeInstruction = selection.maxOutputTokens?.let { tokens ->
-            "Use max_output_tokens=$tokens."
-        } ?: "No explicit max_output_tokens limit."
-
-        val stopInstruction = if (selection.stopSequence.isBlank()) {
-            "No explicit stop sequence."
-        } else {
-            "Stop generating before the sequence \"${selection.stopSequence}\" and never print it."
-        }
+        val stopInstruction = selection.stopSequence.takeIf { it.isNotBlank() }?.let { stopText ->
+            """When user sends "$stopText" stop generating questions and provide short summary"""
+        } ?: "No explicit stop sequence behavior."
 
         return """
             $basePrompt
@@ -231,10 +218,8 @@ class ConsoleChatController(
             - Format: ${selection.format.readableName()}
             - Max output tokens: ${selection.maxOutputTokens?.toString() ?: "(none)"}
             - Stop sequence: ${selection.stopSequence.ifBlank { "(none)" }}
-            
-            $formatInstruction
-            $sizeInstruction
-            $stopInstruction
+            - Stop behavior: $stopInstruction
+            - Follow output rules exactly.
         """.trimIndent()
     }
 

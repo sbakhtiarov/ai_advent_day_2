@@ -1,17 +1,24 @@
 package com.aichallenge.day2.agent.presentation.cli
 
 import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.cinterop.ByteVar
 import kotlinx.cinterop.alloc
+import kotlinx.cinterop.allocArray
 import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.convert
 import kotlinx.cinterop.memScoped
 import kotlinx.cinterop.ptr
+import kotlinx.cinterop.toKString
 import kotlinx.cinterop.usePinned
 import platform.posix.STDIN_FILENO
 import platform.posix.STDOUT_FILENO
 import platform.posix.TIOCGWINSZ
+import platform.posix.fgets
+import platform.posix.fputs
 import platform.posix.fflush
 import platform.posix.ioctl
+import platform.posix.pclose
+import platform.posix.popen
 import platform.posix.read
 import platform.posix.stdout
 import platform.posix.system
@@ -89,6 +96,9 @@ object StdCliIO : CliIO {
         // divider
         print(coloredDividerLine)
         print('\n')
+        val systemLineVisualLines = calculateVisualLineCount(stripAnsi(systemLine).length, terminalWidth)
+        val reservedFooterLines = FOOTER_RESERVED_INPUT_LINES + 1 + systemLineVisualLines
+        ensureMenuFits(requiredMenuLines = reservedFooterLines)
         print("\u001B7")
         redrawFooterFromPromptAnchor(
             prompt = prompt,
@@ -134,15 +144,43 @@ object StdCliIO : CliIO {
                     }
 
                     ESCAPE -> {
-                        // Ignore the common CSI sequence bytes for arrows/home/end.
-                        readByte()
-                        readByte()
+                        val escNext = readOptionalByte(timeoutDeciseconds = 1)
+                        if (escNext == CSI) {
+                            val csiFirst = readOptionalByte(timeoutDeciseconds = 1) ?: continue@loop
+                            val pasted = readBracketedPasteIfPresent(csiFirst)
+                            if (!pasted.isNullOrEmpty()) {
+                                input.append(sanitizeSingleLineInput(pasted))
+                                redrawFooterFromPromptAnchor(
+                                    prompt = prompt,
+                                    input = input,
+                                    divider = coloredDividerLine,
+                                    width = terminalWidth,
+                                    systemLine = systemLine,
+                                )
+                            }
+                        }
                     }
 
                     CTRL_C, CTRL_D -> {
                         if (input.isEmpty()) {
                             result = null
                             break@loop
+                        } else if (key == CTRL_C) {
+                            writeClipboardText(input.toString())
+                        }
+                    }
+
+                    CTRL_V -> {
+                        val clipboardText = readClipboardText()
+                        if (!clipboardText.isNullOrEmpty()) {
+                            input.append(sanitizeSingleLineInput(clipboardText))
+                            redrawFooterFromPromptAnchor(
+                                prompt = prompt,
+                                input = input,
+                                divider = coloredDividerLine,
+                                width = terminalWidth,
+                                systemLine = systemLine,
+                            )
                         }
                     }
 
@@ -333,9 +371,23 @@ object StdCliIO : CliIO {
                     }
 
                     else -> {
+                        if (selectedIndex == sizeTabIndex && key == CTRL_V) {
+                            val clipboardDigits = sanitizeDigitsOnly(readClipboardText())
+                            if (clipboardDigits.isNotEmpty()) {
+                                maxTokensInput.append(clipboardDigits)
+                                renderMenu()
+                            }
+                        }
                         if (selectedIndex == sizeTabIndex && key in '0'.code..'9'.code) {
                             maxTokensInput.append(key.toChar())
                             renderMenu()
+                        }
+                        if (selectedIndex == stopTabIndex && key == CTRL_V) {
+                            val clipboardText = sanitizeSingleLineInput(readClipboardText())
+                            if (clipboardText.isNotEmpty()) {
+                                stopInput.append(clipboardText)
+                                renderMenu()
+                            }
                         }
                         if (selectedIndex == stopTabIndex && isPrintableAscii(key)) {
                             stopInput.append(key.toChar())
@@ -364,10 +416,6 @@ object StdCliIO : CliIO {
         print("\u001B[?25l")
         print("\u001B8")
         print('\r')
-        val requiredLines = calculateVisualLineCount(prompt.length + input.length, width) +
-            1 +
-            calculateVisualLineCount(stripAnsi(systemLine).length, width)
-        ensureMenuFits(requiredMenuLines = requiredLines)
         print("\u001B7")
         print("\u001B[J")
         print(prompt)
@@ -400,6 +448,77 @@ object StdCliIO : CliIO {
             .replace(Regex("\\s+"), " ")
             .ifBlank { "emtpty" }
         return "${SYSTEM_PROMPT_LABEL_COLOR}System prompt:${ANSI_RESET} $normalizedPrompt"
+    }
+
+    @OptIn(ExperimentalForeignApi::class)
+    private fun readClipboardText(): String? = memScoped {
+        val pipe = popen("pbpaste", "r") ?: return null
+        try {
+            val buffer = allocArray<ByteVar>(1024)
+            val output = StringBuilder()
+            while (fgets(buffer, 1024, pipe) != null) {
+                output.append(buffer.toKString())
+            }
+            output.toString().ifEmpty { null }
+        } finally {
+            pclose(pipe)
+        }
+    }
+
+    @OptIn(ExperimentalForeignApi::class)
+    private fun writeClipboardText(text: String) {
+        val pipe = popen("pbcopy", "w") ?: return
+        try {
+            fputs(text, pipe)
+            fflush(pipe)
+        } finally {
+            pclose(pipe)
+        }
+    }
+
+    private fun sanitizeSingleLineInput(text: String?): String {
+        if (text.isNullOrEmpty()) return ""
+        return text
+            .replace('\n', ' ')
+            .replace('\r', ' ')
+            .filter { it.code in 32..126 }
+    }
+
+    private fun sanitizeDigitsOnly(text: String?): String {
+        if (text.isNullOrEmpty()) return ""
+        return text.filter { it in '0'..'9' }
+    }
+
+    private fun readBracketedPasteIfPresent(firstCsiByte: Int): String? {
+        val startMarker = StringBuilder().append(firstCsiByte.toChar())
+        while (startMarker.length < 4 && startMarker.last() != '~') {
+            val next = readOptionalByte(timeoutDeciseconds = 1) ?: return null
+            startMarker.append(next.toChar())
+        }
+        if (startMarker.toString() != BRACKETED_PASTE_START_MARKER) {
+            return null
+        }
+
+        val payload = StringBuilder()
+        while (payload.length < BRACKETED_PASTE_MAX_LENGTH) {
+            val value = readByte() ?: break
+            payload.append(value.toChar())
+            if (payload.endsWith(BRACKETED_PASTE_END_SEQUENCE)) {
+                payload.setLength(payload.length - BRACKETED_PASTE_END_SEQUENCE.length)
+                break
+            }
+        }
+        return payload.toString()
+    }
+
+    private fun StringBuilder.endsWith(suffix: String): Boolean {
+        if (length < suffix.length) return false
+        for (index in suffix.indices) {
+            if (this[length - suffix.length + index] != suffix[index]) {
+                return false
+            }
+        }
+        return true
     }
 
     private inline fun <T> withRawInput(block: () -> T): T {
@@ -533,6 +652,7 @@ object StdCliIO : CliIO {
     private const val ESCAPE = 27
     private const val CTRL_C = 3
     private const val CTRL_D = 4
+    private const val CTRL_V = 22
     private const val TAB = 9
     private const val CSI = 91
     private const val ARROW_UP = 65
@@ -543,5 +663,9 @@ object StdCliIO : CliIO {
     private const val SYSTEM_PROMPT_LABEL_COLOR = "\u001B[38;5;40m"
     private const val OPTION_SELECTED_COLOR = "\u001B[38;5;39m"
     private const val ANSI_RESET = "\u001B[0m"
+    private const val FOOTER_RESERVED_INPUT_LINES = 3
+    private const val BRACKETED_PASTE_START_MARKER = "200~"
+    private const val BRACKETED_PASTE_END_SEQUENCE = "\u001B[201~"
+    private const val BRACKETED_PASTE_MAX_LENGTH = 8192
     private val ANSI_ESCAPE_REGEX = Regex("\u001B\\[[0-9;?]*[ -/]*[@-~]")
 }

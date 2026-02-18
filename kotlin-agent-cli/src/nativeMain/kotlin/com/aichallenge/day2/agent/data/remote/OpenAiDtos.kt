@@ -7,8 +7,6 @@ import kotlinx.serialization.Serializable
 data class ResponsesApiRequest(
     val model: String,
     val instructions: String? = null,
-    @SerialName("max_output_tokens")
-    val maxOutputTokens: Int? = null,
     val input: List<RequestMessage>,
 )
 

@@ -25,7 +25,6 @@ class OpenAiRemoteDataSource(
             .joinToString(separator = "\n\n")
             .ifBlank { null }
         val inputMessages = conversation.filter { it.role != MessageRole.SYSTEM }
-        val maxOutputTokens = deriveMaxOutputTokens(instructions)
 
         val response = httpClient.post("${config.baseUrl}/responses") {
             header(HttpHeaders.Authorization, "Bearer ${config.apiKey}")
@@ -34,7 +33,6 @@ class OpenAiRemoteDataSource(
                 ResponsesApiRequest(
                     model = config.model,
                     instructions = instructions,
-                    maxOutputTokens = maxOutputTokens,
                     input = inputMessages.map { message ->
                         RequestMessage(
                             role = message.role.toApiRole(),
@@ -76,17 +74,7 @@ class OpenAiRemoteDataSource(
             .filter { it.isNotEmpty() }
             .joinToString(separator = "\n")
     }
-
-    private fun deriveMaxOutputTokens(instructions: String?): Int? {
-        val normalized = instructions ?: return null
-        val match = MAX_OUTPUT_TOKENS_REGEX.find(normalized) ?: return null
-        return match.groupValues[1].toIntOrNull()?.takeIf { it > 0 }
-    }
 }
-
-private val MAX_OUTPUT_TOKENS_REGEX = Regex(
-    pattern = """(?i)max output tokens:\s*(\d+)""",
-)
 
 private fun MessageRole.toApiRole(): String = when (this) {
     MessageRole.SYSTEM -> "system"

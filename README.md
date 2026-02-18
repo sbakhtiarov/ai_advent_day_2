@@ -1,14 +1,25 @@
-# Day 2 - Kotlin Native CLI Agent
+# AI Advent Challenge Day 2
 
-This workspace contains a native macOS CLI application implemented in Kotlin with Ktor.
+Native macOS CLI chat agent written in Kotlin/Native with Ktor and organized with Clean Architecture layers.
 
-The app behaves as a terminal chat assistant:
-- sends prompts to OpenAI API
-- prints assistant responses in dialog mode
-- keeps in-memory conversation history for the current session
+## Features
+- Interactive dialog mode in terminal.
+- One-shot prompt mode with `--prompt`.
+- In-memory conversation history per session.
+- `/config` menu with tabs:
+  - `Format`: Plain text, Markdown, JSON, Table.
+  - `Size`: max output tokens (numeric input).
+  - `Stop`: custom stop behavior instruction text.
+- Dynamic system prompt generation from config.
+- Footer UI with persistent prompt area and system prompt preview.
+
+## Commands
+- `/help` show help.
+- `/config` open configuration menu (ESC to close).
+- `/reset` reset conversation and keep current system prompt.
+- `/exit` close the app.
 
 ## Project Structure
-
 ```text
 .
 ├── README.md
@@ -23,26 +34,23 @@ The app behaves as a terminal chat assistant:
 ```
 
 ## Architecture
+- `domain`: models, repository contracts, use cases.
+- `data`: OpenAI API DTOs, remote data source, repository implementation.
+- `presentation`: CLI controller and terminal rendering/input.
+- `core`: environment config and DI wiring.
 
-Clean Architecture split:
-- `domain`: entities, repository contracts, use cases
-- `data`: OpenAI API integration and repository implementation
-- `presentation`: CLI interaction loop and commands
-- `core`: app config and dependency wiring
-
-## Quick Start
-
+## Run
 1. `cd kotlin-agent-cli`
-2. export required env var:
+2. Export required variable:
    - `export OPENAI_API_KEY="<your_key>"`
-3. optional env vars:
+3. Optional variables:
    - `OPENAI_MODEL` (default: `gpt-4.1-mini`)
    - `OPENAI_BASE_URL` (default: `https://api.openai.com/v1`)
    - `AGENT_SYSTEM_PROMPT`
-4. build:
+4. Build:
    - `./gradlew linkReleaseExecutableNative`
-5. run interactive chat:
+5. Run interactive:
    - `./build/bin/native/releaseExecutable/agent-cli.kexe`
 
-One-shot prompt mode:
+One-shot mode:
 - `./build/bin/native/releaseExecutable/agent-cli.kexe --prompt "Explain clean architecture"`
