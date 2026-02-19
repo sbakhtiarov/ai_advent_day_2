@@ -6,3 +6,6 @@
 **/.gradle/
 **/build/
 
+# Local secrets
+local.properties
+**/local.properties

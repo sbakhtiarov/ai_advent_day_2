@@ -41,9 +41,13 @@ Native macOS CLI chat agent written in Kotlin/Native with Ktor and organized wit
 
 ## Run
 1. `cd kotlin-agent-cli`
-2. Export required variable:
+2. Create `local.properties` in `kotlin-agent-cli/`:
+   - `OPENAI_API_KEY=sk-...`
+   - `OPENAI_MODEL=gpt-4.1-mini`
+   - `OPENAI_BASE_URL=https://api.openai.com/v1`
+   - `AGENT_SYSTEM_PROMPT=You are a concise and pragmatic assistant.`
+3. Optional environment variable overrides:
    - `export OPENAI_API_KEY="<your_key>"`
-3. Optional variables:
    - `OPENAI_MODEL` (default: `gpt-4.1-mini`)
    - `OPENAI_BASE_URL` (default: `https://api.openai.com/v1`)
    - `AGENT_SYSTEM_PROMPT`

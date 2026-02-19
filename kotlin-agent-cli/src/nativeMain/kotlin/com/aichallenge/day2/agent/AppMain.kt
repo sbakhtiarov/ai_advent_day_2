@@ -74,10 +74,10 @@ private fun printUsage() {
 private fun printEnvironmentHelp() {
     println(
         """
-        Required environment:
+        Required configuration (environment variable or local.properties):
           OPENAI_API_KEY       OpenAI API key
         
-        Optional environment:
+        Optional configuration (environment variable or local.properties):
           OPENAI_MODEL         default: gpt-4.1-mini
           OPENAI_BASE_URL      default: https://api.openai.com/v1
           AGENT_SYSTEM_PROMPT  default: concise pragmatic assistant prompt
