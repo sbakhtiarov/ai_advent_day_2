@@ -10,9 +10,9 @@ class SendPromptUseCase(
     suspend fun execute(
         history: List<ConversationMessage>,
         prompt: String,
+        temperature: Double? = null,
     ): AgentResponse {
         val conversation = history + ConversationMessage.user(prompt)
-        return agentRepository.complete(conversation)
+        return agentRepository.complete(conversation, temperature)
     }
 }
-

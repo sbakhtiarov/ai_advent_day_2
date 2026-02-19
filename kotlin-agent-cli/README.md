@@ -56,6 +56,7 @@ One-shot mode:
 ## Interactive Commands
 
 - `/help` - show commands
+- `/config` - open config menu (ESC to close)
+- `/temp <temperature>` - set OpenAI temperature (`0..2`)
 - `/reset` - clear history
-- `/system <prompt>` - set system prompt and clear history
 - `/exit` - close app

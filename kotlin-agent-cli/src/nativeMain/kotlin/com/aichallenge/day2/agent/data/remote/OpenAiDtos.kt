@@ -7,6 +7,7 @@ import kotlinx.serialization.Serializable
 data class ResponsesApiRequest(
     val model: String,
     val instructions: String? = null,
+    val temperature: Double? = null,
     val input: List<RequestMessage>,
 )
 

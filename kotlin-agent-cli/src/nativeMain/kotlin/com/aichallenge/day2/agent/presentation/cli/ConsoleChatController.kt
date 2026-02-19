@@ -17,6 +17,7 @@ class ConsoleChatController(
     private var baseSystemPrompt = initialSystemPrompt
     private var configSelection = ConfigMenuSelection.default()
     private var systemPrompt = buildSystemPrompt(baseSystemPrompt, configSelection)
+    private var temperature: Double? = null
     private val history = mutableListOf(ConversationMessage.system(systemPrompt))
     private val dialogBlocks = mutableListOf<String>()
     private val inputDivider = "─".repeat(80)
@@ -62,7 +63,7 @@ class ConsoleChatController(
         }
 
         return runCatching {
-            val response = sendPromptUseCase.execute(history, prompt)
+            val response = sendPromptUseCase.execute(history, prompt, temperature)
             io.writeLine(formatAssistantResponse(response.content))
             0
         }.getOrElse { throwable ->
@@ -75,7 +76,7 @@ class ConsoleChatController(
         dialogBlocks += formatUserPrompt(prompt)
 
         runCatching {
-            val response = sendPromptUseCase.execute(history, prompt)
+            val response = sendPromptUseCase.execute(history, prompt, temperature)
             history += ConversationMessage.user(prompt)
             history += ConversationMessage.assistant(response.content)
             dialogBlocks += formatAssistantResponse(response.content)
@@ -110,6 +111,11 @@ class ConsoleChatController(
                 true
             }
 
+            input.startsWith("/temp") -> {
+                handleTemperatureCommand(input)
+                true
+            }
+
             input == "/exit" -> false
 
             else -> {
@@ -132,7 +138,7 @@ class ConsoleChatController(
         io.writeLine(logoBanner())
         io.writeLine()
         io.writeLine("    type your prompt and press Enter")
-        io.writeLine("    commands: /help, /config, /reset, /exit")
+        io.writeLine("    commands: /help, /config, /temp <0..2>, /reset, /exit")
         io.writeLine()
 
         dialogBlocks.forEachIndexed { index, block ->
@@ -160,9 +166,40 @@ class ConsoleChatController(
         Available commands:
         /help                show this help message
         /config              open config menu (ESC to close)
+        /temp <temperature>  set response temperature (0..2)
         /reset               clear conversation and keep current system prompt
         /exit                close the application
     """.trimIndent()
+
+    private fun handleTemperatureCommand(input: String) {
+        val parts = input.trim().split(Regex("\\s+"), limit = 2)
+        if (parts.size != 2 || parts[1].isBlank()) {
+            dialogBlocks += "system> usage: /temp <temperature>, where temperature is between 0 and 2"
+            return
+        }
+
+        val parsedTemperature = parts[1].toDoubleOrNull()
+        if (parsedTemperature == null) {
+            dialogBlocks += "system> invalid temperature. Please enter a numeric value between 0 and 2"
+            return
+        }
+
+        if (parsedTemperature !in 0.0..2.0) {
+            dialogBlocks += "system> invalid temperature. Allowed range is 0..2"
+            return
+        }
+
+        temperature = parsedTemperature
+        dialogBlocks += "system> temperature set to ${formatTemperature(parsedTemperature)}"
+    }
+
+    private fun formatTemperature(value: Double): String {
+        return if (value % 1.0 == 0.0) {
+            value.toInt().toString()
+        } else {
+            value.toString()
+        }
+    }
 
     private fun formatUserPrompt(text: String): String {
         val marker = "> "

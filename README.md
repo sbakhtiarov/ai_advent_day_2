@@ -16,6 +16,7 @@ Native macOS CLI chat agent written in Kotlin/Native with Ktor and organized wit
 ## Commands
 - `/help` show help.
 - `/config` open configuration menu (ESC to close).
+- `/temp <temperature>` set OpenAI temperature (range `0..2`).
 - `/reset` reset conversation and keep current system prompt.
 - `/exit` close the app.
 

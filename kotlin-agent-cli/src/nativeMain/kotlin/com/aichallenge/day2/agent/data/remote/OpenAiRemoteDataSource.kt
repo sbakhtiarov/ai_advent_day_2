@@ -16,7 +16,14 @@ class OpenAiRemoteDataSource(
     private val httpClient: HttpClient,
     private val config: AppConfig,
 ) {
-    suspend fun fetchAssistantReply(conversation: List<ConversationMessage>): String {
+    suspend fun fetchAssistantReply(
+        conversation: List<ConversationMessage>,
+        temperature: Double? = null,
+    ): String {
+        require(temperature == null || temperature in 0.0..2.0) {
+            "Temperature must be in range 0..2."
+        }
+
         val instructions = conversation
             .asSequence()
             .filter { it.role == MessageRole.SYSTEM }
@@ -33,6 +40,7 @@ class OpenAiRemoteDataSource(
                 ResponsesApiRequest(
                     model = config.model,
                     instructions = instructions,
+                    temperature = temperature,
                     input = inputMessages.map { message ->
                         RequestMessage(
                             role = message.role.toApiRole(),
