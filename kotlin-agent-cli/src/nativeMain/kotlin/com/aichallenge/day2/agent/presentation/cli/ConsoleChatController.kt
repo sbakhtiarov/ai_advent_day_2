@@ -1,7 +1,7 @@
 package com.aichallenge.day2.agent.presentation.cli
 
 import com.aichallenge.day2.agent.core.config.ModelPricing
-import com.aichallenge.day2.agent.domain.model.ConversationMessage
+import com.aichallenge.day2.agent.domain.model.SessionMemory
 import com.aichallenge.day2.agent.domain.model.TokenUsage
 import com.aichallenge.day2.agent.domain.usecase.SendPromptUseCase
 import kotlin.math.abs
@@ -28,7 +28,7 @@ class ConsoleChatController(
     private val availableModelIds = availableModels.distinct().ifEmpty { listOf(initialModel) }
     private var currentModel = initialModel
     private var temperature: Double? = null
-    private val history = mutableListOf(ConversationMessage.system(systemPrompt))
+    private val sessionMemory = SessionMemory(systemPrompt)
     private val dialogBlocks = mutableListOf<String>()
     private val inputDivider = "─".repeat(80)
 
@@ -80,7 +80,11 @@ class ConsoleChatController(
 
         return runCatching {
             val startedAt = TimeSource.Monotonic.markNow()
-            val response = sendPromptUseCase.execute(history, prompt, temperature, currentModel)
+            val response = sendPromptUseCase.execute(
+                conversation = sessionMemory.conversationFor(prompt),
+                temperature = temperature,
+                model = currentModel,
+            )
             val elapsedSeconds = startedAt.elapsedNow().inWholeMilliseconds / 1000.0
             io.writeLine(formatAssistantResponse(response.content, response.usage, elapsedSeconds))
             0
@@ -95,10 +99,13 @@ class ConsoleChatController(
 
         runCatching {
             val startedAt = TimeSource.Monotonic.markNow()
-            val response = sendPromptUseCase.execute(history, prompt, temperature, currentModel)
+            val response = sendPromptUseCase.execute(
+                conversation = sessionMemory.conversationFor(prompt),
+                temperature = temperature,
+                model = currentModel,
+            )
             val elapsedSeconds = startedAt.elapsedNow().inWholeMilliseconds / 1000.0
-            history += ConversationMessage.user(prompt)
-            history += ConversationMessage.assistant(response.content)
+            sessionMemory.recordSuccessfulTurn(prompt, response.content)
             dialogBlocks += formatAssistantResponse(response.content, response.usage, elapsedSeconds)
         }.onFailure { throwable ->
             dialogBlocks += "error> ${throwable.message ?: "Unexpected error"}"
@@ -156,8 +163,7 @@ class ConsoleChatController(
     }
 
     private fun resetConversation() {
-        history.clear()
-        history += ConversationMessage.system(systemPrompt)
+        sessionMemory.reset(systemPrompt)
     }
 
     private fun renderScreen() {

@@ -68,6 +68,14 @@ price> Total: $<amount>   # when pricing is configured for active model
 time> <seconds> s
 ```
 
+## Session Memory
+
+- Interactive mode keeps session memory in process only.
+- Each new prompt is sent together with prior successful turns (user + assistant) from the current run.
+- `/reset` clears session memory and the visible transcript.
+- `/config` also resets session memory after applying the new output configuration.
+- Session memory is lost when the app closes.
+
 ## Interactive Commands
 
 - `/help` - show commands
@@ -75,5 +83,5 @@ time> <seconds> s
 - `/model <id|number>` - switch active model (must be listed in `/models`)
 - `/config` - open config menu (ESC to close)
 - `/temp <temperature>` - set OpenAI temperature (`0..2`)
-- `/reset` - clear history
+- `/reset` - clear conversation memory and transcript
 - `/exit` - close app

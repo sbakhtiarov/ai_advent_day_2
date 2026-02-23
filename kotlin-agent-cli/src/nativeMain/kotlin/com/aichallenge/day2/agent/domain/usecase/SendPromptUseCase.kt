@@ -8,12 +8,20 @@ class SendPromptUseCase(
     private val agentRepository: AgentRepository,
 ) {
     suspend fun execute(
+        conversation: List<ConversationMessage>,
+        temperature: Double? = null,
+        model: String? = null,
+    ): AgentResponse {
+        return agentRepository.complete(conversation, temperature, model)
+    }
+
+    suspend fun execute(
         history: List<ConversationMessage>,
         prompt: String,
         temperature: Double? = null,
         model: String? = null,
     ): AgentResponse {
         val conversation = history + ConversationMessage.user(prompt)
-        return agentRepository.complete(conversation, temperature, model)
+        return execute(conversation, temperature, model)
     }
 }
