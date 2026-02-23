@@ -8,8 +8,15 @@ import com.aichallenge.day2.agent.domain.repository.AgentRepository
 class OpenAiAgentRepository(
     private val remoteDataSource: OpenAiRemoteDataSource,
 ) : AgentRepository {
-    override suspend fun complete(conversation: List<ConversationMessage>, temperature: Double?): AgentResponse {
-        val content = remoteDataSource.fetchAssistantReply(conversation, temperature)
-        return AgentResponse(content = content)
+    override suspend fun complete(
+        conversation: List<ConversationMessage>,
+        temperature: Double?,
+        model: String?,
+    ): AgentResponse {
+        val assistantReply = remoteDataSource.fetchAssistantReply(conversation, temperature, model)
+        return AgentResponse(
+            content = assistantReply.content,
+            usage = assistantReply.usage,
+        )
     }
 }

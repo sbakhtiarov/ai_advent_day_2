@@ -36,6 +36,9 @@ private suspend fun runApp(args: Array<String>): Int {
     val controller = ConsoleChatController(
         sendPromptUseCase = container.sendPromptUseCase,
         initialSystemPrompt = config.systemPrompt,
+        initialModel = config.model,
+        availableModels = config.availableModels,
+        modelPricing = config.modelPricing,
     )
 
     return try {
@@ -79,6 +82,8 @@ private fun printEnvironmentHelp() {
         
         Optional configuration (environment variable or local.properties):
           OPENAI_MODEL         default: gpt-4.1-mini
+          OPENAI_MODELS        comma-separated list of allowed models for interactive /model
+          OPENAI_MODEL_PRICING comma-separated per-model rates, format: model=input_per_1m:output_per_1m
           OPENAI_BASE_URL      default: https://api.openai.com/v1
           AGENT_SYSTEM_PROMPT  default: concise pragmatic assistant prompt
         """.trimIndent(),

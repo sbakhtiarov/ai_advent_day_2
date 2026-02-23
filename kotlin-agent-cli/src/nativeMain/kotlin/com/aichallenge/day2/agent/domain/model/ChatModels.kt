@@ -28,7 +28,13 @@ data class ConversationMessage(
     }
 }
 
-data class AgentResponse(
-    val content: String,
+data class TokenUsage(
+    val totalTokens: Int,
+    val inputTokens: Int,
+    val outputTokens: Int,
 )
 
+data class AgentResponse(
+    val content: String,
+    val usage: TokenUsage? = null,
+)

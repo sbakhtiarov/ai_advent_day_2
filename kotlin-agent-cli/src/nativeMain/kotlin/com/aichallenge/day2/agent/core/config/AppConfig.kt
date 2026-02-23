@@ -11,9 +11,16 @@ import platform.posix.fopen
 import platform.posix.getcwd
 import platform.posix.getenv
 
+data class ModelPricing(
+    val inputUsdPer1M: Double,
+    val outputUsdPer1M: Double,
+)
+
 data class AppConfig(
     val apiKey: String,
     val model: String,
+    val availableModels: List<String>,
+    val modelPricing: Map<String, ModelPricing>,
     val baseUrl: String,
     val systemPrompt: String,
 ) {
@@ -33,6 +40,17 @@ data class AppConfig(
             }
 
             val model = readConfig("OPENAI_MODEL", localProperties).orEmpty().trim().ifEmpty { DEFAULT_MODEL }
+            val configuredModelsRaw = readConfig("OPENAI_MODELS", localProperties).orEmpty().trim()
+            val parsedAvailableModels = parseModelList(configuredModelsRaw)
+            val availableModels = if (parsedAvailableModels.isEmpty()) {
+                listOf(model)
+            } else {
+                parsedAvailableModels
+            }
+            require(parsedAvailableModels.isEmpty() || model in parsedAvailableModels) {
+                "OPENAI_MODEL ('$model') must be present in OPENAI_MODELS."
+            }
+            val modelPricing = parseModelPricing(readConfig("OPENAI_MODEL_PRICING", localProperties).orEmpty().trim())
             val baseUrl = readConfig("OPENAI_BASE_URL", localProperties).orEmpty().trim().ifEmpty { DEFAULT_BASE_URL }
             val systemPrompt = readConfig("AGENT_SYSTEM_PROMPT", localProperties)
                 .orEmpty()
@@ -42,6 +60,8 @@ data class AppConfig(
             return AppConfig(
                 apiKey = apiKey,
                 model = model,
+                availableModels = availableModels,
+                modelPricing = modelPricing,
                 baseUrl = baseUrl.trimEnd('/'),
                 systemPrompt = systemPrompt,
             )
@@ -148,6 +168,60 @@ data class AppConfig(
             val startsWithQuote = value.startsWith("\"") && value.endsWith("\"")
             val startsWithSingleQuote = value.startsWith("'") && value.endsWith("'")
             return if (startsWithQuote || startsWithSingleQuote) value.substring(1, value.length - 1) else value
+        }
+
+        private fun parseModelList(raw: String): List<String> {
+            if (raw.isBlank()) return emptyList()
+
+            val uniqueModels = linkedSetOf<String>()
+            raw.split(',')
+                .asSequence()
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+                .forEach { uniqueModels += it }
+            return uniqueModels.toList()
+        }
+
+        private fun parseModelPricing(raw: String): Map<String, ModelPricing> {
+            if (raw.isBlank()) return emptyMap()
+
+            val pricingByModel = linkedMapOf<String, ModelPricing>()
+            raw.split(',')
+                .asSequence()
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+                .forEach { entry ->
+                    val modelAndPricing = entry.split('=', limit = 2)
+                    require(modelAndPricing.size == 2) {
+                        "OPENAI_MODEL_PRICING entry '$entry' must be '<model>=<input_usd_per_1m>:<output_usd_per_1m>'."
+                    }
+
+                    val modelId = modelAndPricing[0].trim()
+                    require(modelId.isNotEmpty()) {
+                        "OPENAI_MODEL_PRICING entry '$entry' has an empty model id."
+                    }
+
+                    val rates = modelAndPricing[1].trim().split(':', limit = 2)
+                    require(rates.size == 2) {
+                        "OPENAI_MODEL_PRICING entry '$entry' must include both input and output rates."
+                    }
+
+                    val inputPrice = rates[0].trim().toDoubleOrNull()
+                    val outputPrice = rates[1].trim().toDoubleOrNull()
+                    require(inputPrice != null && inputPrice >= 0.0) {
+                        "OPENAI_MODEL_PRICING entry '$entry' has invalid input rate '${rates[0]}'."
+                    }
+                    require(outputPrice != null && outputPrice >= 0.0) {
+                        "OPENAI_MODEL_PRICING entry '$entry' has invalid output rate '${rates[1]}'."
+                    }
+
+                    pricingByModel[modelId] = ModelPricing(
+                        inputUsdPer1M = inputPrice,
+                        outputUsdPer1M = outputPrice,
+                    )
+                }
+
+            return pricingByModel
         }
     }
 }

@@ -3,6 +3,7 @@ package com.aichallenge.day2.agent.data.remote
 import com.aichallenge.day2.agent.core.config.AppConfig
 import com.aichallenge.day2.agent.domain.model.ConversationMessage
 import com.aichallenge.day2.agent.domain.model.MessageRole
+import com.aichallenge.day2.agent.domain.model.TokenUsage
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.request.header
@@ -16,10 +17,16 @@ class OpenAiRemoteDataSource(
     private val httpClient: HttpClient,
     private val config: AppConfig,
 ) {
+    data class AssistantReply(
+        val content: String,
+        val usage: TokenUsage? = null,
+    )
+
     suspend fun fetchAssistantReply(
         conversation: List<ConversationMessage>,
         temperature: Double? = null,
-    ): String {
+        model: String? = null,
+    ): AssistantReply {
         require(temperature == null || temperature in 0.0..2.0) {
             "Temperature must be in range 0..2."
         }
@@ -38,7 +45,7 @@ class OpenAiRemoteDataSource(
             contentType(ContentType.Application.Json)
             setBody(
                 ResponsesApiRequest(
-                    model = config.model,
+                    model = model ?: config.model,
                     instructions = instructions,
                     temperature = temperature,
                     input = inputMessages.map { message ->
@@ -69,7 +76,10 @@ class OpenAiRemoteDataSource(
             throw IllegalStateException("OpenAI returned an empty response.")
         }
 
-        return output
+        return AssistantReply(
+            content = output,
+            usage = extractUsage(payload),
+        )
     }
 
     private fun extractOutput(payload: ResponsesApiEnvelope): String {
@@ -81,6 +91,21 @@ class OpenAiRemoteDataSource(
             .mapNotNull { it.text?.trim() }
             .filter { it.isNotEmpty() }
             .joinToString(separator = "\n")
+    }
+
+    private fun extractUsage(payload: ResponsesApiEnvelope): TokenUsage? {
+        val usage = payload.usage ?: return null
+        val inputTokens = usage.inputTokens ?: return null
+        val outputTokens = usage.outputTokens ?: return null
+        val totalTokens = usage.totalTokens ?: (inputTokens + outputTokens)
+        if (totalTokens < 0 || inputTokens < 0 || outputTokens < 0) {
+            return null
+        }
+        return TokenUsage(
+            totalTokens = totalTokens,
+            inputTokens = inputTokens,
+            outputTokens = outputTokens,
+        )
     }
 }
 

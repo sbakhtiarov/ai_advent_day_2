@@ -28,6 +28,17 @@ data class ResponsesApiEnvelope(
     @SerialName("output_text")
     val outputText: String? = null,
     val output: List<OutputItem> = emptyList(),
+    val usage: UsageDetails? = null,
+)
+
+@Serializable
+data class UsageDetails(
+    @SerialName("total_tokens")
+    val totalTokens: Int? = null,
+    @SerialName("input_tokens")
+    val inputTokens: Int? = null,
+    @SerialName("output_tokens")
+    val outputTokens: Int? = null,
 )
 
 @Serializable

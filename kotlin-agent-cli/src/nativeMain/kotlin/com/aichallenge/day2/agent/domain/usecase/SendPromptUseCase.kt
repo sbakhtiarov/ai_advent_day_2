@@ -11,8 +11,9 @@ class SendPromptUseCase(
         history: List<ConversationMessage>,
         prompt: String,
         temperature: Double? = null,
+        model: String? = null,
     ): AgentResponse {
         val conversation = history + ConversationMessage.user(prompt)
-        return agentRepository.complete(conversation, temperature)
+        return agentRepository.complete(conversation, temperature, model)
     }
 }

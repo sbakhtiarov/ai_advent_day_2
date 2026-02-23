@@ -1,11 +1,19 @@
 package com.aichallenge.day2.agent.presentation.cli
 
+import com.aichallenge.day2.agent.core.config.ModelPricing
 import com.aichallenge.day2.agent.domain.model.ConversationMessage
+import com.aichallenge.day2.agent.domain.model.TokenUsage
 import com.aichallenge.day2.agent.domain.usecase.SendPromptUseCase
+import kotlin.math.abs
+import kotlin.math.roundToLong
+import kotlin.time.TimeSource
 
 class ConsoleChatController(
     private val sendPromptUseCase: SendPromptUseCase,
     initialSystemPrompt: String,
+    initialModel: String,
+    availableModels: List<String>,
+    private val modelPricing: Map<String, ModelPricing>,
     private val io: CliIO = StdCliIO,
 ) {
     private val configTabs = listOf("Format", "Size", "Stop")
@@ -17,10 +25,18 @@ class ConsoleChatController(
     private var baseSystemPrompt = initialSystemPrompt
     private var configSelection = ConfigMenuSelection.default()
     private var systemPrompt = buildSystemPrompt(baseSystemPrompt, configSelection)
+    private val availableModelIds = availableModels.distinct().ifEmpty { listOf(initialModel) }
+    private var currentModel = initialModel
     private var temperature: Double? = null
     private val history = mutableListOf(ConversationMessage.system(systemPrompt))
     private val dialogBlocks = mutableListOf<String>()
     private val inputDivider = "─".repeat(80)
+
+    init {
+        require(currentModel in availableModelIds) {
+            "Initial model must be present in available models."
+        }
+    }
 
     suspend fun runInteractive() {
         try {
@@ -63,8 +79,10 @@ class ConsoleChatController(
         }
 
         return runCatching {
-            val response = sendPromptUseCase.execute(history, prompt, temperature)
-            io.writeLine(formatAssistantResponse(response.content))
+            val startedAt = TimeSource.Monotonic.markNow()
+            val response = sendPromptUseCase.execute(history, prompt, temperature, currentModel)
+            val elapsedSeconds = startedAt.elapsedNow().inWholeMilliseconds / 1000.0
+            io.writeLine(formatAssistantResponse(response.content, response.usage, elapsedSeconds))
             0
         }.getOrElse { throwable ->
             io.writeLine("error> ${throwable.message ?: "Unexpected error"}")
@@ -76,10 +94,12 @@ class ConsoleChatController(
         dialogBlocks += formatUserPrompt(prompt)
 
         runCatching {
-            val response = sendPromptUseCase.execute(history, prompt, temperature)
+            val startedAt = TimeSource.Monotonic.markNow()
+            val response = sendPromptUseCase.execute(history, prompt, temperature, currentModel)
+            val elapsedSeconds = startedAt.elapsedNow().inWholeMilliseconds / 1000.0
             history += ConversationMessage.user(prompt)
             history += ConversationMessage.assistant(response.content)
-            dialogBlocks += formatAssistantResponse(response.content)
+            dialogBlocks += formatAssistantResponse(response.content, response.usage, elapsedSeconds)
         }.onFailure { throwable ->
             dialogBlocks += "error> ${throwable.message ?: "Unexpected error"}"
         }
@@ -89,6 +109,16 @@ class ConsoleChatController(
         return when {
             input == "/help" -> {
                 dialogBlocks += helpText()
+                true
+            }
+
+            input == "/models" -> {
+                dialogBlocks += modelsText()
+                true
+            }
+
+            isModelCommand(input) -> {
+                handleModelCommand(input)
                 true
             }
 
@@ -138,7 +168,7 @@ class ConsoleChatController(
         io.writeLine(logoBanner())
         io.writeLine()
         io.writeLine("    type your prompt and press Enter")
-        io.writeLine("    commands: /help, /config, /temp <0..2>, /reset, /exit")
+        io.writeLine("    commands: /help, /models, /model <id|number>, /config, /temp <0..2>, /reset, /exit")
         io.writeLine()
 
         dialogBlocks.forEachIndexed { index, block ->
@@ -165,11 +195,59 @@ class ConsoleChatController(
     private fun helpText(): String = """
         Available commands:
         /help                show this help message
+        /models              list configured models
+        /model <id|number>   switch active model (must be from /models)
         /config              open config menu (ESC to close)
         /temp <temperature>  set response temperature (0..2)
         /reset               clear conversation and keep current system prompt
         /exit                close the application
     """.trimIndent()
+
+    private fun modelsText(): String = buildString {
+        appendLine("Available models:")
+        availableModelIds.forEachIndexed { index, modelId ->
+            val marker = if (modelId == currentModel) " * " else "   "
+            appendLine("$marker${index + 1}. $modelId")
+        }
+    }.trimEnd()
+
+    private fun isModelCommand(input: String): Boolean {
+        return input == "/model" || input.startsWith("/model ")
+    }
+
+    private fun handleModelCommand(input: String) {
+        val parts = input.trim().split(Regex("\\s+"), limit = 2)
+        if (parts.size != 2 || parts[1].isBlank()) {
+            dialogBlocks += "system> usage: /model <id|number>. Current model: $currentModel"
+            return
+        }
+
+        val requestedModelArg = parts[1].trim()
+        val requestedModel = resolveRequestedModel(requestedModelArg)
+        if (requestedModel == null) {
+            dialogBlocks += "system> unknown model '$requestedModelArg'. Run /models to view configured models."
+            return
+        }
+
+        if (requestedModel == currentModel) {
+            dialogBlocks += "system> model '$requestedModel' is already active"
+            return
+        }
+
+        currentModel = requestedModel
+        dialogBlocks += "system> model switched to '$requestedModel'"
+    }
+
+    private fun resolveRequestedModel(argument: String): String? {
+        val index = argument.toIntOrNull()
+        if (index != null) {
+            if (index !in 1..availableModelIds.size) {
+                return null
+            }
+            return availableModelIds[index - 1]
+        }
+        return availableModelIds.firstOrNull { it == argument }
+    }
 
     private fun handleTemperatureCommand(input: String) {
         val parts = input.trim().split(Regex("\\s+"), limit = 2)
@@ -221,24 +299,73 @@ class ConsoleChatController(
         }
     }
 
-    private fun formatAssistantResponse(text: String): String {
+    private fun formatAssistantResponse(text: String, usage: TokenUsage?, elapsedSeconds: Double): String {
         val marker = "⏺ "
         val indent = " ".repeat(marker.length)
         val lines = text.lines()
 
-        if (lines.isEmpty()) {
-            return marker.trimEnd()
-        }
-
-        return buildString {
+        val content = buildString {
             append(marker)
-            append(lines.first())
+            append(lines.firstOrNull().orEmpty())
             lines.drop(1).forEach { line ->
                 append('\n')
                 append(indent)
                 append(line)
             }
         }
+
+        return buildString {
+            append(content)
+            append('\n')
+            append('\n')
+            append(indent)
+            append(formatTokenUsage(usage))
+            append('\n')
+            append(indent)
+            append(formatResponsePrice(usage))
+            append('\n')
+            append(indent)
+            append(formatResponseTime(elapsedSeconds))
+        }
+    }
+
+    private fun formatTokenUsage(usage: TokenUsage?): String {
+        return if (usage == null) {
+            "tokens> Total: n/a | Input: n/a | Output: n/a"
+        } else {
+            "tokens> Total: ${usage.totalTokens} | Input: ${usage.inputTokens} | Output: ${usage.outputTokens}"
+        }
+    }
+
+    private fun formatResponsePrice(usage: TokenUsage?): String {
+        val modelRate = modelPricing[currentModel]
+        if (usage == null) {
+            return "price> n/a (token usage unavailable)"
+        }
+        if (modelRate == null) {
+            return "price> n/a (pricing not configured for '$currentModel')"
+        }
+
+        val inputCost = usage.inputTokens * modelRate.inputUsdPer1M / TOKENS_PER_MILLION
+        val outputCost = usage.outputTokens * modelRate.outputUsdPer1M / TOKENS_PER_MILLION
+        val totalCost = inputCost + outputCost
+        return "price> Total: $${formatUsd(totalCost)}"
+    }
+
+    private fun formatUsd(amount: Double): String {
+        val scaled = (amount * PRICE_DECIMAL_SCALE).roundToLong()
+        val sign = if (scaled < 0) "-" else ""
+        val absoluteScaled = abs(scaled)
+        val dollars = absoluteScaled / PRICE_DECIMAL_SCALE
+        val fraction = (absoluteScaled % PRICE_DECIMAL_SCALE).toString().padStart(PRICE_DECIMAL_DIGITS, '0')
+        return "$sign$dollars.$fraction"
+    }
+
+    private fun formatResponseTime(elapsedSeconds: Double): String {
+        val scaled = (elapsedSeconds * TIME_DECIMAL_SCALE).roundToLong().coerceAtLeast(0L)
+        val seconds = scaled / TIME_DECIMAL_SCALE
+        val fraction = (scaled % TIME_DECIMAL_SCALE).toString().padStart(TIME_DECIMAL_DIGITS, '0')
+        return "time> $seconds.$fraction s"
     }
 
     private fun buildSystemPrompt(
@@ -266,5 +393,13 @@ class ConsoleChatController(
         OutputFormatOption.MARKDOWN -> "Markdown"
         OutputFormatOption.JSON -> "JSON"
         OutputFormatOption.TABLE -> "Table"
+    }
+
+    companion object {
+        private const val TOKENS_PER_MILLION = 1_000_000.0
+        private const val PRICE_DECIMAL_SCALE = 1_000_000L
+        private const val PRICE_DECIMAL_DIGITS = 6
+        private const val TIME_DECIMAL_SCALE = 100L
+        private const val TIME_DECIMAL_DIGITS = 2
     }
 }
