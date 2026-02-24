@@ -68,4 +68,36 @@ class SessionMemoryTest {
             memory.snapshot(),
         )
     }
+
+    @Test
+    fun restoreUsesPersistedMessagesWhenSnapshotIsValid() {
+        val memory = SessionMemory(initialSystemPrompt = "initial system")
+        val persistedMessages = listOf(
+            ConversationMessage.system("persisted system"),
+            ConversationMessage.user("question"),
+            ConversationMessage.assistant("answer"),
+        )
+
+        val restored = memory.restore(persistedMessages)
+
+        assertEquals(true, restored)
+        assertEquals(persistedMessages, memory.snapshot())
+    }
+
+    @Test
+    fun restoreFallsBackToSystemOnlyWhenSnapshotIsInvalid() {
+        val memory = SessionMemory(initialSystemPrompt = "system one")
+        val invalidMessages = listOf(
+            ConversationMessage.system("persisted system"),
+            ConversationMessage.assistant("answer first"),
+        )
+
+        val restored = memory.restore(invalidMessages)
+
+        assertEquals(false, restored)
+        assertEquals(
+            listOf(ConversationMessage.system("system one")),
+            memory.snapshot(),
+        )
+    }
 }

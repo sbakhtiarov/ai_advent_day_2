@@ -2,6 +2,7 @@ package com.aichallenge.day2.agent
 
 import com.aichallenge.day2.agent.core.config.AppConfig
 import com.aichallenge.day2.agent.core.di.AppContainer
+import com.aichallenge.day2.agent.data.local.JsonFileSessionMemoryStore
 import com.aichallenge.day2.agent.presentation.cli.ConsoleChatController
 import kotlinx.coroutines.runBlocking
 import kotlin.system.exitProcess
@@ -33,12 +34,20 @@ private suspend fun runApp(args: Array<String>): Int {
     }
 
     val container = AppContainer(config)
+    val isInteractiveMode = prompt == null
+    val sessionMemoryStore = if (isInteractiveMode) {
+        JsonFileSessionMemoryStore.fromDefaultLocation()
+    } else {
+        null
+    }
     val controller = ConsoleChatController(
         sendPromptUseCase = container.sendPromptUseCase,
         initialSystemPrompt = config.systemPrompt,
         initialModel = config.model,
         availableModels = config.availableModels,
         modelPricing = config.modelPricing,
+        sessionMemoryStore = sessionMemoryStore,
+        persistentMemoryEnabled = isInteractiveMode,
     )
 
     return try {

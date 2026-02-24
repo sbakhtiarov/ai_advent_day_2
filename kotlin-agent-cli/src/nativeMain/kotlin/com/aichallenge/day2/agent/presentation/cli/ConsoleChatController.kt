@@ -3,6 +3,7 @@ package com.aichallenge.day2.agent.presentation.cli
 import com.aichallenge.day2.agent.core.config.ModelPricing
 import com.aichallenge.day2.agent.domain.model.SessionMemory
 import com.aichallenge.day2.agent.domain.model.TokenUsage
+import com.aichallenge.day2.agent.domain.repository.SessionMemoryStore
 import com.aichallenge.day2.agent.domain.usecase.SendPromptUseCase
 import kotlin.math.abs
 import kotlin.math.roundToLong
@@ -15,6 +16,8 @@ class ConsoleChatController(
     availableModels: List<String>,
     private val modelPricing: Map<String, ModelPricing>,
     private val io: CliIO = StdCliIO,
+    private val sessionMemoryStore: SessionMemoryStore? = null,
+    private val persistentMemoryEnabled: Boolean = true,
 ) {
     private val configTabs = listOf("Format", "Size", "Stop")
     private val configDescriptions = listOf(
@@ -31,6 +34,7 @@ class ConsoleChatController(
     private val sessionMemory = SessionMemory(systemPrompt)
     private val dialogBlocks = mutableListOf<String>()
     private val inputDivider = "─".repeat(80)
+    private var persistentMemoryInitialized = false
 
     init {
         require(currentModel in availableModelIds) {
@@ -39,6 +43,8 @@ class ConsoleChatController(
     }
 
     suspend fun runInteractive() {
+        initializePersistentMemory()
+
         try {
             while (true) {
                 renderScreen()
@@ -106,6 +112,7 @@ class ConsoleChatController(
             )
             val elapsedSeconds = startedAt.elapsedNow().inWholeMilliseconds / 1000.0
             sessionMemory.recordSuccessfulTurn(prompt, response.content)
+            persistMemorySnapshot()
             dialogBlocks += formatAssistantResponse(response.content, response.usage, elapsedSeconds)
         }.onFailure { throwable ->
             dialogBlocks += "error> ${throwable.message ?: "Unexpected error"}"
@@ -137,12 +144,14 @@ class ConsoleChatController(
                 )
                 systemPrompt = buildSystemPrompt(baseSystemPrompt, configSelection)
                 resetConversation()
+                persistMemorySnapshot()
                 dialogBlocks += "system> configuration applied"
                 true
             }
 
             input == "/reset" -> {
                 resetConversation()
+                clearPersistedMemory()
                 dialogBlocks.clear()
                 dialogBlocks += "system> conversation has been reset"
                 true
@@ -164,6 +173,36 @@ class ConsoleChatController(
 
     private fun resetConversation() {
         sessionMemory.reset(systemPrompt)
+    }
+
+    private fun initializePersistentMemory() {
+        if (!persistentMemoryEnabled || persistentMemoryInitialized) {
+            return
+        }
+
+        persistentMemoryInitialized = true
+        val persistedSnapshot = runCatching { sessionMemoryStore?.load() }.getOrNull() ?: return
+        sessionMemory.restore(persistedSnapshot)
+    }
+
+    private fun persistMemorySnapshot() {
+        if (!persistentMemoryEnabled) {
+            return
+        }
+
+        runCatching {
+            sessionMemoryStore?.save(sessionMemory.snapshot())
+        }
+    }
+
+    private fun clearPersistedMemory() {
+        if (!persistentMemoryEnabled) {
+            return
+        }
+
+        runCatching {
+            sessionMemoryStore?.clear()
+        }
     }
 
     private fun renderScreen() {
