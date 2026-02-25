@@ -65,10 +65,11 @@ time> <seconds> s
 ## Session Memory
 
 - Interactive mode keeps session memory in process and persists it to `~/.kotlin-agent-cli/session-memory.json`.
+- Session snapshot persistence includes both conversation messages and a context-usage estimate.
 - On interactive startup, the app restores persisted memory exactly as previously saved.
 - Each successful prompt turn is persisted immediately.
 - `/config` resets session memory after applying output configuration and persists the reset state.
-- `/reset` clears in-memory session memory, clears the visible transcript, and deletes persisted memory.
+- `/reset` clears in-memory session memory, clears the visible transcript, and persists the reset state.
 - One-shot mode (`--prompt`) does not read or write persistent memory.
 - If persistence read/write fails, the app continues with in-memory session behavior.
 
@@ -77,7 +78,8 @@ time> <seconds> s
 - `/help` - show commands
 - `/models` - list built-in models with active marker, context window, and pricing
 - `/model <id|number>` - switch active model (must be listed in `/models`)
+- `/memory` - show estimated session-memory context usage
 - `/config` - open config menu (ESC to close)
 - `/temp <temperature>` - set OpenAI temperature (`0..2`)
-- `/reset` - clear conversation memory, transcript, and persisted session memory
+- `/reset` - clear conversation memory and transcript, then persist the reset state
 - `/exit` - close app

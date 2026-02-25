@@ -1,12 +1,18 @@
 package com.aichallenge.day2.agent.presentation.cli
 
 import com.aichallenge.day2.agent.core.config.ModelProperties
+import com.aichallenge.day2.agent.domain.model.ConversationMessage
+import com.aichallenge.day2.agent.domain.model.MemoryEstimateSource
+import com.aichallenge.day2.agent.domain.model.MemoryUsageSnapshot
 import com.aichallenge.day2.agent.domain.model.SessionMemory
+import com.aichallenge.day2.agent.domain.model.SessionMemoryState
 import com.aichallenge.day2.agent.domain.model.TokenUsage
 import com.aichallenge.day2.agent.domain.repository.SessionMemoryStore
 import com.aichallenge.day2.agent.domain.usecase.SendPromptUseCase
 import kotlin.math.abs
+import kotlin.math.ceil
 import kotlin.math.roundToLong
+import kotlin.math.roundToInt
 import kotlin.time.TimeSource
 
 class ConsoleChatController(
@@ -32,6 +38,7 @@ class ConsoleChatController(
     private var currentModel = initialModel
     private var temperature: Double? = null
     private val sessionMemory = SessionMemory(systemPrompt)
+    private var memoryUsageSnapshot = estimateHeuristicUsage(sessionMemory.snapshot())
     private val dialogBlocks = mutableListOf<String>()
     private val inputDivider = "─".repeat(80)
     private var persistentMemoryInitialized = false
@@ -112,6 +119,11 @@ class ConsoleChatController(
             )
             val elapsedSeconds = startedAt.elapsedNow().inWholeMilliseconds / 1000.0
             sessionMemory.recordSuccessfulTurn(prompt, response.content)
+            memoryUsageSnapshot = buildUsageSnapshotAfterSuccessfulTurn(
+                responseContent = response.content,
+                usage = response.usage,
+                messages = sessionMemory.snapshot(),
+            )
             persistMemorySnapshot()
             dialogBlocks += formatAssistantResponse(response.content, response.usage, elapsedSeconds)
         }.onFailure { throwable ->
@@ -128,6 +140,11 @@ class ConsoleChatController(
 
             input == "/models" -> {
                 dialogBlocks += modelsText()
+                true
+            }
+
+            input == "/memory" -> {
+                dialogBlocks += memoryUsageText()
                 true
             }
 
@@ -151,7 +168,7 @@ class ConsoleChatController(
 
             input == "/reset" -> {
                 resetConversation()
-                clearPersistedMemory()
+                persistMemorySnapshot()
                 dialogBlocks.clear()
                 dialogBlocks += "system> conversation has been reset"
                 true
@@ -173,6 +190,7 @@ class ConsoleChatController(
 
     private fun resetConversation() {
         sessionMemory.reset(systemPrompt)
+        memoryUsageSnapshot = estimateHeuristicUsage(sessionMemory.snapshot())
     }
 
     private fun initializePersistentMemory() {
@@ -181,8 +199,15 @@ class ConsoleChatController(
         }
 
         persistentMemoryInitialized = true
-        val persistedSnapshot = runCatching { sessionMemoryStore?.load() }.getOrNull() ?: return
-        sessionMemory.restore(persistedSnapshot)
+        val persistedState = runCatching { sessionMemoryStore?.load() }.getOrNull() ?: return
+        val restored = sessionMemory.restore(persistedState.messages)
+        memoryUsageSnapshot = if (!restored) {
+            estimateHeuristicUsage(sessionMemory.snapshot())
+        } else {
+            persistedState.usage?.takeIf { usage ->
+                usage.estimatedTokens > 0 && usage.messageCount == persistedState.messages.size
+            } ?: estimateHeuristicUsage(sessionMemory.snapshot())
+        }
     }
 
     private fun persistMemorySnapshot() {
@@ -190,18 +215,12 @@ class ConsoleChatController(
             return
         }
 
+        val state = SessionMemoryState(
+            messages = sessionMemory.snapshot(),
+            usage = memoryUsageSnapshot,
+        )
         runCatching {
-            sessionMemoryStore?.save(sessionMemory.snapshot())
-        }
-    }
-
-    private fun clearPersistedMemory() {
-        if (!persistentMemoryEnabled) {
-            return
-        }
-
-        runCatching {
-            sessionMemoryStore?.clear()
+            sessionMemoryStore?.save(state)
         }
     }
 
@@ -213,7 +232,7 @@ class ConsoleChatController(
         io.writeLine(logoBanner())
         io.writeLine()
         io.writeLine("    type your prompt and press Enter")
-        io.writeLine("    commands: /help, /models, /model <id|number>, /config, /temp <0..2>, /reset, /exit")
+        io.writeLine("    commands: /help, /models, /model <id|number>, /memory, /config, /temp <0..2>, /reset, /exit")
         io.writeLine()
 
         dialogBlocks.forEachIndexed { index, block ->
@@ -242,6 +261,7 @@ class ConsoleChatController(
         /help                show this help message
         /models              list available built-in models
         /model <id|number>   switch active model (must be from /models)
+        /memory              show session-memory context usage
         /config              open config menu (ESC to close)
         /temp <temperature>  set response temperature (0..2)
         /reset               clear conversation and keep current system prompt
@@ -267,6 +287,49 @@ class ConsoleChatController(
             )
         }
     }.trimEnd()
+
+    private fun memoryUsageText(): String {
+        val usedTokens = memoryUsageSnapshot.estimatedTokens.coerceAtLeast(0)
+        val contextWindow = modelById[currentModel]?.contextWindowTokens
+        if (contextWindow == null || contextWindow <= 0) {
+            return """
+                memory> Model: $currentModel
+                memory> Used: ${formatIntWithGrouping(usedTokens)}/n/a (n/a) | Remaining: n/a
+                memory> [${"-".repeat(MEMORY_BAR_WIDTH)}]
+                memory> Estimate: ${memoryEstimateLabel(memoryUsageSnapshot.source)}
+            """.trimIndent()
+        }
+
+        val remainingTokens = (contextWindow - usedTokens).coerceAtLeast(0)
+        val percentUsed = usedTokens * 100.0 / contextWindow
+        return """
+            memory> Model: $currentModel
+            memory> Used: ${formatIntWithGrouping(usedTokens)}/${formatIntWithGrouping(contextWindow)} (${formatPercentage(percentUsed)}) | Remaining: ${formatIntWithGrouping(remainingTokens)}
+            memory> [${buildMemoryUsageBar(usedTokens, contextWindow)}]
+            memory> Estimate: ${memoryEstimateLabel(memoryUsageSnapshot.source)}
+        """.trimIndent()
+    }
+
+    private fun memoryEstimateLabel(source: MemoryEstimateSource): String = when (source) {
+        MemoryEstimateSource.HYBRID -> "hybrid (usage+assistant)"
+        MemoryEstimateSource.HEURISTIC -> "heuristic (text-length)"
+    }
+
+    private fun buildMemoryUsageBar(usedTokens: Int, contextWindowTokens: Int): String {
+        if (contextWindowTokens <= 0) {
+            return "-".repeat(MEMORY_BAR_WIDTH)
+        }
+        val ratio = (usedTokens.toDouble() / contextWindowTokens).coerceIn(0.0, 1.0)
+        val filled = (ratio * MEMORY_BAR_WIDTH).roundToInt().coerceIn(0, MEMORY_BAR_WIDTH)
+        return "#".repeat(filled) + "-".repeat(MEMORY_BAR_WIDTH - filled)
+    }
+
+    private fun formatPercentage(percent: Double): String {
+        val scaled = (percent * PERCENT_DECIMAL_SCALE).roundToLong().coerceAtLeast(0L)
+        val integral = scaled / PERCENT_DECIMAL_SCALE
+        val fraction = (scaled % PERCENT_DECIMAL_SCALE).toString().padStart(PERCENT_DECIMAL_DIGITS, '0')
+        return "$integral.$fraction%"
+    }
 
     private fun isModelCommand(input: String): Boolean {
         return input == "/model" || input.startsWith("/model ")
@@ -354,6 +417,49 @@ class ConsoleChatController(
                 append(line)
             }
         }
+    }
+
+    private fun buildUsageSnapshotAfterSuccessfulTurn(
+        responseContent: String,
+        usage: TokenUsage?,
+        messages: List<ConversationMessage>,
+    ): MemoryUsageSnapshot {
+        if (usage == null) {
+            return estimateHeuristicUsage(messages)
+        }
+
+        val estimatedTokens = (usage.inputTokens + estimateMessageTokens(responseContent)).coerceAtLeast(1)
+        return MemoryUsageSnapshot(
+            estimatedTokens = estimatedTokens,
+            source = MemoryEstimateSource.HYBRID,
+            messageCount = messages.size,
+        )
+    }
+
+    private fun estimateHeuristicUsage(messages: List<ConversationMessage>): MemoryUsageSnapshot {
+        val estimatedTokens = estimateSessionTokensHeuristically(messages).coerceAtLeast(1)
+        return MemoryUsageSnapshot(
+            estimatedTokens = estimatedTokens,
+            source = MemoryEstimateSource.HEURISTIC,
+            messageCount = messages.size,
+        )
+    }
+
+    private fun estimateSessionTokensHeuristically(messages: List<ConversationMessage>): Int {
+        return REQUEST_OVERHEAD_TOKENS + messages.sumOf { message ->
+            estimateMessageTokens(message.content)
+        }
+    }
+
+    private fun estimateMessageTokens(content: String): Int {
+        return MESSAGE_OVERHEAD_TOKENS + estimateTextTokens(content)
+    }
+
+    private fun estimateTextTokens(text: String): Int {
+        if (text.isEmpty()) {
+            return 0
+        }
+        return ceil(text.length / CHARS_PER_TOKEN).toInt()
     }
 
     private fun formatAssistantResponse(text: String, usage: TokenUsage?, elapsedSeconds: Double): String {
@@ -481,5 +587,11 @@ class ConsoleChatController(
         private const val RATE_DECIMAL_DIGITS = 2
         private const val TIME_DECIMAL_SCALE = 100L
         private const val TIME_DECIMAL_DIGITS = 2
+        private const val PERCENT_DECIMAL_SCALE = 10L
+        private const val PERCENT_DECIMAL_DIGITS = 1
+        private const val MEMORY_BAR_WIDTH = 20
+        private const val REQUEST_OVERHEAD_TOKENS = 3
+        private const val MESSAGE_OVERHEAD_TOKENS = 4
+        private const val CHARS_PER_TOKEN = 4.0
     }
 }

@@ -1,6 +1,6 @@
 package com.aichallenge.day2.agent.data.local
 
-import com.aichallenge.day2.agent.domain.model.ConversationMessage
+import com.aichallenge.day2.agent.domain.model.SessionMemoryState
 import com.aichallenge.day2.agent.domain.repository.SessionMemoryStore
 import kotlinx.cinterop.ByteVar
 import kotlinx.cinterop.ExperimentalForeignApi
@@ -27,7 +27,7 @@ class JsonFileSessionMemoryStore(
     private val filePath: String,
     private val json: Json = defaultJson(),
 ) : SessionMemoryStore {
-    override fun load(): List<ConversationMessage>? {
+    override fun load(): SessionMemoryState? {
         val fileContents = readTextFile(filePath) ?: return null
         val snapshot = runCatching {
             json.decodeFromString<SessionMemorySnapshotDto>(fileContents)
@@ -37,14 +37,11 @@ class JsonFileSessionMemoryStore(
             return null
         }
 
-        return snapshot.messages.map { it.toDomainModel() }
+        return snapshot.toDomainModel()
     }
 
-    override fun save(messages: List<ConversationMessage>) {
-        val snapshot = SessionMemorySnapshotDto(
-            version = SNAPSHOT_VERSION,
-            messages = messages.map { it.toPersistedDto() },
-        )
+    override fun save(state: SessionMemoryState) {
+        val snapshot = state.toPersistedDto(version = SNAPSHOT_VERSION)
         val payload = json.encodeToString(snapshot)
         ensureParentDirectoryExists(filePath)
         writeTextFile(filePath, payload)

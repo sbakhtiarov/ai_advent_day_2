@@ -1,6 +1,9 @@
 package com.aichallenge.day2.agent.data.local
 
 import com.aichallenge.day2.agent.domain.model.ConversationMessage
+import com.aichallenge.day2.agent.domain.model.MemoryEstimateSource
+import com.aichallenge.day2.agent.domain.model.MemoryUsageSnapshot
+import com.aichallenge.day2.agent.domain.model.SessionMemoryState
 import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -16,7 +19,7 @@ import platform.posix.mode_t
 
 class JsonFileSessionMemoryStoreTest {
     @Test
-    fun saveAndLoadRoundTripPreservesMessageOrder() {
+    fun saveAndLoadRoundTripPreservesState() {
         val filePath = uniqueSessionMemoryPath()
         val store = JsonFileSessionMemoryStore(filePath)
         val messages = listOf(
@@ -26,10 +29,18 @@ class JsonFileSessionMemoryStoreTest {
             ConversationMessage.user("question 2"),
             ConversationMessage.assistant("answer 2"),
         )
+        val state = SessionMemoryState(
+            messages = messages,
+            usage = MemoryUsageSnapshot(
+                estimatedTokens = 123,
+                source = MemoryEstimateSource.HYBRID,
+                messageCount = messages.size,
+            ),
+        )
 
-        store.save(messages)
+        store.save(state)
 
-        assertEquals(messages, store.load())
+        assertEquals(state, store.load())
     }
 
     @Test
@@ -59,12 +70,45 @@ class JsonFileSessionMemoryStoreTest {
             ConversationMessage.user("question"),
             ConversationMessage.assistant("answer"),
         )
-        store.save(messages)
+        val state = SessionMemoryState(messages = messages, usage = null)
+        store.save(state)
 
         store.clear()
         store.clear()
 
         assertEquals(null, store.load())
+    }
+
+    @Test
+    fun loadLegacySnapshotWithoutMemoryUsage() {
+        val filePath = uniqueSessionMemoryPath()
+        ensureDirectoryExists(parentDirectory(filePath))
+        writeTextFile(
+            filePath,
+            """
+            {
+              "version": 1,
+              "messages": [
+                {"role":"SYSTEM","content":"system"},
+                {"role":"USER","content":"question"},
+                {"role":"ASSISTANT","content":"answer"}
+              ]
+            }
+            """.trimIndent(),
+        )
+        val store = JsonFileSessionMemoryStore(filePath)
+
+        assertEquals(
+            SessionMemoryState(
+                messages = listOf(
+                    ConversationMessage.system("system"),
+                    ConversationMessage.user("question"),
+                    ConversationMessage.assistant("answer"),
+                ),
+                usage = null,
+            ),
+            store.load(),
+        )
     }
 }
 

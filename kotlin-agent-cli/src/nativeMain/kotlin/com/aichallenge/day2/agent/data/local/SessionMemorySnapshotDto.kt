@@ -1,13 +1,17 @@
 package com.aichallenge.day2.agent.data.local
 
 import com.aichallenge.day2.agent.domain.model.ConversationMessage
+import com.aichallenge.day2.agent.domain.model.MemoryEstimateSource
+import com.aichallenge.day2.agent.domain.model.MemoryUsageSnapshot
 import com.aichallenge.day2.agent.domain.model.MessageRole
+import com.aichallenge.day2.agent.domain.model.SessionMemoryState
 import kotlinx.serialization.Serializable
 
 @Serializable
 data class SessionMemorySnapshotDto(
     val version: Int,
     val messages: List<PersistedConversationMessageDto>,
+    val memoryUsage: PersistedMemoryUsageSnapshotDto? = null,
 )
 
 @Serializable
@@ -22,6 +26,30 @@ enum class PersistedMessageRole {
     USER,
     ASSISTANT,
 }
+
+@Serializable
+data class PersistedMemoryUsageSnapshotDto(
+    val estimatedTokens: Int,
+    val source: PersistedMemoryEstimateSource,
+    val messageCount: Int,
+)
+
+@Serializable
+enum class PersistedMemoryEstimateSource {
+    HYBRID,
+    HEURISTIC,
+}
+
+fun SessionMemoryState.toPersistedDto(version: Int): SessionMemorySnapshotDto = SessionMemorySnapshotDto(
+    version = version,
+    messages = messages.map { it.toPersistedDto() },
+    memoryUsage = usage?.toPersistedDto(),
+)
+
+fun SessionMemorySnapshotDto.toDomainModel(): SessionMemoryState = SessionMemoryState(
+    messages = messages.map { it.toDomainModel() },
+    usage = memoryUsage?.toDomainModel(),
+)
 
 fun ConversationMessage.toPersistedDto(): PersistedConversationMessageDto = PersistedConversationMessageDto(
     role = role.toPersistedRole(),
@@ -43,4 +71,26 @@ private fun PersistedMessageRole.toDomainRole(): MessageRole = when (this) {
     PersistedMessageRole.SYSTEM -> MessageRole.SYSTEM
     PersistedMessageRole.USER -> MessageRole.USER
     PersistedMessageRole.ASSISTANT -> MessageRole.ASSISTANT
+}
+
+private fun MemoryUsageSnapshot.toPersistedDto(): PersistedMemoryUsageSnapshotDto = PersistedMemoryUsageSnapshotDto(
+    estimatedTokens = estimatedTokens,
+    source = source.toPersistedSource(),
+    messageCount = messageCount,
+)
+
+private fun PersistedMemoryUsageSnapshotDto.toDomainModel(): MemoryUsageSnapshot = MemoryUsageSnapshot(
+    estimatedTokens = estimatedTokens,
+    source = source.toDomainSource(),
+    messageCount = messageCount,
+)
+
+private fun MemoryEstimateSource.toPersistedSource(): PersistedMemoryEstimateSource = when (this) {
+    MemoryEstimateSource.HYBRID -> PersistedMemoryEstimateSource.HYBRID
+    MemoryEstimateSource.HEURISTIC -> PersistedMemoryEstimateSource.HEURISTIC
+}
+
+private fun PersistedMemoryEstimateSource.toDomainSource(): MemoryEstimateSource = when (this) {
+    PersistedMemoryEstimateSource.HYBRID -> MemoryEstimateSource.HYBRID
+    PersistedMemoryEstimateSource.HEURISTIC -> MemoryEstimateSource.HEURISTIC
 }

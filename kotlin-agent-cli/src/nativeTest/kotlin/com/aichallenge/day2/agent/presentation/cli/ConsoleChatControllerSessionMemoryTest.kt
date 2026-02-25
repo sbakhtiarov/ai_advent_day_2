@@ -4,7 +4,11 @@ import com.aichallenge.day2.agent.core.config.ModelPricing
 import com.aichallenge.day2.agent.core.config.ModelProperties
 import com.aichallenge.day2.agent.domain.model.AgentResponse
 import com.aichallenge.day2.agent.domain.model.ConversationMessage
+import com.aichallenge.day2.agent.domain.model.MemoryEstimateSource
+import com.aichallenge.day2.agent.domain.model.MemoryUsageSnapshot
 import com.aichallenge.day2.agent.domain.model.MessageRole
+import com.aichallenge.day2.agent.domain.model.SessionMemoryState
+import com.aichallenge.day2.agent.domain.model.TokenUsage
 import com.aichallenge.day2.agent.domain.repository.AgentRepository
 import com.aichallenge.day2.agent.domain.repository.SessionMemoryStore
 import com.aichallenge.day2.agent.domain.usecase.SendPromptUseCase
@@ -13,6 +17,7 @@ import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
+import kotlin.test.assertNotNull
 
 class ConsoleChatControllerSessionMemoryTest {
     @Test
@@ -60,10 +65,17 @@ class ConsoleChatControllerSessionMemoryTest {
             ),
         )
         val store = RecordingSessionMemoryStore(
-            loadedMessages = listOf(
-                ConversationMessage.system("persisted system"),
-                ConversationMessage.user("old question"),
-                ConversationMessage.assistant("old answer"),
+            loadedState = SessionMemoryState(
+                messages = listOf(
+                    ConversationMessage.system("persisted system"),
+                    ConversationMessage.user("old question"),
+                    ConversationMessage.assistant("old answer"),
+                ),
+                usage = MemoryUsageSnapshot(
+                    estimatedTokens = 300,
+                    source = MemoryEstimateSource.HYBRID,
+                    messageCount = 3,
+                ),
             ),
         )
         val controller = createController(
@@ -118,10 +130,19 @@ class ConsoleChatControllerSessionMemoryTest {
     }
 
     @Test
-    fun successfulTurnPersistsSnapshot() = runBlocking {
+    fun successfulTurnPersistsHybridUsageSnapshot() = runBlocking {
         val repository = RecordingAgentRepository(
             responses = listOf(
-                Result.success(AgentResponse(content = "answer one")),
+                Result.success(
+                    AgentResponse(
+                        content = "response",
+                        usage = TokenUsage(
+                            totalTokens = 120,
+                            inputTokens = 100,
+                            outputTokens = 20,
+                        ),
+                    ),
+                ),
             ),
         )
         val store = RecordingSessionMemoryStore()
@@ -133,11 +154,16 @@ class ConsoleChatControllerSessionMemoryTest {
 
         controller.runInteractive()
 
-        assertEquals(1, store.saveSnapshots.size)
+        assertEquals(1, store.saveStates.size)
+        val savedState = store.saveStates.single()
         assertEquals(
             listOf(MessageRole.SYSTEM, MessageRole.USER, MessageRole.ASSISTANT),
-            store.saveSnapshots.single().map { it.role },
+            savedState.messages.map { it.role },
         )
+        val usage = assertNotNull(savedState.usage)
+        assertEquals(MemoryEstimateSource.HYBRID, usage.source)
+        assertEquals(3, usage.messageCount)
+        assertEquals(106, usage.estimatedTokens)
     }
 
     @Test
@@ -156,7 +182,30 @@ class ConsoleChatControllerSessionMemoryTest {
 
         controller.runInteractive()
 
-        assertEquals(0, store.saveSnapshots.size)
+        assertEquals(0, store.saveStates.size)
+    }
+
+    @Test
+    fun successfulTurnWithoutUsagePersistsHeuristicSnapshot() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "answer one")),
+            ),
+        )
+        val store = RecordingSessionMemoryStore()
+        val controller = createController(
+            repository = repository,
+            io = FakeCliIO(inputs = listOf("prompt one", "/exit")),
+            sessionMemoryStore = store,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(1, store.saveStates.size)
+        val usage = assertNotNull(store.saveStates.single().usage)
+        assertEquals(MemoryEstimateSource.HEURISTIC, usage.source)
+        assertEquals(3, usage.messageCount)
+        assertEquals(true, usage.estimatedTokens > 0)
     }
 
     @Test
@@ -191,7 +240,15 @@ class ConsoleChatControllerSessionMemoryTest {
         )
         assertEquals(firstRequest[0].content, secondRequest[0].content)
         assertEquals("prompt two", secondRequest[1].content)
-        assertEquals(1, store.clearCalls)
+        assertEquals(0, store.clearCalls)
+        assertEquals(3, store.saveStates.size)
+        assertEquals(
+            listOf(MessageRole.SYSTEM),
+            store.saveStates[1].messages.map { it.role },
+        )
+        val usage = assertNotNull(store.saveStates[1].usage)
+        assertEquals(MemoryEstimateSource.HEURISTIC, usage.source)
+        assertEquals(1, usage.messageCount)
     }
 
     @Test
@@ -237,12 +294,15 @@ class ConsoleChatControllerSessionMemoryTest {
         assertContains(secondRequest[0].content, "Max output tokens: 256")
         assertContains(secondRequest[0].content, "Stop sequence: DONE")
         assertEquals("prompt two", secondRequest[1].content)
-        assertEquals(3, store.saveSnapshots.size)
+        assertEquals(3, store.saveStates.size)
         assertEquals(
             listOf(MessageRole.SYSTEM),
-            store.saveSnapshots[1].map { it.role },
+            store.saveStates[1].messages.map { it.role },
         )
-        assertEquals(secondRequest[0].content, store.saveSnapshots[1][0].content)
+        assertEquals(secondRequest[0].content, store.saveStates[1].messages[0].content)
+        val usage = assertNotNull(store.saveStates[1].usage)
+        assertEquals(MemoryEstimateSource.HEURISTIC, usage.source)
+        assertEquals(1, usage.messageCount)
     }
 
     @Test
@@ -253,10 +313,17 @@ class ConsoleChatControllerSessionMemoryTest {
             ),
         )
         val store = RecordingSessionMemoryStore(
-            loadedMessages = listOf(
-                ConversationMessage.system("persisted system"),
-                ConversationMessage.user("old question"),
-                ConversationMessage.assistant("old answer"),
+            loadedState = SessionMemoryState(
+                messages = listOf(
+                    ConversationMessage.system("persisted system"),
+                    ConversationMessage.user("old question"),
+                    ConversationMessage.assistant("old answer"),
+                ),
+                usage = MemoryUsageSnapshot(
+                    estimatedTokens = 300,
+                    source = MemoryEstimateSource.HYBRID,
+                    messageCount = 3,
+                ),
             ),
         )
         val controller = createController(
@@ -270,8 +337,84 @@ class ConsoleChatControllerSessionMemoryTest {
 
         assertEquals(0, exitCode)
         assertEquals(0, store.loadCalls)
-        assertEquals(0, store.saveSnapshots.size)
+        assertEquals(0, store.saveStates.size)
         assertEquals(0, store.clearCalls)
+    }
+
+    @Test
+    fun memoryCommandUsesPersistedUsageOnStartup() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val io = FakeCliIO(inputs = listOf("/memory", "/exit"))
+        val store = RecordingSessionMemoryStore(
+            loadedState = SessionMemoryState(
+                messages = listOf(
+                    ConversationMessage.system("persisted system"),
+                    ConversationMessage.user("old question"),
+                    ConversationMessage.assistant("old answer"),
+                ),
+                usage = MemoryUsageSnapshot(
+                    estimatedTokens = 321,
+                    source = MemoryEstimateSource.HYBRID,
+                    messageCount = 3,
+                ),
+            ),
+        )
+        val controller = createController(
+            repository = repository,
+            io = io,
+            sessionMemoryStore = store,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(1, store.loadCalls)
+        assertContains(io.outputText(), "memory> Used: 321/1,047,576")
+        assertContains(io.outputText(), "memory> Estimate: hybrid (usage+assistant)")
+    }
+
+    @Test
+    fun memoryCommandFallsBackToHeuristicWhenPersistedUsageIsInvalid() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val io = FakeCliIO(inputs = listOf("/memory", "/exit"))
+        val store = RecordingSessionMemoryStore(
+            loadedState = SessionMemoryState(
+                messages = listOf(
+                    ConversationMessage.system("persisted system"),
+                    ConversationMessage.user("old question"),
+                    ConversationMessage.assistant("old answer"),
+                ),
+                usage = MemoryUsageSnapshot(
+                    estimatedTokens = 321,
+                    source = MemoryEstimateSource.HYBRID,
+                    messageCount = 2,
+                ),
+            ),
+        )
+        val controller = createController(
+            repository = repository,
+            io = io,
+            sessionMemoryStore = store,
+        )
+
+        controller.runInteractive()
+
+        assertContains(io.outputText(), "memory> Estimate: heuristic (text-length)")
+    }
+
+    @Test
+    fun helpAndHeaderIncludeMemoryCommand() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val io = FakeCliIO(inputs = listOf("/help", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+        )
+
+        controller.runInteractive()
+
+        val output = io.outputText()
+        assertContains(output, "commands: /help, /models, /model <id|number>, /memory, /config, /temp <0..2>, /reset, /exit")
+        assertContains(output, "/memory              show session-memory context usage")
     }
 
     private fun createController(
@@ -325,6 +468,7 @@ private class FakeCliIO(
 ) : CliIO {
     private val queuedInputs = ArrayDeque<String?>(inputs)
     private val queuedConfigSelections = ArrayDeque(configSelections)
+    private val lines = mutableListOf<String>()
 
     override fun clearScreen() = Unit
 
@@ -332,7 +476,9 @@ private class FakeCliIO(
 
     override fun showCursor() = Unit
 
-    override fun writeLine(text: String) = Unit
+    override fun writeLine(text: String) {
+        lines += text
+    }
 
     override fun readLine(prompt: String): String? = nextInput()
 
@@ -347,24 +493,32 @@ private class FakeCliIO(
     }
 
     private fun nextInput(): String? = queuedInputs.removeFirstOrNull()
+
+    fun outputText(): String = lines.joinToString(separator = "\n")
 }
 
 private class RecordingSessionMemoryStore(
-    private val loadedMessages: List<ConversationMessage>? = null,
+    private val loadedState: SessionMemoryState? = null,
 ) : SessionMemoryStore {
     var loadCalls: Int = 0
         private set
     var clearCalls: Int = 0
         private set
-    val saveSnapshots = mutableListOf<List<ConversationMessage>>()
+    val saveStates = mutableListOf<SessionMemoryState>()
 
-    override fun load(): List<ConversationMessage>? {
+    override fun load(): SessionMemoryState? {
         loadCalls += 1
-        return loadedMessages?.toList()
+        return loadedState?.copy(
+            messages = loadedState.messages.toList(),
+            usage = loadedState.usage?.copy(),
+        )
     }
 
-    override fun save(messages: List<ConversationMessage>) {
-        saveSnapshots += messages.toList()
+    override fun save(state: SessionMemoryState) {
+        saveStates += SessionMemoryState(
+            messages = state.messages.toList(),
+            usage = state.usage?.copy(),
+        )
     }
 
     override fun clear() {

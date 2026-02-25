@@ -1,11 +1,11 @@
 package com.aichallenge.day2.agent.domain.repository
 
-import com.aichallenge.day2.agent.domain.model.ConversationMessage
+import com.aichallenge.day2.agent.domain.model.SessionMemoryState
 
 interface SessionMemoryStore {
-    fun load(): List<ConversationMessage>?
+    fun load(): SessionMemoryState?
 
-    fun save(messages: List<ConversationMessage>)
+    fun save(state: SessionMemoryState)
 
     fun clear()
 }
