@@ -20,9 +20,6 @@ Create `local.properties` in this folder (`kotlin-agent-cli/local.properties`):
 
 ```properties
 OPENAI_API_KEY=sk-...
-OPENAI_MODEL=gpt-4.1-mini
-OPENAI_MODELS=gpt-4.1-mini,gpt-4.1
-OPENAI_MODEL_PRICING=gpt-4.1-mini=0.80:3.20,gpt-4.1=2.00:8.00
 OPENAI_BASE_URL=https://api.openai.com/v1
 AGENT_SYSTEM_PROMPT=You are a concise and pragmatic assistant.
 ```
@@ -38,15 +35,12 @@ export OPENAI_API_KEY="<your_key>"
 Optional:
 
 ```bash
-export OPENAI_MODEL="gpt-4.1-mini"
-export OPENAI_MODELS="gpt-4.1-mini,gpt-4.1"
-export OPENAI_MODEL_PRICING="gpt-4.1-mini=0.80:3.20,gpt-4.1=2.00:8.00"
 export OPENAI_BASE_URL="https://api.openai.com/v1"
 export AGENT_SYSTEM_PROMPT="You are a concise and pragmatic assistant."
 ```
 
-`OPENAI_MODELS` is optional. If omitted, the app allows only `OPENAI_MODEL`. If provided, `OPENAI_MODEL` must be present in `OPENAI_MODELS`.
-`OPENAI_MODEL_PRICING` is optional. Format: `model=input_usd_per_1m:output_usd_per_1m` (comma-separated for multiple models).
+Model catalog is built into the app (including pricing and context-window metadata).
+Use `/models` to see all available models and `/model <id|number>` to switch the active one.
 
 Interactive mode:
 
@@ -64,7 +58,7 @@ Each assistant reply includes token usage in this format:
 
 ```text
 tokens> Total: <n> | Input: <n> | Output: <n>
-price> Total: $<amount>   # when pricing is configured for active model
+price> Total: $<amount>
 time> <seconds> s
 ```
 
@@ -81,7 +75,7 @@ time> <seconds> s
 ## Interactive Commands
 
 - `/help` - show commands
-- `/models` - list configured models and mark active one
+- `/models` - list built-in models with active marker, context window, and pricing
 - `/model <id|number>` - switch active model (must be listed in `/models`)
 - `/config` - open config menu (ESC to close)
 - `/temp <temperature>` - set OpenAI temperature (`0..2`)

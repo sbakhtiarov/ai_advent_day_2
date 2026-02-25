@@ -16,11 +16,16 @@ data class ModelPricing(
     val outputUsdPer1M: Double,
 )
 
+data class ModelProperties(
+    val id: String,
+    val pricing: ModelPricing,
+    val contextWindowTokens: Int,
+)
+
 data class AppConfig(
     val apiKey: String,
     val model: String,
-    val availableModels: List<String>,
-    val modelPricing: Map<String, ModelPricing>,
+    val models: List<ModelProperties>,
     val baseUrl: String,
     val systemPrompt: String,
 ) {
@@ -32,6 +37,89 @@ data class AppConfig(
         private const val LOCAL_PROPERTIES_FILE = "local.properties"
         private const val READ_BUFFER_SIZE = 4096
 
+        private val INTERNAL_MODEL_CATALOG = listOf(
+            ModelProperties(
+                id = "gpt-5.2-codex",
+                pricing = ModelPricing(
+                    inputUsdPer1M = 1.75,
+                    outputUsdPer1M = 14.0,
+                ),
+                contextWindowTokens = 400_000,
+            ),
+            ModelProperties(
+                id = "gpt-5.2-pro",
+                pricing = ModelPricing(
+                    inputUsdPer1M = 21.0,
+                    outputUsdPer1M = 168.0,
+                ),
+                contextWindowTokens = 400_000,
+            ),
+            ModelProperties(
+                id = "gpt-5.2",
+                pricing = ModelPricing(
+                    inputUsdPer1M = 1.75,
+                    outputUsdPer1M = 14.0,
+                ),
+                contextWindowTokens = 400_000,
+            ),
+            ModelProperties(
+                id = "gpt-5.1",
+                pricing = ModelPricing(
+                    inputUsdPer1M = 1.25,
+                    outputUsdPer1M = 10.0,
+                ),
+                contextWindowTokens = 400_000,
+            ),
+            ModelProperties(
+                id = "gpt-5",
+                pricing = ModelPricing(
+                    inputUsdPer1M = 1.25,
+                    outputUsdPer1M = 10.0,
+                ),
+                contextWindowTokens = 400_000,
+            ),
+            ModelProperties(
+                id = "gpt-5-mini",
+                pricing = ModelPricing(
+                    inputUsdPer1M = 0.25,
+                    outputUsdPer1M = 2.0,
+                ),
+                contextWindowTokens = 400_000,
+            ),
+            ModelProperties(
+                id = "gpt-5-nano",
+                pricing = ModelPricing(
+                    inputUsdPer1M = 0.05,
+                    outputUsdPer1M = 0.40,
+                ),
+                contextWindowTokens = 400_000,
+            ),
+            ModelProperties(
+                id = "gpt-4.1-mini",
+                pricing = ModelPricing(
+                    inputUsdPer1M = 0.40,
+                    outputUsdPer1M = 1.60,
+                ),
+                contextWindowTokens = 1_047_576,
+            ),
+            ModelProperties(
+                id = "gpt-4.1-nano",
+                pricing = ModelPricing(
+                    inputUsdPer1M = 0.10,
+                    outputUsdPer1M = 0.40,
+                ),
+                contextWindowTokens = 1_047_576,
+            ),
+            ModelProperties(
+                id = "gpt-3.5-turbo",
+                pricing = ModelPricing(
+                    inputUsdPer1M = 0.50,
+                    outputUsdPer1M = 1.50,
+                ),
+                contextWindowTokens = 16_385,
+            ),
+        )
+
         fun fromEnvironment(): AppConfig {
             val localProperties = loadLocalProperties()
             val apiKey = readConfig("OPENAI_API_KEY", localProperties).orEmpty().trim()
@@ -39,18 +127,8 @@ data class AppConfig(
                 "OPENAI_API_KEY is required."
             }
 
-            val model = readConfig("OPENAI_MODEL", localProperties).orEmpty().trim().ifEmpty { DEFAULT_MODEL }
-            val configuredModelsRaw = readConfig("OPENAI_MODELS", localProperties).orEmpty().trim()
-            val parsedAvailableModels = parseModelList(configuredModelsRaw)
-            val availableModels = if (parsedAvailableModels.isEmpty()) {
-                listOf(model)
-            } else {
-                parsedAvailableModels
-            }
-            require(parsedAvailableModels.isEmpty() || model in parsedAvailableModels) {
-                "OPENAI_MODEL ('$model') must be present in OPENAI_MODELS."
-            }
-            val modelPricing = parseModelPricing(readConfig("OPENAI_MODEL_PRICING", localProperties).orEmpty().trim())
+            val models = internalModelCatalog()
+            validateModelCatalog(models)
             val baseUrl = readConfig("OPENAI_BASE_URL", localProperties).orEmpty().trim().ifEmpty { DEFAULT_BASE_URL }
             val systemPrompt = readConfig("AGENT_SYSTEM_PROMPT", localProperties)
                 .orEmpty()
@@ -59,13 +137,16 @@ data class AppConfig(
 
             return AppConfig(
                 apiKey = apiKey,
-                model = model,
-                availableModels = availableModels,
-                modelPricing = modelPricing,
+                model = DEFAULT_MODEL,
+                models = models,
                 baseUrl = baseUrl.trimEnd('/'),
                 systemPrompt = systemPrompt,
             )
         }
+
+        internal fun internalModelCatalog(): List<ModelProperties> = INTERNAL_MODEL_CATALOG.toList()
+
+        internal fun defaultModelId(): String = DEFAULT_MODEL
 
         @OptIn(ExperimentalForeignApi::class)
         private fun readConfig(name: String, localProperties: Map<String, String>): String? {
@@ -170,58 +251,33 @@ data class AppConfig(
             return if (startsWithQuote || startsWithSingleQuote) value.substring(1, value.length - 1) else value
         }
 
-        private fun parseModelList(raw: String): List<String> {
-            if (raw.isBlank()) return emptyList()
+        private fun validateModelCatalog(models: List<ModelProperties>) {
+            require(models.isNotEmpty()) {
+                "Internal model catalog must not be empty."
+            }
 
-            val uniqueModels = linkedSetOf<String>()
-            raw.split(',')
-                .asSequence()
-                .map { it.trim() }
-                .filter { it.isNotEmpty() }
-                .forEach { uniqueModels += it }
-            return uniqueModels.toList()
-        }
-
-        private fun parseModelPricing(raw: String): Map<String, ModelPricing> {
-            if (raw.isBlank()) return emptyMap()
-
-            val pricingByModel = linkedMapOf<String, ModelPricing>()
-            raw.split(',')
-                .asSequence()
-                .map { it.trim() }
-                .filter { it.isNotEmpty() }
-                .forEach { entry ->
-                    val modelAndPricing = entry.split('=', limit = 2)
-                    require(modelAndPricing.size == 2) {
-                        "OPENAI_MODEL_PRICING entry '$entry' must be '<model>=<input_usd_per_1m>:<output_usd_per_1m>'."
-                    }
-
-                    val modelId = modelAndPricing[0].trim()
-                    require(modelId.isNotEmpty()) {
-                        "OPENAI_MODEL_PRICING entry '$entry' has an empty model id."
-                    }
-
-                    val rates = modelAndPricing[1].trim().split(':', limit = 2)
-                    require(rates.size == 2) {
-                        "OPENAI_MODEL_PRICING entry '$entry' must include both input and output rates."
-                    }
-
-                    val inputPrice = rates[0].trim().toDoubleOrNull()
-                    val outputPrice = rates[1].trim().toDoubleOrNull()
-                    require(inputPrice != null && inputPrice >= 0.0) {
-                        "OPENAI_MODEL_PRICING entry '$entry' has invalid input rate '${rates[0]}'."
-                    }
-                    require(outputPrice != null && outputPrice >= 0.0) {
-                        "OPENAI_MODEL_PRICING entry '$entry' has invalid output rate '${rates[1]}'."
-                    }
-
-                    pricingByModel[modelId] = ModelPricing(
-                        inputUsdPer1M = inputPrice,
-                        outputUsdPer1M = outputPrice,
-                    )
+            val uniqueIds = mutableSetOf<String>()
+            models.forEach { model ->
+                require(model.id.isNotBlank()) {
+                    "Model id must not be blank."
                 }
+                require(uniqueIds.add(model.id)) {
+                    "Duplicate model id in internal catalog: '${model.id}'."
+                }
+                require(model.pricing.inputUsdPer1M >= 0.0) {
+                    "Model '${model.id}' has invalid input rate: ${model.pricing.inputUsdPer1M}."
+                }
+                require(model.pricing.outputUsdPer1M >= 0.0) {
+                    "Model '${model.id}' has invalid output rate: ${model.pricing.outputUsdPer1M}."
+                }
+                require(model.contextWindowTokens > 0) {
+                    "Model '${model.id}' has invalid context window: ${model.contextWindowTokens}."
+                }
+            }
 
-            return pricingByModel
+            require(models.any { it.id == DEFAULT_MODEL }) {
+                "Default model '$DEFAULT_MODEL' must be present in the internal model catalog."
+            }
         }
     }
 }

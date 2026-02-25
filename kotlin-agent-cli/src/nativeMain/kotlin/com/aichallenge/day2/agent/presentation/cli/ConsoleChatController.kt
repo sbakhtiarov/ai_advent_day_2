@@ -1,6 +1,6 @@
 package com.aichallenge.day2.agent.presentation.cli
 
-import com.aichallenge.day2.agent.core.config.ModelPricing
+import com.aichallenge.day2.agent.core.config.ModelProperties
 import com.aichallenge.day2.agent.domain.model.SessionMemory
 import com.aichallenge.day2.agent.domain.model.TokenUsage
 import com.aichallenge.day2.agent.domain.repository.SessionMemoryStore
@@ -13,8 +13,7 @@ class ConsoleChatController(
     private val sendPromptUseCase: SendPromptUseCase,
     initialSystemPrompt: String,
     initialModel: String,
-    availableModels: List<String>,
-    private val modelPricing: Map<String, ModelPricing>,
+    models: List<ModelProperties>,
     private val io: CliIO = StdCliIO,
     private val sessionMemoryStore: SessionMemoryStore? = null,
     private val persistentMemoryEnabled: Boolean = true,
@@ -28,7 +27,8 @@ class ConsoleChatController(
     private var baseSystemPrompt = initialSystemPrompt
     private var configSelection = ConfigMenuSelection.default()
     private var systemPrompt = buildSystemPrompt(baseSystemPrompt, configSelection)
-    private val availableModelIds = availableModels.distinct().ifEmpty { listOf(initialModel) }
+    private val availableModelIds = models.map { it.id }.distinct().ifEmpty { listOf(initialModel) }
+    private val modelById = models.associateBy { it.id }
     private var currentModel = initialModel
     private var temperature: Double? = null
     private val sessionMemory = SessionMemory(systemPrompt)
@@ -240,7 +240,7 @@ class ConsoleChatController(
     private fun helpText(): String = """
         Available commands:
         /help                show this help message
-        /models              list configured models
+        /models              list available built-in models
         /model <id|number>   switch active model (must be from /models)
         /config              open config menu (ESC to close)
         /temp <temperature>  set response temperature (0..2)
@@ -252,7 +252,19 @@ class ConsoleChatController(
         appendLine("Available models:")
         availableModelIds.forEachIndexed { index, modelId ->
             val marker = if (modelId == currentModel) " * " else "   "
-            appendLine("$marker${index + 1}. $modelId")
+            val model = modelById[modelId]
+            if (model == null) {
+                appendLine("$marker${index + 1}. $modelId")
+                return@forEachIndexed
+            }
+
+            val pricing = model.pricing
+            appendLine(
+                "$marker${index + 1}. $modelId " +
+                    "(ctx=${formatIntWithGrouping(model.contextWindowTokens)}; " +
+                    "in=$${formatRate(pricing.inputUsdPer1M)}/1M; " +
+                    "out=$${formatRate(pricing.outputUsdPer1M)}/1M)",
+            )
         }
     }.trimEnd()
 
@@ -270,7 +282,7 @@ class ConsoleChatController(
         val requestedModelArg = parts[1].trim()
         val requestedModel = resolveRequestedModel(requestedModelArg)
         if (requestedModel == null) {
-            dialogBlocks += "system> unknown model '$requestedModelArg'. Run /models to view configured models."
+            dialogBlocks += "system> unknown model '$requestedModelArg'. Run /models to view available models."
             return
         }
 
@@ -383,7 +395,7 @@ class ConsoleChatController(
     }
 
     private fun formatResponsePrice(usage: TokenUsage?): String {
-        val modelRate = modelPricing[currentModel]
+        val modelRate = modelById[currentModel]?.pricing
         if (usage == null) {
             return "price> n/a (token usage unavailable)"
         }
@@ -404,6 +416,27 @@ class ConsoleChatController(
         val dollars = absoluteScaled / PRICE_DECIMAL_SCALE
         val fraction = (absoluteScaled % PRICE_DECIMAL_SCALE).toString().padStart(PRICE_DECIMAL_DIGITS, '0')
         return "$sign$dollars.$fraction"
+    }
+
+    private fun formatRate(value: Double): String {
+        val scaled = (value * RATE_DECIMAL_SCALE).roundToLong()
+        val sign = if (scaled < 0) "-" else ""
+        val absoluteScaled = abs(scaled)
+        val integral = absoluteScaled / RATE_DECIMAL_SCALE
+        val fraction = (absoluteScaled % RATE_DECIMAL_SCALE).toString().padStart(RATE_DECIMAL_DIGITS, '0')
+        return "$sign$integral.$fraction"
+    }
+
+    private fun formatIntWithGrouping(value: Int): String {
+        val digits = value.toString()
+        val grouped = StringBuilder(digits.length + digits.length / 3)
+        digits.reversed().forEachIndexed { index, char ->
+            if (index > 0 && index % 3 == 0) {
+                grouped.append(',')
+            }
+            grouped.append(char)
+        }
+        return grouped.reverse().toString()
     }
 
     private fun formatResponseTime(elapsedSeconds: Double): String {
@@ -444,6 +477,8 @@ class ConsoleChatController(
         private const val TOKENS_PER_MILLION = 1_000_000.0
         private const val PRICE_DECIMAL_SCALE = 1_000_000L
         private const val PRICE_DECIMAL_DIGITS = 6
+        private const val RATE_DECIMAL_SCALE = 100L
+        private const val RATE_DECIMAL_DIGITS = 2
         private const val TIME_DECIMAL_SCALE = 100L
         private const val TIME_DECIMAL_DIGITS = 2
     }
