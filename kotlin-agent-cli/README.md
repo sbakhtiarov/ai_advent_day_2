@@ -68,6 +68,7 @@ time> <seconds> s
 - Session snapshot persistence includes both conversation messages and a context-usage estimate.
 - On interactive startup, the app restores persisted memory exactly as previously saved.
 - Each successful prompt turn is persisted immediately.
+- If you attach files with `@<path>`, their text content is injected into the next submitted prompt and persisted in session memory.
 - `/config` resets session memory after applying output configuration and persists the reset state.
 - `/reset` clears in-memory session memory, clears the visible transcript, and persists the reset state.
 - One-shot mode (`--prompt`) does not read or write persistent memory.
@@ -83,3 +84,5 @@ time> <seconds> s
 - `/temp <temperature>` - set OpenAI temperature (`0..2`)
 - `/reset` - clear conversation memory and transcript, then persist the reset state
 - `/exit` - close app
+- `@<path>` - attach file path as dialog reference; file text is read only when the next prompt is submitted
+- Inline refs are also supported in prompts (example: `Review @/abs/path/File.kt` or `Review @"~/path with spaces/File.kt"`).

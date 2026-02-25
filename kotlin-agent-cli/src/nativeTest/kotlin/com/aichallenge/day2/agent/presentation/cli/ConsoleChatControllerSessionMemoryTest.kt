@@ -16,6 +16,7 @@ import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 
@@ -402,6 +403,120 @@ class ConsoleChatControllerSessionMemoryTest {
     }
 
     @Test
+    fun fileReferenceCommandDefersFileReadUntilPromptSubmit() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val fileReferenceReader = RecordingFileReferenceReader(
+            contentsByPath = mapOf("notes.txt" to "ignored"),
+        )
+        val controller = createController(
+            repository = repository,
+            io = FakeCliIO(inputs = listOf("@notes.txt", "/exit")),
+            fileReferenceReader = fileReferenceReader,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(0, fileReferenceReader.readPaths.size)
+        assertEquals(0, repository.conversations.size)
+    }
+
+    @Test
+    fun fileReferenceCommandInjectsFileContentIntoPromptAndPersistsIt() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "answer one")),
+            ),
+        )
+        val io = FakeCliIO(inputs = listOf("@notes.txt", "summarize this file", "/exit"))
+        val store = RecordingSessionMemoryStore()
+        val fileReferenceReader = RecordingFileReferenceReader(
+            contentsByPath = mapOf("notes.txt" to "line one\nline two"),
+        )
+        val controller = createController(
+            repository = repository,
+            io = io,
+            sessionMemoryStore = store,
+            fileReferenceReader = fileReferenceReader,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(listOf("notes.txt"), fileReferenceReader.readPaths)
+        assertEquals(1, repository.conversations.size)
+        val userPrompt = repository.conversations.single()[1].content
+        assertContains(userPrompt, "summarize this file")
+        assertContains(userPrompt, "The CLI already read the following local files")
+        assertContains(userPrompt, "[FILE] notes.txt")
+        assertContains(userPrompt, "line one\nline two")
+
+        val output = io.outputText()
+        assertContains(output, "ref> notes.txt")
+        assertFalse(output.contains("line one\nline two"))
+
+        assertEquals(1, store.saveStates.size)
+        assertContains(store.saveStates.single().messages[1].content, "line one\nline two")
+    }
+
+    @Test
+    fun fileReferenceAppliesToOnlyNextSuccessfulPrompt() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "answer one")),
+                Result.success(AgentResponse(content = "answer two")),
+            ),
+        )
+        val fileReferenceReader = RecordingFileReferenceReader(
+            contentsByPath = mapOf("notes.txt" to "file body"),
+        )
+        val controller = createController(
+            repository = repository,
+            io = FakeCliIO(inputs = listOf("@notes.txt", "first prompt", "second prompt", "/exit")),
+            fileReferenceReader = fileReferenceReader,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(2, repository.conversations.size)
+        assertContains(repository.conversations[0][1].content, "[FILE] notes.txt")
+        assertEquals("second prompt", repository.conversations[1].last().content)
+        assertFalse(repository.conversations[1].last().content.contains("[FILE] notes.txt"))
+        assertEquals(listOf("notes.txt"), fileReferenceReader.readPaths)
+    }
+
+    @Test
+    fun inlineFileReferenceWithSpacesIsReadAndAttached() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "review result")),
+            ),
+        )
+        val path = "/Users/sergei.bakhtiarov/AI Advent Challenge/day2/kotlin-agent-cli/src/nativeMain/kotlin/com/aichallenge/day2/agent/presentation/cli/CliIO.kt"
+        val fileReferenceReader = RecordingFileReferenceReader(
+            contentsByPath = mapOf(path to "class CliIO {}"),
+        )
+        val io = FakeCliIO(
+            inputs = listOf("Do code review of the file @$path", "/exit"),
+        )
+        val controller = createController(
+            repository = repository,
+            io = io,
+            fileReferenceReader = fileReferenceReader,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(listOf(path), fileReferenceReader.readPaths)
+        val userPrompt = repository.conversations.single()[1].content
+        assertContains(userPrompt, "Do code review of the file")
+        assertContains(userPrompt, "[FILE] $path")
+        assertContains(userPrompt, "class CliIO {}")
+        assertFalse(userPrompt.contains("@$path"))
+
+        val output = io.outputText()
+        assertContains(output, "ref> $path")
+    }
+
+    @Test
     fun helpAndHeaderIncludeMemoryCommand() = runBlocking {
         val repository = RecordingAgentRepository(responses = emptyList())
         val io = FakeCliIO(inputs = listOf("/help", "/exit"))
@@ -413,8 +528,9 @@ class ConsoleChatControllerSessionMemoryTest {
         controller.runInteractive()
 
         val output = io.outputText()
-        assertContains(output, "commands: /help, /models, /model <id|number>, /memory, /config, /temp <0..2>, /reset, /exit")
+        assertContains(output, "commands: /help, /models, /model <id|number>, /memory, /config, /temp <0..2>, /reset, /exit, @<path>")
         assertContains(output, "/memory              show session-memory context usage")
+        assertContains(output, "@<path>              attach file for the next prompt")
     }
 
     private fun createController(
@@ -422,6 +538,7 @@ class ConsoleChatControllerSessionMemoryTest {
         io: CliIO,
         sessionMemoryStore: SessionMemoryStore? = null,
         persistentMemoryEnabled: Boolean = true,
+        fileReferenceReader: FileReferenceReader = RecordingFileReferenceReader(emptyMap()),
     ): ConsoleChatController {
         return ConsoleChatController(
             sendPromptUseCase = SendPromptUseCase(repository),
@@ -440,6 +557,7 @@ class ConsoleChatControllerSessionMemoryTest {
             io = io,
             sessionMemoryStore = sessionMemoryStore,
             persistentMemoryEnabled = persistentMemoryEnabled,
+            fileReferenceReader = fileReferenceReader,
         )
     }
 }
@@ -523,5 +641,17 @@ private class RecordingSessionMemoryStore(
 
     override fun clear() {
         clearCalls += 1
+    }
+}
+
+private class RecordingFileReferenceReader(
+    private val contentsByPath: Map<String, String>,
+) : FileReferenceReader {
+    val readPaths = mutableListOf<String>()
+
+    override fun read(path: String): String {
+        readPaths += path
+        return contentsByPath[path]
+            ?: throw IllegalStateException("No prepared file content for '$path'.")
     }
 }

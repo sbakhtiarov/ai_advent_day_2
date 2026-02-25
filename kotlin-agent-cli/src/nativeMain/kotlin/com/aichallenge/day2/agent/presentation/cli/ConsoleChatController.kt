@@ -23,6 +23,7 @@ class ConsoleChatController(
     private val io: CliIO = StdCliIO,
     private val sessionMemoryStore: SessionMemoryStore? = null,
     private val persistentMemoryEnabled: Boolean = true,
+    private val fileReferenceReader: FileReferenceReader = PosixFileReferenceReader,
 ) {
     private val configTabs = listOf("Format", "Size", "Stop")
     private val configDescriptions = listOf(
@@ -40,6 +41,7 @@ class ConsoleChatController(
     private val sessionMemory = SessionMemory(systemPrompt)
     private var memoryUsageSnapshot = estimateHeuristicUsage(sessionMemory.snapshot())
     private val dialogBlocks = mutableListOf<String>()
+    private val pendingFileReferences = mutableListOf<String>()
     private val inputDivider = "─".repeat(80)
     private var persistentMemoryInitialized = false
 
@@ -68,6 +70,11 @@ class ConsoleChatController(
                 io.hideCursor()
 
                 val commandInput = input.trim()
+                if (isFileReferenceCommand(commandInput)) {
+                    handleFileReferenceCommand(commandInput)
+                    continue
+                }
+
                 if (commandInput.startsWith("/")) {
                     val shouldContinue = handleCommand(commandInput)
                     if (!shouldContinue) {
@@ -108,27 +115,268 @@ class ConsoleChatController(
     }
 
     private suspend fun sendAndStore(prompt: String) {
-        dialogBlocks += formatUserPrompt(prompt)
+        val preparedPrompt = buildPromptForRequest(prompt) ?: return
+        preparedPrompt.inlineReferences.forEach { path ->
+            dialogBlocks += "ref> $path"
+        }
+        dialogBlocks += formatUserPrompt(preparedPrompt.displayPrompt)
 
         runCatching {
             val startedAt = TimeSource.Monotonic.markNow()
             val response = sendPromptUseCase.execute(
-                conversation = sessionMemory.conversationFor(prompt),
+                conversation = sessionMemory.conversationFor(preparedPrompt.requestPrompt),
                 temperature = temperature,
                 model = currentModel,
             )
             val elapsedSeconds = startedAt.elapsedNow().inWholeMilliseconds / 1000.0
-            sessionMemory.recordSuccessfulTurn(prompt, response.content)
+            sessionMemory.recordSuccessfulTurn(preparedPrompt.requestPrompt, response.content)
             memoryUsageSnapshot = buildUsageSnapshotAfterSuccessfulTurn(
                 responseContent = response.content,
                 usage = response.usage,
                 messages = sessionMemory.snapshot(),
             )
             persistMemorySnapshot()
+            pendingFileReferences.clear()
             dialogBlocks += formatAssistantResponse(response.content, response.usage, elapsedSeconds)
         }.onFailure { throwable ->
             dialogBlocks += "error> ${throwable.message ?: "Unexpected error"}"
         }
+    }
+
+    private fun isFileReferenceCommand(input: String): Boolean = input.startsWith("@")
+
+    private fun handleFileReferenceCommand(input: String) {
+        val path = input.removePrefix("@").trim()
+        if (path.isEmpty()) {
+            dialogBlocks += "system> usage: @<path>"
+            return
+        }
+
+        pendingFileReferences += path
+        dialogBlocks += "ref> $path"
+    }
+
+    private fun buildPromptForRequest(prompt: String): PreparedPrompt? {
+        val inlineReferences = parseInlineFileReferences(prompt)
+        val displayPrompt = inlineReferences.cleanedPrompt.ifBlank { prompt }
+        val allReferences = orderedDistinctReferencePaths(
+            pendingFileReferences + inlineReferences.references,
+        )
+        if (allReferences.isEmpty()) {
+            return PreparedPrompt(
+                displayPrompt = displayPrompt,
+                requestPrompt = displayPrompt,
+                inlineReferences = inlineReferences.references,
+            )
+        }
+
+        val resolvedFiles = mutableListOf<ResolvedFileReference>()
+        val pendingReferences = pendingFileReferences.toSet()
+        for (path in allReferences) {
+            val content = runCatching {
+                fileReferenceReader.read(path)
+            }.getOrElse { throwable ->
+                if (path in pendingReferences) {
+                    pendingFileReferences.remove(path)
+                }
+                val errorMessage = throwable.message ?: "Unexpected error"
+                dialogBlocks += "system> unable to read file '$path': $errorMessage"
+                return null
+            }
+            resolvedFiles += ResolvedFileReference(path = path, content = content)
+        }
+
+        return PreparedPrompt(
+            displayPrompt = displayPrompt,
+            requestPrompt = buildPromptWithFileReferences(displayPrompt, resolvedFiles),
+            inlineReferences = inlineReferences.references,
+        )
+    }
+
+    private fun buildPromptWithFileReferences(
+        prompt: String,
+        files: List<ResolvedFileReference>,
+    ): String {
+        if (files.isEmpty()) {
+            return prompt
+        }
+
+        return buildString {
+            append(prompt)
+            append("\n\nClient note: The CLI already read the following local files and included their exact text below.")
+            append("\nUse this file content directly. Do not ask the user to paste these files.")
+            files.forEach { file ->
+                append("\n\n[FILE] ")
+                append(file.path)
+                append('\n')
+                append(file.content)
+                if (!file.content.endsWith('\n')) {
+                    append('\n')
+                }
+                append("[/FILE]")
+            }
+        }
+    }
+
+    private fun parseInlineFileReferences(prompt: String): InlineFileReferenceParseResult {
+        if (!prompt.contains('@')) {
+            return InlineFileReferenceParseResult(
+                cleanedPrompt = prompt,
+                references = emptyList(),
+            )
+        }
+
+        val references = mutableListOf<String>()
+        val cleanedPrompt = StringBuilder(prompt.length)
+        var index = 0
+        while (index < prompt.length) {
+            val current = prompt[index]
+            if (current == '@' && isInlineReferenceStart(prompt, index)) {
+                val parsed = parseInlineReference(prompt, index + 1)
+                if (parsed != null) {
+                    references += parsed.path
+                    index = parsed.nextIndex
+                    continue
+                }
+            }
+
+            cleanedPrompt.append(current)
+            index += 1
+        }
+
+        val distinctReferences = orderedDistinctReferencePaths(references)
+        val normalizedPrompt = if (distinctReferences.isEmpty()) {
+            prompt
+        } else {
+            normalizePromptAfterReferenceRemoval(cleanedPrompt.toString())
+        }
+
+        return InlineFileReferenceParseResult(
+            cleanedPrompt = normalizedPrompt,
+            references = distinctReferences,
+        )
+    }
+
+    private fun isInlineReferenceStart(input: String, index: Int): Boolean {
+        if (index == 0) {
+            return true
+        }
+
+        val previous = input[index - 1]
+        return previous.isWhitespace() || previous == '(' || previous == '[' || previous == '{' || previous == ':'
+    }
+
+    private fun parseInlineReference(
+        input: String,
+        startIndex: Int,
+    ): ParsedInlineReference? {
+        if (startIndex >= input.length) {
+            return null
+        }
+
+        return when (input[startIndex]) {
+            '"' -> parseQuotedInlineReference(input, startIndex, '"')
+            '\'' -> parseQuotedInlineReference(input, startIndex, '\'')
+            else -> parseUnquotedInlineReference(input, startIndex)
+        }
+    }
+
+    private fun parseQuotedInlineReference(
+        input: String,
+        startIndex: Int,
+        quote: Char,
+    ): ParsedInlineReference? {
+        var index = startIndex + 1
+        while (index < input.length && input[index] != quote) {
+            index += 1
+        }
+        if (index >= input.length) {
+            return null
+        }
+
+        val path = input.substring(startIndex + 1, index).trim()
+        if (!looksLikeFilePath(path)) {
+            return null
+        }
+
+        return ParsedInlineReference(path = path, nextIndex = index + 1)
+    }
+
+    private fun parseUnquotedInlineReference(
+        input: String,
+        startIndex: Int,
+    ): ParsedInlineReference? {
+        val lineEnd = input.indexOf('\n', startIndex).let { position ->
+            if (position == -1) input.length else position
+        }
+        val lineRemainder = input.substring(startIndex, lineEnd).trimEnd()
+        val looksLikeAbsolutePath = lineRemainder.startsWith("/") || lineRemainder.startsWith("~/")
+        if (looksLikeAbsolutePath && lineRemainder.contains(' ')) {
+            val path = lineRemainder.trimTrailingReferenceDelimiters()
+            if (looksLikeFilePath(path)) {
+                return ParsedInlineReference(path = path, nextIndex = lineEnd)
+            }
+        }
+
+        var index = startIndex
+        while (index < input.length && !input[index].isWhitespace()) {
+            index += 1
+        }
+        val path = input.substring(startIndex, index).trimTrailingReferenceDelimiters()
+        if (!looksLikeFilePath(path)) {
+            return null
+        }
+
+        return ParsedInlineReference(path = path, nextIndex = index)
+    }
+
+    private fun looksLikeFilePath(value: String): Boolean {
+        if (value.isBlank()) {
+            return false
+        }
+        if (
+            value.startsWith("/") ||
+            value.startsWith("~/") ||
+            value.startsWith("./") ||
+            value.startsWith("../") ||
+            value.contains("/")
+        ) {
+            return true
+        }
+
+        val extension = value.substringAfterLast('.', missingDelimiterValue = "")
+        return extension.isNotEmpty() && extension.lowercase() in KNOWN_FILE_EXTENSIONS
+    }
+
+    private fun normalizePromptAfterReferenceRemoval(prompt: String): String {
+        return prompt.lines()
+            .joinToString(separator = "\n") { line ->
+                line.replace(Regex("\\s{2,}"), " ").trim()
+            }
+            .trim()
+    }
+
+    private fun orderedDistinctReferencePaths(paths: List<String>): List<String> {
+        val result = mutableListOf<String>()
+        val seen = mutableSetOf<String>()
+        paths.forEach { rawPath ->
+            val normalized = rawPath.trim()
+            if (normalized.isEmpty()) {
+                return@forEach
+            }
+            if (seen.add(normalized)) {
+                result += normalized
+            }
+        }
+        return result
+    }
+
+    private fun String.trimTrailingReferenceDelimiters(): String {
+        var endIndex = length
+        while (endIndex > 0 && this[endIndex - 1] in TRAILING_REFERENCE_DELIMITERS) {
+            endIndex -= 1
+        }
+        return substring(0, endIndex)
     }
 
     private fun handleCommand(input: String): Boolean {
@@ -191,6 +439,7 @@ class ConsoleChatController(
     private fun resetConversation() {
         sessionMemory.reset(systemPrompt)
         memoryUsageSnapshot = estimateHeuristicUsage(sessionMemory.snapshot())
+        pendingFileReferences.clear()
     }
 
     private fun initializePersistentMemory() {
@@ -232,7 +481,7 @@ class ConsoleChatController(
         io.writeLine(logoBanner())
         io.writeLine()
         io.writeLine("    type your prompt and press Enter")
-        io.writeLine("    commands: /help, /models, /model <id|number>, /memory, /config, /temp <0..2>, /reset, /exit")
+        io.writeLine("    commands: /help, /models, /model <id|number>, /memory, /config, /temp <0..2>, /reset, /exit, @<path>")
         io.writeLine()
 
         dialogBlocks.forEachIndexed { index, block ->
@@ -266,6 +515,7 @@ class ConsoleChatController(
         /temp <temperature>  set response temperature (0..2)
         /reset               clear conversation and keep current system prompt
         /exit                close the application
+        @<path>              attach file for the next prompt
     """.trimIndent()
 
     private fun modelsText(): String = buildString {
@@ -579,6 +829,27 @@ class ConsoleChatController(
         OutputFormatOption.TABLE -> "Table"
     }
 
+    private data class ResolvedFileReference(
+        val path: String,
+        val content: String,
+    )
+
+    private data class PreparedPrompt(
+        val displayPrompt: String,
+        val requestPrompt: String,
+        val inlineReferences: List<String>,
+    )
+
+    private data class InlineFileReferenceParseResult(
+        val cleanedPrompt: String,
+        val references: List<String>,
+    )
+
+    private data class ParsedInlineReference(
+        val path: String,
+        val nextIndex: Int,
+    )
+
     companion object {
         private const val TOKENS_PER_MILLION = 1_000_000.0
         private const val PRICE_DECIMAL_SCALE = 1_000_000L
@@ -593,5 +864,32 @@ class ConsoleChatController(
         private const val REQUEST_OVERHEAD_TOKENS = 3
         private const val MESSAGE_OVERHEAD_TOKENS = 4
         private const val CHARS_PER_TOKEN = 4.0
+        private val TRAILING_REFERENCE_DELIMITERS = setOf('.', ',', ';', ':', '!', '?', ')', ']', '}')
+        private val KNOWN_FILE_EXTENSIONS = setOf(
+            "kt",
+            "kts",
+            "md",
+            "txt",
+            "json",
+            "yaml",
+            "yml",
+            "xml",
+            "gradle",
+            "properties",
+            "java",
+            "swift",
+            "py",
+            "js",
+            "ts",
+            "tsx",
+            "jsx",
+            "c",
+            "cpp",
+            "h",
+            "hpp",
+            "go",
+            "rs",
+            "sh",
+        )
     }
 }
