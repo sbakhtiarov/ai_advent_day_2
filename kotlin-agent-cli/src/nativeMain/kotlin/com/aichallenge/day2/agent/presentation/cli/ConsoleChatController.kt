@@ -10,6 +10,11 @@ import com.aichallenge.day2.agent.domain.model.TokenUsage
 import com.aichallenge.day2.agent.domain.repository.SessionMemoryStore
 import com.aichallenge.day2.agent.domain.usecase.SessionMemoryCompactionCoordinator
 import com.aichallenge.day2.agent.domain.usecase.SendPromptUseCase
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.roundToLong
@@ -123,30 +128,71 @@ class ConsoleChatController(
         }
         dialogBlocks += formatUserPrompt(preparedPrompt.displayPrompt)
 
-        runCatching {
-            val startedAt = TimeSource.Monotonic.markNow()
-            val response = sendPromptUseCase.execute(
-                conversation = sessionMemory.conversationFor(preparedPrompt.requestPrompt),
-                temperature = temperature,
-                model = currentModel,
-            )
-            val elapsedSeconds = startedAt.elapsedNow().inWholeMilliseconds / 1000.0
-            sessionMemory.recordSuccessfulTurn(preparedPrompt.requestPrompt, response.content)
-            sessionMemoryCompactionCoordinator.compactIfNeeded(
-                sessionMemory = sessionMemory,
-                model = currentModel,
-            )
-            memoryUsageSnapshot = buildUsageSnapshotAfterSuccessfulTurn(
-                responseContent = response.content,
-                usage = response.usage,
-                messages = sessionMemory.contextSnapshot(),
-            )
-            persistMemorySnapshot()
-            pendingFileReferences.clear()
-            dialogBlocks += formatAssistantResponse(response.content, response.usage, elapsedSeconds)
-        }.onFailure { throwable ->
-            dialogBlocks += "error> ${throwable.message ?: "Unexpected error"}"
+        io.showThinkingIndicator()
+        val startedAt = TimeSource.Monotonic.markNow()
+        io.updateThinkingIndicator(
+            progressText = formatThinkingProgress(
+                spinnerFrame = THINKING_SPINNER_FRAMES.first(),
+                elapsedMillis = 0L,
+            ),
+        )
+        try {
+            coroutineScope {
+                val progressJob = launch {
+                    var frameIndex = 1
+                    while (isActive) {
+                        delay(THINKING_INDICATOR_UPDATE_INTERVAL_MS)
+                        val spinnerFrame = THINKING_SPINNER_FRAMES[frameIndex % THINKING_SPINNER_FRAMES.size]
+                        frameIndex += 1
+                        val elapsedMillis = startedAt.elapsedNow().inWholeMilliseconds
+                        io.updateThinkingIndicator(
+                            progressText = formatThinkingProgress(
+                                spinnerFrame = spinnerFrame,
+                                elapsedMillis = elapsedMillis,
+                            ),
+                        )
+                    }
+                }
+
+                try {
+                    runCatching {
+                        val response = sendPromptUseCase.execute(
+                            conversation = sessionMemory.conversationFor(preparedPrompt.requestPrompt),
+                            temperature = temperature,
+                            model = currentModel,
+                        )
+                        val elapsedSeconds = startedAt.elapsedNow().inWholeMilliseconds / 1000.0
+                        sessionMemory.recordSuccessfulTurn(preparedPrompt.requestPrompt, response.content)
+                        sessionMemoryCompactionCoordinator.compactIfNeeded(
+                            sessionMemory = sessionMemory,
+                            model = currentModel,
+                        )
+                        memoryUsageSnapshot = buildUsageSnapshotAfterSuccessfulTurn(
+                            responseContent = response.content,
+                            usage = response.usage,
+                            messages = sessionMemory.contextSnapshot(),
+                        )
+                        persistMemorySnapshot()
+                        pendingFileReferences.clear()
+                        dialogBlocks += formatAssistantResponse(response.content, response.usage, elapsedSeconds)
+                    }.onFailure { throwable ->
+                        dialogBlocks += "error> ${throwable.message ?: "Unexpected error"}"
+                    }
+                } finally {
+                    progressJob.cancelAndJoin()
+                }
+            }
+        } finally {
+            io.hideThinkingIndicator()
         }
+    }
+
+    private fun formatThinkingProgress(spinnerFrame: Char, elapsedMillis: Long): String {
+        val safeElapsedMillis = elapsedMillis.coerceAtLeast(0L)
+        val elapsedTenths = safeElapsedMillis / THINKING_TENTH_DIVISOR_MS
+        val seconds = elapsedTenths / THINKING_TENTHS_PER_SECOND
+        val tenths = elapsedTenths % THINKING_TENTHS_PER_SECOND
+        return "$spinnerFrame $seconds.$tenths" + "s"
     }
 
     private fun isFileReferenceCommand(input: String): Boolean = input.startsWith("@")
@@ -876,6 +922,10 @@ class ConsoleChatController(
         private const val REQUEST_OVERHEAD_TOKENS = 3
         private const val MESSAGE_OVERHEAD_TOKENS = 4
         private const val CHARS_PER_TOKEN = 4.0
+        private const val THINKING_INDICATOR_UPDATE_INTERVAL_MS = 120L
+        private const val THINKING_TENTHS_PER_SECOND = 10L
+        private const val THINKING_TENTH_DIVISOR_MS = 100L
+        private val THINKING_SPINNER_FRAMES = charArrayOf('|', '/', '-', '\\')
         private val TRAILING_REFERENCE_DELIMITERS = setOf('.', ',', ';', ':', '!', '?', ')', ']', '}')
         private val KNOWN_FILE_EXTENSIONS = setOf(
             "kt",

@@ -23,6 +23,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertTrue
 
 class ConsoleChatControllerSessionMemoryTest {
     @Test
@@ -108,9 +109,10 @@ class ConsoleChatControllerSessionMemoryTest {
                 Result.success(AgentResponse(content = "answer after failure")),
             ),
         )
+        val io = FakeCliIO(inputs = listOf("prompt one", "prompt two", "/exit"))
         val controller = createController(
             repository = repository,
-            io = FakeCliIO(inputs = listOf("prompt one", "prompt two", "/exit")),
+            io = io,
         )
 
         controller.runInteractive()
@@ -132,6 +134,49 @@ class ConsoleChatControllerSessionMemoryTest {
         )
         assertEquals(firstRequest[0].content, secondRequest[0].content)
         assertEquals("prompt two", secondRequest[1].content)
+        assertEquals(2, io.showThinkingIndicatorCalls)
+        assertEquals(2, io.hideThinkingIndicatorCalls)
+    }
+
+    @Test
+    fun promptRequestShowsAndHidesThinkingIndicator() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "answer one")),
+            ),
+        )
+        val io = FakeCliIO(inputs = listOf("prompt one", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(1, io.showThinkingIndicatorCalls)
+        assertEquals(1, io.hideThinkingIndicatorCalls)
+        assertTrue(io.updateThinkingIndicatorCalls >= 1)
+        assertContains(io.lastThinkingProgressText.orEmpty(), "s")
+    }
+
+    @Test
+    fun failedPromptStillHidesThinkingIndicator() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.failure(IllegalStateException("boom")),
+            ),
+        )
+        val io = FakeCliIO(inputs = listOf("prompt one", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(1, io.showThinkingIndicatorCalls)
+        assertEquals(1, io.hideThinkingIndicatorCalls)
+        assertTrue(io.updateThinkingIndicatorCalls >= 1)
     }
 
     @Test
@@ -731,6 +776,14 @@ private class FakeCliIO(
     private val queuedInputs = ArrayDeque<String?>(inputs)
     private val queuedConfigSelections = ArrayDeque(configSelections)
     private val lines = mutableListOf<String>()
+    var showThinkingIndicatorCalls: Int = 0
+        private set
+    var updateThinkingIndicatorCalls: Int = 0
+        private set
+    var lastThinkingProgressText: String? = null
+        private set
+    var hideThinkingIndicatorCalls: Int = 0
+        private set
 
     override fun clearScreen() = Unit
 
@@ -745,6 +798,19 @@ private class FakeCliIO(
     override fun readLine(prompt: String): String? = nextInput()
 
     override fun readLineInFooter(prompt: String, divider: String, systemPromptText: String): String? = nextInput()
+
+    override fun showThinkingIndicator() {
+        showThinkingIndicatorCalls += 1
+    }
+
+    override fun updateThinkingIndicator(progressText: String) {
+        updateThinkingIndicatorCalls += 1
+        lastThinkingProgressText = progressText
+    }
+
+    override fun hideThinkingIndicator() {
+        hideThinkingIndicatorCalls += 1
+    }
 
     override fun openConfigMenu(
         tabs: List<String>,

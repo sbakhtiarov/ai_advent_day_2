@@ -52,6 +52,9 @@ interface CliIO {
     fun writeLine(text: String = "")
     fun readLine(prompt: String): String?
     fun readLineInFooter(prompt: String, divider: String, systemPromptText: String): String?
+    fun showThinkingIndicator() {}
+    fun updateThinkingIndicator(progressText: String) {}
+    fun hideThinkingIndicator() {}
     fun openConfigMenu(
         tabs: List<String>,
         descriptions: List<String>,
@@ -60,6 +63,8 @@ interface CliIO {
 }
 
 object StdCliIO : CliIO {
+    private var thinkingIndicatorVisible = false
+
     override fun clearScreen() {
         // ANSI escape sequence: clear screen and move cursor to top-left.
         print("\u001B[2J\u001B[H")
@@ -80,6 +85,44 @@ object StdCliIO : CliIO {
     override fun readLine(prompt: String): String? {
         print(prompt)
         return readlnOrNull()
+    }
+
+    @OptIn(ExperimentalForeignApi::class)
+    override fun showThinkingIndicator() {
+        if (thinkingIndicatorVisible) {
+            return
+        }
+
+        print("\r\n")
+        thinkingIndicatorVisible = true
+        updateThinkingIndicator(progressText = "")
+    }
+
+    @OptIn(ExperimentalForeignApi::class)
+    override fun updateThinkingIndicator(progressText: String) {
+        if (!thinkingIndicatorVisible) {
+            return
+        }
+
+        val suffix = progressText.trim().takeIf { it.isNotEmpty() }?.let { " $it" }.orEmpty()
+        print('\r')
+        print("\u001B[2K")
+        print("  ${THINKING_LABEL_COLOR}Thinking...$suffix${ANSI_RESET}")
+        fflush(stdout)
+    }
+
+    @OptIn(ExperimentalForeignApi::class)
+    override fun hideThinkingIndicator() {
+        if (!thinkingIndicatorVisible) {
+            return
+        }
+
+        print('\r')
+        print("\u001B[2K")
+        print("\u001B[1A")
+        print('\r')
+        fflush(stdout)
+        thinkingIndicatorVisible = false
     }
 
     override fun readLineInFooter(prompt: String, divider: String, systemPromptText: String): String? {
@@ -750,6 +793,7 @@ object StdCliIO : CliIO {
     private const val ARROW_RIGHT = 67
     private const val DIVIDER_COLOR = "\u001B[38;5;240m"
     private const val SYSTEM_PROMPT_LABEL_COLOR = "\u001B[38;5;40m"
+    private const val THINKING_LABEL_COLOR = "\u001B[38;5;45m"
     private const val OPTION_SELECTED_COLOR = "\u001B[38;5;39m"
     private const val ANSI_RESET = "\u001B[0m"
     private const val FOOTER_RESERVED_INPUT_LINES = 3
