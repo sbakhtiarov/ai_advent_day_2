@@ -462,11 +462,12 @@ class ConsoleChatControllerSessionMemoryTest {
         val strategy = RecordingCompactionStrategy(
             summariesToReturn = listOf("summary one"),
         )
+        val io = FakeCliIO(
+            inputs = (1..7).map { index -> "prompt $index" } + "/exit",
+        )
         val controller = createController(
             repository = repository,
-            io = FakeCliIO(
-                inputs = (1..7).map { index -> "prompt $index" } + "/exit",
-            ),
+            io = io,
             sessionMemoryStore = store,
             sessionMemoryCompactionCoordinator = SessionMemoryCompactionCoordinator(
                 startPolicy = RollingWindowCompactionStartPolicy(
@@ -504,6 +505,7 @@ class ConsoleChatControllerSessionMemoryTest {
             listOf(MessageRole.SYSTEM, MessageRole.USER, MessageRole.ASSISTANT),
             savedWithSummary.messages.map { it.role },
         )
+        assertContains(io.outputText(), "system> session memory compacted")
     }
 
     @Test

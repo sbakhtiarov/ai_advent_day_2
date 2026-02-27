@@ -163,7 +163,7 @@ class ConsoleChatController(
                         )
                         val elapsedSeconds = startedAt.elapsedNow().inWholeMilliseconds / 1000.0
                         sessionMemory.recordSuccessfulTurn(preparedPrompt.requestPrompt, response.content)
-                        sessionMemoryCompactionCoordinator.compactIfNeeded(
+                        val compacted = sessionMemoryCompactionCoordinator.compactIfNeeded(
                             sessionMemory = sessionMemory,
                             model = currentModel,
                         )
@@ -175,6 +175,9 @@ class ConsoleChatController(
                         persistMemorySnapshot()
                         pendingFileReferences.clear()
                         dialogBlocks += formatAssistantResponse(response.content, response.usage, elapsedSeconds)
+                        if (compacted) {
+                            dialogBlocks += "system> session memory compacted"
+                        }
                     }.onFailure { throwable ->
                         dialogBlocks += "error> ${throwable.message ?: "Unexpected error"}"
                     }
