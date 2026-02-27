@@ -8,6 +8,7 @@ import com.aichallenge.day2.agent.domain.model.SessionMemory
 import com.aichallenge.day2.agent.domain.model.SessionMemoryState
 import com.aichallenge.day2.agent.domain.model.TokenUsage
 import com.aichallenge.day2.agent.domain.repository.SessionMemoryStore
+import com.aichallenge.day2.agent.domain.usecase.SessionMemoryCompactionCoordinator
 import com.aichallenge.day2.agent.domain.usecase.SendPromptUseCase
 import kotlin.math.abs
 import kotlin.math.ceil
@@ -24,6 +25,7 @@ class ConsoleChatController(
     private val sessionMemoryStore: SessionMemoryStore? = null,
     private val persistentMemoryEnabled: Boolean = true,
     private val fileReferenceReader: FileReferenceReader = PosixFileReferenceReader,
+    private val sessionMemoryCompactionCoordinator: SessionMemoryCompactionCoordinator = SessionMemoryCompactionCoordinator.disabled(),
 ) {
     private val configTabs = listOf("Format", "Size", "Stop")
     private val configDescriptions = listOf(
@@ -39,7 +41,7 @@ class ConsoleChatController(
     private var currentModel = initialModel
     private var temperature: Double? = null
     private val sessionMemory = SessionMemory(systemPrompt)
-    private var memoryUsageSnapshot = estimateHeuristicUsage(sessionMemory.snapshot())
+    private var memoryUsageSnapshot = estimateHeuristicUsage(sessionMemory.contextSnapshot())
     private val dialogBlocks = mutableListOf<String>()
     private val pendingFileReferences = mutableListOf<String>()
     private val inputDivider = "─".repeat(80)
@@ -130,10 +132,14 @@ class ConsoleChatController(
             )
             val elapsedSeconds = startedAt.elapsedNow().inWholeMilliseconds / 1000.0
             sessionMemory.recordSuccessfulTurn(preparedPrompt.requestPrompt, response.content)
+            sessionMemoryCompactionCoordinator.compactIfNeeded(
+                sessionMemory = sessionMemory,
+                model = currentModel,
+            )
             memoryUsageSnapshot = buildUsageSnapshotAfterSuccessfulTurn(
                 responseContent = response.content,
                 usage = response.usage,
-                messages = sessionMemory.snapshot(),
+                messages = sessionMemory.contextSnapshot(),
             )
             persistMemorySnapshot()
             pendingFileReferences.clear()
@@ -438,7 +444,7 @@ class ConsoleChatController(
 
     private fun resetConversation() {
         sessionMemory.reset(systemPrompt)
-        memoryUsageSnapshot = estimateHeuristicUsage(sessionMemory.snapshot())
+        memoryUsageSnapshot = estimateHeuristicUsage(sessionMemory.contextSnapshot())
         pendingFileReferences.clear()
     }
 
@@ -449,13 +455,16 @@ class ConsoleChatController(
 
         persistentMemoryInitialized = true
         val persistedState = runCatching { sessionMemoryStore?.load() }.getOrNull() ?: return
-        val restored = sessionMemory.restore(persistedState.messages)
+        val restored = sessionMemory.restore(
+            persistedMessages = persistedState.messages,
+            persistedCompactedSummary = persistedState.compactedSummary,
+        )
         memoryUsageSnapshot = if (!restored) {
-            estimateHeuristicUsage(sessionMemory.snapshot())
+            estimateHeuristicUsage(sessionMemory.contextSnapshot())
         } else {
             persistedState.usage?.takeIf { usage ->
-                usage.estimatedTokens > 0 && usage.messageCount == persistedState.messages.size
-            } ?: estimateHeuristicUsage(sessionMemory.snapshot())
+                usage.estimatedTokens > 0 && usage.messageCount == sessionMemory.contextSnapshot().size
+            } ?: estimateHeuristicUsage(sessionMemory.contextSnapshot())
         }
     }
 
@@ -466,6 +475,7 @@ class ConsoleChatController(
 
         val state = SessionMemoryState(
             messages = sessionMemory.snapshot(),
+            compactedSummary = sessionMemory.compactedSummarySnapshot(),
             usage = memoryUsageSnapshot,
         )
         runCatching {
@@ -678,7 +688,9 @@ class ConsoleChatController(
             return estimateHeuristicUsage(messages)
         }
 
-        val estimatedTokens = (usage.inputTokens + estimateMessageTokens(responseContent)).coerceAtLeast(1)
+        val usageDerivedEstimate = (usage.inputTokens + estimateMessageTokens(responseContent)).coerceAtLeast(1)
+        val heuristicEstimate = estimateSessionTokensHeuristically(messages).coerceAtLeast(1)
+        val estimatedTokens = maxOf(usageDerivedEstimate, heuristicEstimate)
         return MemoryUsageSnapshot(
             estimatedTokens = estimatedTokens,
             source = MemoryEstimateSource.HYBRID,

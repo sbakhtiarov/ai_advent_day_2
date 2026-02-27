@@ -1,6 +1,7 @@
 package com.aichallenge.day2.agent.data.local
 
 import com.aichallenge.day2.agent.domain.model.ConversationMessage
+import com.aichallenge.day2.agent.domain.model.CompactedSessionSummary
 import com.aichallenge.day2.agent.domain.model.MemoryEstimateSource
 import com.aichallenge.day2.agent.domain.model.MemoryUsageSnapshot
 import com.aichallenge.day2.agent.domain.model.MessageRole
@@ -11,6 +12,7 @@ import kotlinx.serialization.Serializable
 data class SessionMemorySnapshotDto(
     val version: Int,
     val messages: List<PersistedConversationMessageDto>,
+    val compactedSummary: PersistedCompactedSessionSummaryDto? = null,
     val memoryUsage: PersistedMemoryUsageSnapshotDto? = null,
 )
 
@@ -28,6 +30,12 @@ enum class PersistedMessageRole {
 }
 
 @Serializable
+data class PersistedCompactedSessionSummaryDto(
+    val strategyId: String,
+    val content: String,
+)
+
+@Serializable
 data class PersistedMemoryUsageSnapshotDto(
     val estimatedTokens: Int,
     val source: PersistedMemoryEstimateSource,
@@ -40,14 +48,22 @@ enum class PersistedMemoryEstimateSource {
     HEURISTIC,
 }
 
+@Serializable
+data class SessionSummarySnapshotDto(
+    val version: Int,
+    val compactedSummary: PersistedCompactedSessionSummaryDto,
+)
+
 fun SessionMemoryState.toPersistedDto(version: Int): SessionMemorySnapshotDto = SessionMemorySnapshotDto(
     version = version,
     messages = messages.map { it.toPersistedDto() },
+    compactedSummary = compactedSummary?.toPersistedDto(),
     memoryUsage = usage?.toPersistedDto(),
 )
 
 fun SessionMemorySnapshotDto.toDomainModel(): SessionMemoryState = SessionMemoryState(
     messages = messages.map { it.toDomainModel() },
+    compactedSummary = compactedSummary?.toDomainModel(),
     usage = memoryUsage?.toDomainModel(),
 )
 
@@ -83,6 +99,16 @@ private fun PersistedMemoryUsageSnapshotDto.toDomainModel(): MemoryUsageSnapshot
     estimatedTokens = estimatedTokens,
     source = source.toDomainSource(),
     messageCount = messageCount,
+)
+
+fun CompactedSessionSummary.toPersistedDto(): PersistedCompactedSessionSummaryDto = PersistedCompactedSessionSummaryDto(
+    strategyId = strategyId,
+    content = content,
+)
+
+fun PersistedCompactedSessionSummaryDto.toDomainModel(): CompactedSessionSummary = CompactedSessionSummary(
+    strategyId = strategyId,
+    content = content,
 )
 
 private fun MemoryEstimateSource.toPersistedSource(): PersistedMemoryEstimateSource = when (this) {

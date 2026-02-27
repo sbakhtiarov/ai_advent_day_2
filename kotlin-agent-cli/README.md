@@ -65,9 +65,12 @@ time> <seconds> s
 ## Session Memory
 
 - Interactive mode keeps session memory in process and persists it to `~/.kotlin-agent-cli/session-memory.json`.
+- Rolling-summary compactization also persists current summary to `~/.kotlin-agent-cli/session-summary.json`.
 - Session snapshot persistence includes both conversation messages and a context-usage estimate.
 - On interactive startup, the app restores persisted memory exactly as previously saved.
 - Each successful prompt turn is persisted immediately.
+- Rolling compactization triggers when 12 non-system messages are accumulated, compacts first 10, keeps last 2, and carries previous summary forward.
+- Prompt context order is: system prompt, rolling summary (as system context), remaining conversation, current user prompt.
 - If you attach files with `@<path>`, their text content is injected into the next submitted prompt and persisted in session memory.
 - `/config` resets session memory after applying output configuration and persists the reset state.
 - `/reset` clears in-memory session memory, clears the visible transcript, and persists the reset state.

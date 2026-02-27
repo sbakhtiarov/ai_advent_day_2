@@ -3,6 +3,9 @@ package com.aichallenge.day2.agent
 import com.aichallenge.day2.agent.core.config.AppConfig
 import com.aichallenge.day2.agent.core.di.AppContainer
 import com.aichallenge.day2.agent.data.local.JsonFileSessionMemoryStore
+import com.aichallenge.day2.agent.domain.model.RollingWindowCompactionStartPolicy
+import com.aichallenge.day2.agent.domain.usecase.RollingSummaryCompactionStrategy
+import com.aichallenge.day2.agent.domain.usecase.SessionMemoryCompactionCoordinator
 import com.aichallenge.day2.agent.presentation.cli.ConsoleChatController
 import kotlinx.coroutines.runBlocking
 import kotlin.system.exitProcess
@@ -34,6 +37,16 @@ private suspend fun runApp(args: Array<String>): Int {
     }
 
     val container = AppContainer(config)
+    val sessionMemoryCompactionCoordinator = SessionMemoryCompactionCoordinator(
+        startPolicy = RollingWindowCompactionStartPolicy(
+            threshold = 12,
+            compactCount = 10,
+            keepCount = 2,
+        ),
+        strategy = RollingSummaryCompactionStrategy(
+            sendPromptUseCase = container.sendPromptUseCase,
+        ),
+    )
     val isInteractiveMode = prompt == null
     val sessionMemoryStore = if (isInteractiveMode) {
         JsonFileSessionMemoryStore.fromDefaultLocation()
@@ -47,6 +60,7 @@ private suspend fun runApp(args: Array<String>): Int {
         models = config.models,
         sessionMemoryStore = sessionMemoryStore,
         persistentMemoryEnabled = isInteractiveMode,
+        sessionMemoryCompactionCoordinator = sessionMemoryCompactionCoordinator,
     )
 
     return try {

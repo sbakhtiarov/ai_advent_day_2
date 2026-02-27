@@ -3,14 +3,18 @@ package com.aichallenge.day2.agent.presentation.cli
 import com.aichallenge.day2.agent.core.config.ModelPricing
 import com.aichallenge.day2.agent.core.config.ModelProperties
 import com.aichallenge.day2.agent.domain.model.AgentResponse
+import com.aichallenge.day2.agent.domain.model.CompactedSessionSummary
 import com.aichallenge.day2.agent.domain.model.ConversationMessage
 import com.aichallenge.day2.agent.domain.model.MemoryEstimateSource
 import com.aichallenge.day2.agent.domain.model.MemoryUsageSnapshot
 import com.aichallenge.day2.agent.domain.model.MessageRole
+import com.aichallenge.day2.agent.domain.model.RollingWindowCompactionStartPolicy
+import com.aichallenge.day2.agent.domain.model.SessionCompactionStrategy
 import com.aichallenge.day2.agent.domain.model.SessionMemoryState
 import com.aichallenge.day2.agent.domain.model.TokenUsage
 import com.aichallenge.day2.agent.domain.repository.AgentRepository
 import com.aichallenge.day2.agent.domain.repository.SessionMemoryStore
+import com.aichallenge.day2.agent.domain.usecase.SessionMemoryCompactionCoordinator
 import com.aichallenge.day2.agent.domain.usecase.SendPromptUseCase
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
@@ -403,6 +407,144 @@ class ConsoleChatControllerSessionMemoryTest {
     }
 
     @Test
+    fun rollingCompactionUsesSummaryAndPersistsCompactedState() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = (1..7).map { index ->
+                Result.success(AgentResponse(content = "answer $index"))
+            },
+        )
+        val store = RecordingSessionMemoryStore()
+        val strategy = RecordingCompactionStrategy(
+            summariesToReturn = listOf("summary one"),
+        )
+        val controller = createController(
+            repository = repository,
+            io = FakeCliIO(
+                inputs = (1..7).map { index -> "prompt $index" } + "/exit",
+            ),
+            sessionMemoryStore = store,
+            sessionMemoryCompactionCoordinator = SessionMemoryCompactionCoordinator(
+                startPolicy = RollingWindowCompactionStartPolicy(
+                    threshold = 12,
+                    compactCount = 10,
+                    keepCount = 2,
+                ),
+                strategy = strategy,
+            ),
+        )
+
+        controller.runInteractive()
+
+        assertEquals(listOf<String?>(null), strategy.previousSummaries)
+        assertEquals(1, strategy.compactedMessageBatches.size)
+        assertEquals(10, strategy.compactedMessageBatches.single().size)
+        assertEquals("prompt 1", strategy.compactedMessageBatches.single()[0].content)
+        assertEquals("answer 5", strategy.compactedMessageBatches.single()[9].content)
+
+        val requestAfterCompaction = repository.conversations[6]
+        assertEquals(
+            listOf(MessageRole.SYSTEM, MessageRole.SYSTEM, MessageRole.USER, MessageRole.ASSISTANT, MessageRole.USER),
+            requestAfterCompaction.map { it.role },
+        )
+        assertContains(requestAfterCompaction[1].content, "summary one")
+        assertEquals("prompt 6", requestAfterCompaction[2].content)
+        assertEquals("answer 6", requestAfterCompaction[3].content)
+        assertEquals("prompt 7", requestAfterCompaction[4].content)
+
+        val savedWithSummary = assertNotNull(
+            store.saveStates.firstOrNull { it.compactedSummary != null },
+        )
+        assertEquals("summary one", savedWithSummary.compactedSummary?.content)
+        assertEquals(
+            listOf(MessageRole.SYSTEM, MessageRole.USER, MessageRole.ASSISTANT),
+            savedWithSummary.messages.map { it.role },
+        )
+    }
+
+    @Test
+    fun secondRollingCompactionReceivesPreviousSummary() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = (1..12).map { index ->
+                Result.success(AgentResponse(content = "answer $index"))
+            },
+        )
+        val strategy = RecordingCompactionStrategy(
+            summariesToReturn = listOf("summary one", "summary two"),
+        )
+        val controller = createController(
+            repository = repository,
+            io = FakeCliIO(
+                inputs = (1..12).map { index -> "prompt $index" } + "/exit",
+            ),
+            sessionMemoryCompactionCoordinator = SessionMemoryCompactionCoordinator(
+                startPolicy = RollingWindowCompactionStartPolicy(
+                    threshold = 12,
+                    compactCount = 10,
+                    keepCount = 2,
+                ),
+                strategy = strategy,
+            ),
+        )
+
+        controller.runInteractive()
+
+        assertEquals(listOf<String?>(null, "summary one"), strategy.previousSummaries)
+        assertEquals(2, strategy.compactedMessageBatches.size)
+        assertEquals("prompt 6", strategy.compactedMessageBatches[1][0].content)
+        assertEquals("answer 10", strategy.compactedMessageBatches[1][9].content)
+
+        val requestAfterSecondCompaction = repository.conversations[11]
+        assertEquals(
+            listOf(MessageRole.SYSTEM, MessageRole.SYSTEM, MessageRole.USER, MessageRole.ASSISTANT, MessageRole.USER),
+            requestAfterSecondCompaction.map { it.role },
+        )
+        assertContains(requestAfterSecondCompaction[1].content, "summary two")
+        assertEquals("prompt 11", requestAfterSecondCompaction[2].content)
+        assertEquals("answer 11", requestAfterSecondCompaction[3].content)
+        assertEquals("prompt 12", requestAfterSecondCompaction[4].content)
+    }
+
+    @Test
+    fun restoredCompactedSummaryIsIncludedInFirstPromptContext() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "new answer")),
+            ),
+        )
+        val store = RecordingSessionMemoryStore(
+            loadedState = SessionMemoryState(
+                messages = listOf(
+                    ConversationMessage.system("persisted system"),
+                    ConversationMessage.user("old question"),
+                    ConversationMessage.assistant("old answer"),
+                ),
+                compactedSummary = CompactedSessionSummary(
+                    strategyId = "rolling-summary-v1",
+                    content = "persisted summary",
+                ),
+                usage = null,
+            ),
+        )
+        val controller = createController(
+            repository = repository,
+            io = FakeCliIO(inputs = listOf("new question", "/exit")),
+            sessionMemoryStore = store,
+        )
+
+        controller.runInteractive()
+
+        val request = repository.conversations.single()
+        assertEquals(
+            listOf(MessageRole.SYSTEM, MessageRole.SYSTEM, MessageRole.USER, MessageRole.ASSISTANT, MessageRole.USER),
+            request.map { it.role },
+        )
+        assertContains(request[1].content, "persisted summary")
+        assertEquals("old question", request[2].content)
+        assertEquals("old answer", request[3].content)
+        assertEquals("new question", request[4].content)
+    }
+
+    @Test
     fun fileReferenceCommandDefersFileReadUntilPromptSubmit() = runBlocking {
         val repository = RecordingAgentRepository(responses = emptyList())
         val fileReferenceReader = RecordingFileReferenceReader(
@@ -539,6 +681,7 @@ class ConsoleChatControllerSessionMemoryTest {
         sessionMemoryStore: SessionMemoryStore? = null,
         persistentMemoryEnabled: Boolean = true,
         fileReferenceReader: FileReferenceReader = RecordingFileReferenceReader(emptyMap()),
+        sessionMemoryCompactionCoordinator: SessionMemoryCompactionCoordinator = SessionMemoryCompactionCoordinator.disabled(),
     ): ConsoleChatController {
         return ConsoleChatController(
             sendPromptUseCase = SendPromptUseCase(repository),
@@ -558,6 +701,7 @@ class ConsoleChatControllerSessionMemoryTest {
             sessionMemoryStore = sessionMemoryStore,
             persistentMemoryEnabled = persistentMemoryEnabled,
             fileReferenceReader = fileReferenceReader,
+            sessionMemoryCompactionCoordinator = sessionMemoryCompactionCoordinator,
         )
     }
 }
@@ -628,6 +772,7 @@ private class RecordingSessionMemoryStore(
         loadCalls += 1
         return loadedState?.copy(
             messages = loadedState.messages.toList(),
+            compactedSummary = loadedState.compactedSummary?.copy(),
             usage = loadedState.usage?.copy(),
         )
     }
@@ -635,6 +780,7 @@ private class RecordingSessionMemoryStore(
     override fun save(state: SessionMemoryState) {
         saveStates += SessionMemoryState(
             messages = state.messages.toList(),
+            compactedSummary = state.compactedSummary?.copy(),
             usage = state.usage?.copy(),
         )
     }
@@ -653,5 +799,26 @@ private class RecordingFileReferenceReader(
         readPaths += path
         return contentsByPath[path]
             ?: throw IllegalStateException("No prepared file content for '$path'.")
+    }
+}
+
+private class RecordingCompactionStrategy(
+    private val summariesToReturn: List<String>,
+) : SessionCompactionStrategy {
+    private val queuedSummaries = ArrayDeque(summariesToReturn)
+    val previousSummaries = mutableListOf<String?>()
+    val compactedMessageBatches = mutableListOf<List<ConversationMessage>>()
+
+    override val id: String = "rolling-summary-v1"
+
+    override suspend fun compact(
+        previousSummary: String?,
+        messagesToCompact: List<ConversationMessage>,
+        model: String,
+    ): String {
+        previousSummaries += previousSummary
+        compactedMessageBatches += messagesToCompact
+        return queuedSummaries.removeFirstOrNull()
+            ?: error("No prepared summary for compaction call #${previousSummaries.size}")
     }
 }
