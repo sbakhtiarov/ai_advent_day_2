@@ -66,6 +66,7 @@ private suspend fun runApp(args: Array<String>): Int {
                 sendPromptUseCase = container.sendPromptUseCase,
             ),
         ),
+        SessionCompactionMode.BRANCHING to SessionMemoryCompactionCoordinator.disabled(),
     )
     val isInteractiveMode = prompt == null
     val sessionMemoryStore = if (isInteractiveMode) {

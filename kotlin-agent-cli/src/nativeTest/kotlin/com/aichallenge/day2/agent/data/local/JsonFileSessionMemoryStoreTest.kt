@@ -1,10 +1,13 @@
 package com.aichallenge.day2.agent.data.local
 
+import com.aichallenge.day2.agent.domain.model.BranchingMemoryState
 import com.aichallenge.day2.agent.domain.model.CompactedSessionSummary
 import com.aichallenge.day2.agent.domain.model.ConversationMessage
 import com.aichallenge.day2.agent.domain.model.MemoryEstimateSource
 import com.aichallenge.day2.agent.domain.model.MemoryUsageSnapshot
 import com.aichallenge.day2.agent.domain.model.SessionMemoryState
+import com.aichallenge.day2.agent.domain.model.SubtopicBranchState
+import com.aichallenge.day2.agent.domain.model.TopicBranchState
 import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertContains
@@ -49,6 +52,49 @@ class JsonFileSessionMemoryStoreTest {
                 content = "summary one",
             ),
             activeCompactionModeId = "sliding-window",
+        )
+
+        store.save(state)
+
+        assertEquals(state, store.load())
+    }
+
+    @Test
+    fun saveAndLoadRoundTripPreservesBranchingState() {
+        val filePath = uniqueSessionMemoryPath()
+        val store = JsonFileSessionMemoryStore(filePath)
+        val state = SessionMemoryState(
+            messages = listOf(
+                ConversationMessage.system("system"),
+            ),
+            usage = MemoryUsageSnapshot(
+                estimatedTokens = 456,
+                source = MemoryEstimateSource.HEURISTIC,
+                messageCount = 1,
+            ),
+            compactedSummary = null,
+            activeCompactionModeId = "branching",
+            branchingState = BranchingMemoryState(
+                activeTopicKey = "building new application",
+                activeSubtopicKey = "architecture",
+                topics = listOf(
+                    TopicBranchState(
+                        key = "building new application",
+                        displayName = "Building new application",
+                        rollingSummary = "topic summary",
+                        subtopics = listOf(
+                            SubtopicBranchState(
+                                key = "architecture",
+                                displayName = "Architecture",
+                                messages = listOf(
+                                    ConversationMessage.user("question"),
+                                    ConversationMessage.assistant("answer"),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
         )
 
         store.save(state)

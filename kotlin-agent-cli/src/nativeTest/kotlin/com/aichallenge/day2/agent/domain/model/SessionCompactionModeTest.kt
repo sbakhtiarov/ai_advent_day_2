@@ -5,6 +5,14 @@ import kotlin.test.assertEquals
 
 class SessionCompactionModeTest {
     @Test
+    fun fromIdOrNullResolvesBranchingMode() {
+        assertEquals(
+            SessionCompactionMode.BRANCHING,
+            SessionCompactionMode.fromIdOrNull("branching"),
+        )
+    }
+
+    @Test
     fun fromIdOrNullResolvesFactMapMode() {
         assertEquals(
             SessionCompactionMode.FACT_MAP,

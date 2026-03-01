@@ -1,5 +1,8 @@
 package com.aichallenge.day2.agent.data.local
 
+import com.aichallenge.day2.agent.domain.model.BranchingMemoryState
+import com.aichallenge.day2.agent.domain.model.SubtopicBranchState
+import com.aichallenge.day2.agent.domain.model.TopicBranchState
 import com.aichallenge.day2.agent.domain.model.ConversationMessage
 import com.aichallenge.day2.agent.domain.model.CompactedSessionSummary
 import com.aichallenge.day2.agent.domain.model.MemoryEstimateSource
@@ -15,6 +18,7 @@ data class SessionMemorySnapshotDto(
     val compactedSummary: PersistedCompactedSessionSummaryDto? = null,
     val memoryUsage: PersistedMemoryUsageSnapshotDto? = null,
     val activeCompactionModeId: String? = null,
+    val branchingState: PersistedBranchingMemoryStateDto? = null,
 )
 
 @Serializable
@@ -44,6 +48,28 @@ data class PersistedMemoryUsageSnapshotDto(
 )
 
 @Serializable
+data class PersistedBranchingMemoryStateDto(
+    val activeTopicKey: String,
+    val activeSubtopicKey: String,
+    val topics: List<PersistedTopicBranchStateDto>,
+)
+
+@Serializable
+data class PersistedTopicBranchStateDto(
+    val key: String,
+    val displayName: String,
+    val rollingSummary: String = "",
+    val subtopics: List<PersistedSubtopicBranchStateDto>,
+)
+
+@Serializable
+data class PersistedSubtopicBranchStateDto(
+    val key: String,
+    val displayName: String,
+    val messages: List<PersistedConversationMessageDto>,
+)
+
+@Serializable
 enum class PersistedMemoryEstimateSource {
     HYBRID,
     HEURISTIC,
@@ -61,6 +87,7 @@ fun SessionMemoryState.toPersistedDto(version: Int): SessionMemorySnapshotDto = 
     compactedSummary = compactedSummary?.toPersistedDto(),
     memoryUsage = usage?.toPersistedDto(),
     activeCompactionModeId = activeCompactionModeId,
+    branchingState = branchingState?.toPersistedDto(),
 )
 
 fun SessionMemorySnapshotDto.toDomainModel(): SessionMemoryState = SessionMemoryState(
@@ -68,6 +95,7 @@ fun SessionMemorySnapshotDto.toDomainModel(): SessionMemoryState = SessionMemory
     compactedSummary = compactedSummary?.toDomainModel(),
     usage = memoryUsage?.toDomainModel(),
     activeCompactionModeId = activeCompactionModeId,
+    branchingState = branchingState?.toDomainModel(),
 )
 
 fun ConversationMessage.toPersistedDto(): PersistedConversationMessageDto = PersistedConversationMessageDto(
@@ -123,3 +151,41 @@ private fun PersistedMemoryEstimateSource.toDomainSource(): MemoryEstimateSource
     PersistedMemoryEstimateSource.HYBRID -> MemoryEstimateSource.HYBRID
     PersistedMemoryEstimateSource.HEURISTIC -> MemoryEstimateSource.HEURISTIC
 }
+
+private fun BranchingMemoryState.toPersistedDto(): PersistedBranchingMemoryStateDto = PersistedBranchingMemoryStateDto(
+    activeTopicKey = activeTopicKey,
+    activeSubtopicKey = activeSubtopicKey,
+    topics = topics.map { topic -> topic.toPersistedDto() },
+)
+
+private fun TopicBranchState.toPersistedDto(): PersistedTopicBranchStateDto = PersistedTopicBranchStateDto(
+    key = key,
+    displayName = displayName,
+    rollingSummary = rollingSummary,
+    subtopics = subtopics.map { subtopic -> subtopic.toPersistedDto() },
+)
+
+private fun SubtopicBranchState.toPersistedDto(): PersistedSubtopicBranchStateDto = PersistedSubtopicBranchStateDto(
+    key = key,
+    displayName = displayName,
+    messages = messages.map { message -> message.toPersistedDto() },
+)
+
+private fun PersistedBranchingMemoryStateDto.toDomainModel(): BranchingMemoryState = BranchingMemoryState(
+    activeTopicKey = activeTopicKey,
+    activeSubtopicKey = activeSubtopicKey,
+    topics = topics.map { topic -> topic.toDomainModel() },
+)
+
+private fun PersistedTopicBranchStateDto.toDomainModel(): TopicBranchState = TopicBranchState(
+    key = key,
+    displayName = displayName,
+    rollingSummary = rollingSummary,
+    subtopics = subtopics.map { subtopic -> subtopic.toDomainModel() },
+)
+
+private fun PersistedSubtopicBranchStateDto.toDomainModel(): SubtopicBranchState = SubtopicBranchState(
+    key = key,
+    displayName = displayName,
+    messages = messages.map { message -> message.toDomainModel() },
+)

@@ -3,6 +3,7 @@ package com.aichallenge.day2.agent.presentation.cli
 import com.aichallenge.day2.agent.core.config.ModelPricing
 import com.aichallenge.day2.agent.core.config.ModelProperties
 import com.aichallenge.day2.agent.domain.model.AgentResponse
+import com.aichallenge.day2.agent.domain.model.BranchingMemoryState
 import com.aichallenge.day2.agent.domain.model.CompactedSessionSummary
 import com.aichallenge.day2.agent.domain.model.ConversationMessage
 import com.aichallenge.day2.agent.domain.model.MemoryEstimateSource
@@ -14,7 +15,9 @@ import com.aichallenge.day2.agent.domain.model.SessionCompactionSummaryMode
 import com.aichallenge.day2.agent.domain.model.SessionCompactionStrategy
 import com.aichallenge.day2.agent.domain.model.SessionMemoryState
 import com.aichallenge.day2.agent.domain.model.SlidingWindowCompactionStartPolicy
+import com.aichallenge.day2.agent.domain.model.SubtopicBranchState
 import com.aichallenge.day2.agent.domain.model.TokenUsage
+import com.aichallenge.day2.agent.domain.model.TopicBranchState
 import com.aichallenge.day2.agent.domain.repository.AgentRepository
 import com.aichallenge.day2.agent.domain.repository.SessionMemoryStore
 import com.aichallenge.day2.agent.domain.usecase.SessionMemoryCompactionCoordinator
@@ -987,6 +990,270 @@ class ConsoleChatControllerSessionMemoryTest {
         assertEquals("fact-map", finalSaved.activeCompactionModeId)
     }
 
+    @Test
+    fun compactCommandCanSelectBranchingMode() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val store = RecordingSessionMemoryStore()
+        val io = FakeCliIO(
+            inputs = listOf("/compact", "/exit"),
+            compactionSelections = listOf(1),
+        )
+        val controller = createController(
+            repository = repository,
+            io = io,
+            sessionMemoryStore = store,
+            compactionCoordinators = mapOf(
+                SessionCompactionMode.ROLLING_SUMMARY to SessionMemoryCompactionCoordinator.disabled(),
+                SessionCompactionMode.BRANCHING to SessionMemoryCompactionCoordinator.disabled(),
+            ),
+        )
+
+        controller.runInteractive()
+
+        assertEquals(1, store.saveStates.size)
+        assertEquals("branching", store.saveStates.single().activeCompactionModeId)
+        assertNotNull(store.saveStates.single().branchingState)
+        assertContains(io.outputText(), "system> compaction strategy set to 'Branching'")
+    }
+
+    @Test
+    fun switchingToBranchingResetsLinearConversationAndPersistsFreshBranchingState() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val store = RecordingSessionMemoryStore(
+            loadedState = SessionMemoryState(
+                messages = listOf(
+                    ConversationMessage.system("persisted system"),
+                    ConversationMessage.user("old question"),
+                    ConversationMessage.assistant("old answer"),
+                ),
+                compactedSummary = CompactedSessionSummary(
+                    strategyId = "rolling-summary-v1",
+                    content = "persisted summary",
+                ),
+                usage = null,
+                activeCompactionModeId = "rolling-summary",
+            ),
+        )
+        val io = FakeCliIO(
+            inputs = listOf("/compact", "/exit"),
+            compactionSelections = listOf(1),
+        )
+        val controller = createController(
+            repository = repository,
+            io = io,
+            sessionMemoryStore = store,
+            compactionCoordinators = mapOf(
+                SessionCompactionMode.ROLLING_SUMMARY to SessionMemoryCompactionCoordinator.disabled(),
+                SessionCompactionMode.BRANCHING to SessionMemoryCompactionCoordinator.disabled(),
+            ),
+        )
+
+        controller.runInteractive()
+
+        val saved = store.saveStates.single()
+        assertEquals(1, saved.messages.size)
+        assertEquals(MessageRole.SYSTEM, saved.messages.single().role)
+        assertContains(saved.messages.single().content, "Base system prompt")
+        assertEquals(null, saved.compactedSummary)
+        assertEquals("branching", saved.activeCompactionModeId)
+        val branchingState = assertNotNull(saved.branchingState)
+        assertEquals("general", branchingState.activeTopicKey)
+        assertEquals("general", branchingState.activeSubtopicKey)
+    }
+
+    @Test
+    fun switchingFromBranchingToLinearModeResetsConversationAndClearsBranchingState() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val store = RecordingSessionMemoryStore(
+            loadedState = SessionMemoryState(
+                messages = listOf(
+                    ConversationMessage.system("persisted system"),
+                ),
+                compactedSummary = null,
+                usage = null,
+                activeCompactionModeId = "branching",
+                branchingState = BranchingMemoryState(
+                    activeTopicKey = "building new application",
+                    activeSubtopicKey = "architecture",
+                    topics = listOf(
+                        TopicBranchState(
+                            key = "building new application",
+                            displayName = "Building new application",
+                            rollingSummary = "summary one",
+                            subtopics = listOf(
+                                SubtopicBranchState(
+                                    key = "architecture",
+                                    displayName = "Architecture",
+                                    messages = listOf(
+                                        ConversationMessage.user("old q"),
+                                        ConversationMessage.assistant("old a"),
+                                    ),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        val io = FakeCliIO(
+            inputs = listOf("/compact", "/exit"),
+            compactionSelections = listOf(0),
+        )
+        val controller = createController(
+            repository = repository,
+            io = io,
+            sessionMemoryStore = store,
+            compactionCoordinators = mapOf(
+                SessionCompactionMode.ROLLING_SUMMARY to SessionMemoryCompactionCoordinator.disabled(),
+                SessionCompactionMode.BRANCHING to SessionMemoryCompactionCoordinator.disabled(),
+            ),
+            defaultCompactionMode = SessionCompactionMode.ROLLING_SUMMARY,
+        )
+
+        controller.runInteractive()
+
+        val saved = store.saveStates.single()
+        assertEquals(1, saved.messages.size)
+        assertEquals(MessageRole.SYSTEM, saved.messages.single().role)
+        assertContains(saved.messages.single().content, "Base system prompt")
+        assertEquals("rolling-summary", saved.activeCompactionModeId)
+        assertEquals(null, saved.branchingState)
+    }
+
+    @Test
+    fun branchingModeEmitsNewTopicAndSubtopicMessages() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "assistant answer")),
+                Result.success(
+                    AgentResponse(
+                        content = """{"topic":"Building new application","subtopic":"Architecture"}""",
+                    ),
+                ),
+                Result.success(AgentResponse(content = "updated topic summary")),
+            ),
+        )
+        val store = RecordingSessionMemoryStore()
+        val io = FakeCliIO(inputs = listOf("Create architecture", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            sessionMemoryStore = store,
+            compactionCoordinators = mapOf(
+                SessionCompactionMode.BRANCHING to SessionMemoryCompactionCoordinator.disabled(),
+            ),
+            defaultCompactionMode = SessionCompactionMode.BRANCHING,
+        )
+
+        controller.runInteractive()
+
+        val output = io.outputText()
+        assertContains(output, "system> new topic found: 'Building new application'")
+        assertContains(output, "system> new subtopic found in 'Building new application': 'Architecture'")
+        val branchingState = assertNotNull(store.saveStates.last().branchingState)
+        assertEquals("building new application", branchingState.activeTopicKey)
+        assertEquals("architecture", branchingState.activeSubtopicKey)
+    }
+
+    @Test
+    fun branchingModeEmitsSwitchMessageWhenClassifierReturnsExistingBranch() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "answer one")),
+                Result.success(AgentResponse(content = """{"topic":"Building new application","subtopic":"Architecture"}""")),
+                Result.success(AgentResponse(content = "summary one")),
+                Result.success(AgentResponse(content = "answer two")),
+                Result.success(AgentResponse(content = """{"topic":"Building new application","subtopic":"Network API"}""")),
+                Result.success(AgentResponse(content = "summary two")),
+                Result.success(AgentResponse(content = "answer three")),
+                Result.success(AgentResponse(content = """{"topic":"Building new application","subtopic":"Architecture"}""")),
+                Result.success(AgentResponse(content = "summary three")),
+            ),
+        )
+        val io = FakeCliIO(inputs = listOf("prompt one", "prompt two", "prompt three", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            compactionCoordinators = mapOf(
+                SessionCompactionMode.BRANCHING to SessionMemoryCompactionCoordinator.disabled(),
+            ),
+            defaultCompactionMode = SessionCompactionMode.BRANCHING,
+        )
+
+        controller.runInteractive()
+
+        assertContains(
+            io.outputText(),
+            "system> switched to topic 'Building new application' / subtopic 'Architecture'",
+        )
+    }
+
+    @Test
+    fun branchingClassificationRetriesThenFallsBackWithWarning() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "assistant answer")),
+                Result.success(AgentResponse(content = "not json")),
+                Result.success(AgentResponse(content = "still not json")),
+                Result.success(AgentResponse(content = "summary one")),
+            ),
+        )
+        val io = FakeCliIO(inputs = listOf("prompt one", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            compactionCoordinators = mapOf(
+                SessionCompactionMode.BRANCHING to SessionMemoryCompactionCoordinator.disabled(),
+            ),
+            defaultCompactionMode = SessionCompactionMode.BRANCHING,
+        )
+
+        controller.runInteractive()
+
+        assertContains(io.outputText(), "system> branch classification failed twice; using current topic/subtopic")
+        assertEquals(4, repository.conversations.size)
+    }
+
+    @Test
+    fun branchingClassificationAfterReplyRoutesNextTurnContext() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "answer one")),
+                Result.success(AgentResponse(content = """{"topic":"Building new application","subtopic":"Architecture"}""")),
+                Result.success(AgentResponse(content = "summary one")),
+                Result.success(AgentResponse(content = "answer two")),
+                Result.success(AgentResponse(content = """{"topic":"Building new application","subtopic":"Architecture"}""")),
+                Result.success(AgentResponse(content = "summary two")),
+            ),
+        )
+        val controller = createController(
+            repository = repository,
+            io = FakeCliIO(inputs = listOf("prompt one", "prompt two", "/exit")),
+            compactionCoordinators = mapOf(
+                SessionCompactionMode.BRANCHING to SessionMemoryCompactionCoordinator.disabled(),
+            ),
+            defaultCompactionMode = SessionCompactionMode.BRANCHING,
+        )
+
+        controller.runInteractive()
+
+        val secondTurnMainRequest = repository.conversations[3]
+        assertEquals(
+            listOf(
+                MessageRole.SYSTEM,
+                MessageRole.SYSTEM,
+                MessageRole.USER,
+                MessageRole.ASSISTANT,
+                MessageRole.USER,
+            ),
+            secondTurnMainRequest.map { it.role },
+        )
+        assertContains(secondTurnMainRequest[1].content, "summary one")
+        assertEquals("prompt one", secondTurnMainRequest[2].content)
+        assertEquals("answer one", secondTurnMainRequest[3].content)
+        assertEquals("prompt two", secondTurnMainRequest[4].content)
+    }
+
     private fun createController(
         repository: RecordingAgentRepository,
         io: CliIO,
@@ -1123,6 +1390,7 @@ private class RecordingSessionMemoryStore(
             compactedSummary = loadedState.compactedSummary?.copy(),
             usage = loadedState.usage?.copy(),
             activeCompactionModeId = loadedState.activeCompactionModeId,
+            branchingState = copyBranchingState(loadedState.branchingState),
         )
     }
 
@@ -1132,12 +1400,38 @@ private class RecordingSessionMemoryStore(
             compactedSummary = state.compactedSummary?.copy(),
             usage = state.usage?.copy(),
             activeCompactionModeId = state.activeCompactionModeId,
+            branchingState = copyBranchingState(state.branchingState),
         )
     }
 
     override fun clear() {
         clearCalls += 1
     }
+}
+
+private fun copyBranchingState(state: BranchingMemoryState?): BranchingMemoryState? {
+    if (state == null) {
+        return null
+    }
+
+    return BranchingMemoryState(
+        activeTopicKey = state.activeTopicKey,
+        activeSubtopicKey = state.activeSubtopicKey,
+        topics = state.topics.map { topic ->
+            TopicBranchState(
+                key = topic.key,
+                displayName = topic.displayName,
+                rollingSummary = topic.rollingSummary,
+                subtopics = topic.subtopics.map { subtopic ->
+                    SubtopicBranchState(
+                        key = subtopic.key,
+                        displayName = subtopic.displayName,
+                        messages = subtopic.messages.map { message -> message.copy() },
+                    )
+                },
+            )
+        },
+    )
 }
 
 private class RecordingFileReferenceReader(

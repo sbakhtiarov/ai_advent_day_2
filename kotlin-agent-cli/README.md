@@ -72,6 +72,10 @@ time> <seconds> s
 - Rolling compactization triggers when 12 non-system messages are accumulated, compacts first 10, keeps last 2, and carries previous summary forward.
 - Sliding-window compactization keeps only the last 10 non-system messages and does not inject summary context.
 - Fact-map compactization keeps only the last 10 non-system messages and injects a JSON key-value summary for durable facts (`goal`, `constraints`, `decisions`, `preferences`, `agreements`).
+- Branching compactization groups memory by `topic/subtopic`, classifies each completed turn after assistant reply, stores turns only in the resolved subtopic, keeps a topic-level rolling summary, and injects that topic summary for the active branch context.
+- Branching mode truncates oldest active-subtopic turns at request-build time when estimated context exceeds model window; stored branch history is not mutated by this truncation.
+- Branching mode prints system messages when a new topic/subtopic is found or when switching to an existing branch.
+- Switching to or from Branching mode via `/compact` resets active memory immediately.
 - Prompt context order is: system prompt, compacted summary (as system context when present), remaining conversation, current user prompt.
 - If you attach files with `@<path>`, their text content is injected into the next submitted prompt and persisted in session memory.
 - `/config` resets session memory after applying output configuration and persists the reset state.
@@ -85,7 +89,7 @@ time> <seconds> s
 - `/models` - list built-in models with active marker, context window, and pricing
 - `/model <id|number>` - switch active model (must be listed in `/models`)
 - `/memory` - show estimated session-memory context usage
-- `/compact` - choose compaction strategy (`Rolling summary`, `Sliding window`, or `Fact map`)
+- `/compact` - choose compaction strategy (`Rolling summary`, `Sliding window`, `Fact map`, or `Branching`)
 - `/config` - open config menu (ESC to close)
 - `/temp <temperature>` - set OpenAI temperature (`0..2`)
 - `/reset` - clear conversation memory and transcript, then delete persisted session memory on disk

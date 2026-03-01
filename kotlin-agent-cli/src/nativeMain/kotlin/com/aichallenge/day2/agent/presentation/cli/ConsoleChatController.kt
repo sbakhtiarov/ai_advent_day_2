@@ -1,6 +1,8 @@
 package com.aichallenge.day2.agent.presentation.cli
 
 import com.aichallenge.day2.agent.core.config.ModelProperties
+import com.aichallenge.day2.agent.domain.model.AgentResponse
+import com.aichallenge.day2.agent.domain.model.BranchingSessionMemory
 import com.aichallenge.day2.agent.domain.model.ConversationMessage
 import com.aichallenge.day2.agent.domain.model.MemoryEstimateSource
 import com.aichallenge.day2.agent.domain.model.MemoryUsageSnapshot
@@ -9,7 +11,9 @@ import com.aichallenge.day2.agent.domain.model.SessionMemory
 import com.aichallenge.day2.agent.domain.model.SessionMemoryState
 import com.aichallenge.day2.agent.domain.model.TokenUsage
 import com.aichallenge.day2.agent.domain.repository.SessionMemoryStore
+import com.aichallenge.day2.agent.domain.usecase.BranchClassificationUseCase
 import com.aichallenge.day2.agent.domain.usecase.SessionMemoryCompactionCoordinator
+import com.aichallenge.day2.agent.domain.usecase.RollingSummaryCompactionStrategy
 import com.aichallenge.day2.agent.domain.usecase.SendPromptUseCase
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.coroutineScope
@@ -50,6 +54,9 @@ class ConsoleChatController(
     private var currentModel = initialModel
     private var temperature: Double? = null
     private val sessionMemory = SessionMemory(systemPrompt)
+    private val branchingSessionMemory = BranchingSessionMemory()
+    private val branchClassificationUseCase = BranchClassificationUseCase(sendPromptUseCase)
+    private val branchingTopicSummaryStrategy = RollingSummaryCompactionStrategy(sendPromptUseCase)
     private var memoryUsageSnapshot = estimateHeuristicUsage(sessionMemory.contextSnapshot())
     private val dialogBlocks = mutableListOf<String>()
     private val pendingFileReferences = mutableListOf<String>()
@@ -170,29 +177,20 @@ class ConsoleChatController(
 
                 try {
                     runCatching {
-                        val response = sendPromptUseCase.execute(
-                            conversation = sessionMemory.conversationFor(preparedPrompt.requestPrompt),
-                            temperature = temperature,
-                            model = currentModel,
-                        )
+                        val turnResult = if (activeCompactionMode == SessionCompactionMode.BRANCHING) {
+                            executeBranchingTurn(preparedPrompt.requestPrompt)
+                        } else {
+                            executeLinearTurn(preparedPrompt.requestPrompt)
+                        }
                         val elapsedSeconds = startedAt.elapsedNow().inWholeMilliseconds / 1000.0
-                        sessionMemory.recordSuccessfulTurn(preparedPrompt.requestPrompt, response.content)
-                        val compacted = activeCompactionCoordinator()
-                            ?.compactIfNeeded(
-                                sessionMemory = sessionMemory,
-                                model = currentModel,
-                            )
-                            ?: false
-                        memoryUsageSnapshot = buildUsageSnapshotAfterSuccessfulTurn(
-                            responseContent = response.content,
-                            usage = response.usage,
-                            messages = sessionMemory.contextSnapshot(),
-                        )
                         persistMemorySnapshot()
                         pendingFileReferences.clear()
-                        dialogBlocks += formatAssistantResponse(response.content, response.usage, elapsedSeconds)
-                        if (compacted) {
+                        dialogBlocks += formatAssistantResponse(turnResult.response.content, turnResult.response.usage, elapsedSeconds)
+                        if (turnResult.compacted) {
                             dialogBlocks += "system> session memory compacted"
+                        }
+                        turnResult.systemMessages.forEach { systemMessage ->
+                            dialogBlocks += systemMessage
                         }
                     }.onFailure { throwable ->
                         dialogBlocks += "error> ${throwable.message ?: "Unexpected error"}"
@@ -204,6 +202,116 @@ class ConsoleChatController(
         } finally {
             io.hideThinkingIndicator()
         }
+    }
+
+    private suspend fun executeLinearTurn(requestPrompt: String): TurnExecutionResult {
+        val response = sendPromptUseCase.execute(
+            conversation = sessionMemory.conversationFor(requestPrompt),
+            temperature = temperature,
+            model = currentModel,
+        )
+        sessionMemory.recordSuccessfulTurn(requestPrompt, response.content)
+        val compacted = activeCompactionCoordinator()
+            ?.compactIfNeeded(
+                sessionMemory = sessionMemory,
+                model = currentModel,
+            )
+            ?: false
+        memoryUsageSnapshot = buildUsageSnapshotAfterSuccessfulTurn(
+            responseContent = response.content,
+            usage = response.usage,
+            messages = sessionMemory.contextSnapshot(),
+        )
+
+        return TurnExecutionResult(
+            response = response,
+            compacted = compacted,
+            systemMessages = emptyList(),
+        )
+    }
+
+    private suspend fun executeBranchingTurn(requestPrompt: String): TurnExecutionResult {
+        val contextWindow = modelById[currentModel]?.contextWindowTokens
+        val branchingConversation = branchingSessionMemory.conversationFor(
+            prompt = requestPrompt,
+            systemPrompt = systemPrompt,
+            maxEstimatedTokens = contextWindow,
+            estimateTokens = { messages -> estimateSessionTokensHeuristically(messages) },
+        )
+        val response = sendPromptUseCase.execute(
+            conversation = branchingConversation.conversation,
+            temperature = temperature,
+            model = currentModel,
+        )
+        val systemMessages = handleBranchingPostResponse(
+            prompt = requestPrompt,
+            response = response.content,
+        )
+        memoryUsageSnapshot = buildUsageSnapshotAfterSuccessfulTurn(
+            responseContent = response.content,
+            usage = response.usage,
+            messages = branchingSessionMemory.activeContextSnapshot(systemPrompt),
+        )
+
+        return TurnExecutionResult(
+            response = response,
+            compacted = false,
+            systemMessages = systemMessages,
+        )
+    }
+
+    private suspend fun handleBranchingPostResponse(
+        prompt: String,
+        response: String,
+    ): List<String> {
+        val fallbackBranch = branchingSessionMemory.activeBranch()
+        val classification = branchClassificationUseCase.classify(
+            existingTopics = branchingSessionMemory.topicCatalog(),
+            userPrompt = prompt,
+            assistantResponse = response,
+            fallbackTopic = fallbackBranch.topic,
+            fallbackSubtopic = fallbackBranch.subtopic,
+            model = currentModel,
+        )
+        val activation = branchingSessionMemory.resolveAndActivate(
+            topicName = classification.topic,
+            subtopicName = classification.subtopic,
+        )
+
+        branchingSessionMemory.recordSuccessfulTurn(
+            prompt = prompt,
+            response = response,
+        )
+
+        val updatedSummary = runCatching {
+            branchingTopicSummaryStrategy.compact(
+                previousSummary = branchingSessionMemory.activeTopicSummary(),
+                messagesToCompact = listOf(
+                    ConversationMessage.user(prompt),
+                    ConversationMessage.assistant(response),
+                ),
+                model = currentModel,
+            ).trim()
+        }.getOrNull()
+        if (!updatedSummary.isNullOrBlank()) {
+            branchingSessionMemory.updateActiveTopicSummary(updatedSummary)
+        }
+
+        val messages = mutableListOf<String>()
+        if (classification.usedFallback) {
+            messages += "system> branch classification failed twice; using current topic/subtopic"
+        }
+        if (activation.isNewTopic) {
+            messages += "system> new topic found: '${activation.topic}'"
+        }
+        if (activation.isNewSubtopic) {
+            messages += "system> new subtopic found in '${activation.topic}': '${activation.subtopic}'"
+        }
+        if (!activation.isNewTopic && !activation.isNewSubtopic && activation.switchedToExistingBranch) {
+            messages += "system> switched to topic '${activation.topic}' / subtopic '${activation.subtopic}'"
+        }
+
+        return messages
     }
 
     private fun formatThinkingProgress(spinnerFrame: Char, elapsedMillis: Long): String {
@@ -514,7 +622,8 @@ class ConsoleChatController(
 
     private fun resetConversation() {
         sessionMemory.reset(systemPrompt)
-        memoryUsageSnapshot = estimateHeuristicUsage(sessionMemory.contextSnapshot())
+        branchingSessionMemory.reset()
+        memoryUsageSnapshot = estimateHeuristicUsage(activeContextMessages())
         pendingFileReferences.clear()
     }
 
@@ -525,24 +634,35 @@ class ConsoleChatController(
 
         persistentMemoryInitialized = true
         val persistedState = runCatching { sessionMemoryStore?.load() }.getOrNull() ?: return
-        val restored = sessionMemory.restore(
+        val restoredLinear = sessionMemory.restore(
             persistedMessages = persistedState.messages,
             persistedCompactedSummary = persistedState.compactedSummary,
         )
-        activeCompactionMode = if (restored) {
-            SessionCompactionMode.fromIdOrNull(persistedState.activeCompactionModeId)
-                ?.takeIf { mode -> mode in availableCompactionModes }
-                ?: defaultCompactionMode
-        } else {
-            defaultCompactionMode
+        val restoredBranching = branchingSessionMemory.restore(persistedState.branchingState)
+        val persistedMode = SessionCompactionMode.fromIdOrNull(persistedState.activeCompactionModeId)
+            ?.takeIf { mode -> mode in availableCompactionModes }
+        activeCompactionMode = when {
+            persistedMode == SessionCompactionMode.BRANCHING && restoredBranching -> SessionCompactionMode.BRANCHING
+            persistedMode != null && persistedMode != SessionCompactionMode.BRANCHING && restoredLinear -> persistedMode
+            else -> defaultCompactionMode
         }
-        memoryUsageSnapshot = if (!restored) {
-            estimateHeuristicUsage(sessionMemory.contextSnapshot())
+
+        if (activeCompactionMode == SessionCompactionMode.BRANCHING) {
+            sessionMemory.reset(systemPrompt)
+            if (!restoredBranching) {
+                branchingSessionMemory.reset()
+            }
         } else {
-            persistedState.usage?.takeIf { usage ->
-                usage.estimatedTokens > 0 && usage.messageCount == sessionMemory.contextSnapshot().size
-            } ?: estimateHeuristicUsage(sessionMemory.contextSnapshot())
+            branchingSessionMemory.reset()
+            if (!restoredLinear) {
+                sessionMemory.reset(systemPrompt)
+            }
         }
+
+        val activeContext = activeContextMessages()
+        memoryUsageSnapshot = persistedState.usage?.takeIf { usage ->
+            usage.estimatedTokens > 0 && usage.messageCount == activeContext.size
+        } ?: estimateHeuristicUsage(activeContext)
     }
 
     private fun persistMemorySnapshot() {
@@ -555,6 +675,11 @@ class ConsoleChatController(
             compactedSummary = sessionMemory.compactedSummarySnapshot(),
             usage = memoryUsageSnapshot,
             activeCompactionModeId = activeCompactionMode.id,
+            branchingState = if (activeCompactionMode == SessionCompactionMode.BRANCHING) {
+                branchingSessionMemory.snapshot()
+            } else {
+                null
+            },
         )
         runCatching {
             sessionMemoryStore?.save(state)
@@ -680,17 +805,31 @@ class ConsoleChatController(
             return
         }
 
+        val crossingBranchingBoundary =
+            (selectedMode == SessionCompactionMode.BRANCHING) != (activeCompactionMode == SessionCompactionMode.BRANCHING)
         activeCompactionMode = selectedMode
-        if (selectedMode == SessionCompactionMode.SLIDING_WINDOW || selectedMode == SessionCompactionMode.FACT_MAP) {
+        if (crossingBranchingBoundary) {
+            resetConversation()
+        } else if (selectedMode == SessionCompactionMode.SLIDING_WINDOW || selectedMode == SessionCompactionMode.FACT_MAP) {
             sessionMemory.clearCompactedSummary()
+            memoryUsageSnapshot = estimateHeuristicUsage(activeContextMessages())
+        } else {
+            memoryUsageSnapshot = estimateHeuristicUsage(activeContextMessages())
         }
-        memoryUsageSnapshot = estimateHeuristicUsage(sessionMemory.contextSnapshot())
         persistMemorySnapshot()
         dialogBlocks += "system> compaction strategy set to '${selectedMode.label}'"
     }
 
     private fun activeCompactionCoordinator(): SessionMemoryCompactionCoordinator? {
         return compactionCoordinators[activeCompactionMode]
+    }
+
+    private fun activeContextMessages(): List<ConversationMessage> {
+        return if (activeCompactionMode == SessionCompactionMode.BRANCHING) {
+            branchingSessionMemory.activeContextSnapshot(systemPrompt)
+        } else {
+            sessionMemory.contextSnapshot()
+        }
     }
 
     private fun memoryEstimateLabel(source: MemoryEstimateSource): String = when (source) {
@@ -983,6 +1122,12 @@ class ConsoleChatController(
     private data class ParsedInlineReference(
         val path: String,
         val nextIndex: Int,
+    )
+
+    private data class TurnExecutionResult(
+        val response: AgentResponse,
+        val compacted: Boolean,
+        val systemMessages: List<String>,
     )
 
     companion object {

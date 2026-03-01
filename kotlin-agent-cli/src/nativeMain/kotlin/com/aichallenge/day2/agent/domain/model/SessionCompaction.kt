@@ -21,6 +21,10 @@ enum class SessionCompactionMode(
         id = "fact-map",
         label = "Fact map",
     ),
+    BRANCHING(
+        id = "branching",
+        label = "Branching",
+    ),
     ;
 
     companion object {
