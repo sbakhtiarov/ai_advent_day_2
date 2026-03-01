@@ -48,6 +48,7 @@ class JsonFileSessionMemoryStoreTest {
                 strategyId = "rolling-summary-v1",
                 content = "summary one",
             ),
+            activeCompactionModeId = "sliding-window",
         )
 
         store.save(state)
@@ -182,6 +183,7 @@ class JsonFileSessionMemoryStoreTest {
                 ),
                 compactedSummary = null,
                 usage = null,
+                activeCompactionModeId = null,
             ),
             store.load(),
         )

@@ -5,12 +5,42 @@ data class SessionCompactionCandidate(
     val messagesToCompact: List<ConversationMessage>,
 )
 
+enum class SessionCompactionMode(
+    val id: String,
+    val label: String,
+) {
+    ROLLING_SUMMARY(
+        id = "rolling-summary",
+        label = "Rolling summary",
+    ),
+    SLIDING_WINDOW(
+        id = "sliding-window",
+        label = "Sliding window",
+    ),
+    ;
+
+    companion object {
+        fun fromIdOrNull(id: String?): SessionCompactionMode? {
+            if (id.isNullOrBlank()) {
+                return null
+            }
+            return entries.firstOrNull { mode -> mode.id == id }
+        }
+    }
+}
+
+enum class SessionCompactionSummaryMode {
+    GENERATE,
+    CLEAR,
+}
+
 interface SessionCompactionStartPolicy {
     fun select(messages: List<ConversationMessage>): SessionCompactionCandidate?
 }
 
 interface SessionCompactionStrategy {
     val id: String
+    val summaryMode: SessionCompactionSummaryMode
 
     suspend fun compact(
         previousSummary: String?,
@@ -51,6 +81,36 @@ class RollingWindowCompactionStartPolicy(
         return SessionCompactionCandidate(
             compactedCount = compactCount,
             messagesToCompact = messages.take(compactCount),
+        )
+    }
+}
+
+class SlidingWindowCompactionStartPolicy(
+    private val maxMessages: Int,
+) : SessionCompactionStartPolicy {
+    init {
+        require(maxMessages > 0) {
+            "maxMessages must be > 0."
+        }
+    }
+
+    override fun select(messages: List<ConversationMessage>): SessionCompactionCandidate? {
+        if (messages.size <= maxMessages) {
+            return null
+        }
+
+        var compactedCount = messages.size - maxMessages
+        if (compactedCount % 2 != 0) {
+            compactedCount += 1
+        }
+
+        if (compactedCount <= 0 || compactedCount > messages.size) {
+            return null
+        }
+
+        return SessionCompactionCandidate(
+            compactedCount = compactedCount,
+            messagesToCompact = messages.take(compactedCount),
         )
     }
 }

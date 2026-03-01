@@ -121,6 +121,31 @@ class SessionMemoryTest {
     }
 
     @Test
+    fun applyCompactionWithNullSummaryClearsPreviousSummary() {
+        val memory = SessionMemory(initialSystemPrompt = "system one")
+        memory.recordSuccessfulTurn(prompt = "q1", response = "a1")
+        memory.recordSuccessfulTurn(prompt = "q2", response = "a2")
+        memory.applyCompaction(
+            compactedSummary = CompactedSessionSummary(
+                strategyId = "rolling-summary-v1",
+                content = "summary",
+            ),
+            compactedCount = 2,
+        )
+
+        memory.applyCompaction(
+            compactedSummary = null,
+            compactedCount = 2,
+        )
+
+        assertEquals(
+            listOf(ConversationMessage.system("system one")),
+            memory.snapshot(),
+        )
+        assertEquals(null, memory.compactedSummarySnapshot())
+    }
+
+    @Test
     fun resetClearsPriorTurnsAndKeepsOnlyNewSystemMessage() {
         val memory = SessionMemory(initialSystemPrompt = "system one")
         memory.recordSuccessfulTurn(prompt = "q1", response = "a1")
@@ -138,6 +163,25 @@ class SessionMemoryTest {
             listOf(ConversationMessage.system("system two")),
             memory.snapshot(),
         )
+        assertEquals(null, memory.compactedSummarySnapshot())
+    }
+
+    @Test
+    fun clearCompactedSummaryRemovesSummaryWithoutChangingMessages() {
+        val memory = SessionMemory(initialSystemPrompt = "system one")
+        memory.recordSuccessfulTurn(prompt = "q1", response = "a1")
+        memory.applyCompaction(
+            compactedSummary = CompactedSessionSummary(
+                strategyId = "rolling-summary-v1",
+                content = "summary",
+            ),
+            compactedCount = 2,
+        )
+        val snapshotBeforeClear = memory.snapshot()
+
+        memory.clearCompactedSummary()
+
+        assertEquals(snapshotBeforeClear, memory.snapshot())
         assertEquals(null, memory.compactedSummarySnapshot())
     }
 

@@ -4,6 +4,7 @@ import com.aichallenge.day2.agent.core.config.ModelProperties
 import com.aichallenge.day2.agent.domain.model.ConversationMessage
 import com.aichallenge.day2.agent.domain.model.MemoryEstimateSource
 import com.aichallenge.day2.agent.domain.model.MemoryUsageSnapshot
+import com.aichallenge.day2.agent.domain.model.SessionCompactionMode
 import com.aichallenge.day2.agent.domain.model.SessionMemory
 import com.aichallenge.day2.agent.domain.model.SessionMemoryState
 import com.aichallenge.day2.agent.domain.model.TokenUsage
@@ -30,7 +31,10 @@ class ConsoleChatController(
     private val sessionMemoryStore: SessionMemoryStore? = null,
     private val persistentMemoryEnabled: Boolean = true,
     private val fileReferenceReader: FileReferenceReader = PosixFileReferenceReader,
-    private val sessionMemoryCompactionCoordinator: SessionMemoryCompactionCoordinator = SessionMemoryCompactionCoordinator.disabled(),
+    private val compactionCoordinators: Map<SessionCompactionMode, SessionMemoryCompactionCoordinator> = mapOf(
+        SessionCompactionMode.ROLLING_SUMMARY to SessionMemoryCompactionCoordinator.disabled(),
+    ),
+    private val defaultCompactionMode: SessionCompactionMode = SessionCompactionMode.ROLLING_SUMMARY,
 ) {
     private val configTabs = listOf("Format", "Size", "Stop")
     private val configDescriptions = listOf(
@@ -51,10 +55,20 @@ class ConsoleChatController(
     private val pendingFileReferences = mutableListOf<String>()
     private val inputDivider = "─".repeat(80)
     private var persistentMemoryInitialized = false
+    private val availableCompactionModes = SessionCompactionMode.entries.filter { mode ->
+        compactionCoordinators.containsKey(mode)
+    }
+    private var activeCompactionMode = defaultCompactionMode
 
     init {
         require(currentModel in availableModelIds) {
             "Initial model must be present in available models."
+        }
+        require(availableCompactionModes.isNotEmpty()) {
+            "At least one compaction mode must be available."
+        }
+        require(defaultCompactionMode in availableCompactionModes) {
+            "Default compaction mode must have a coordinator."
         }
     }
 
@@ -163,10 +177,12 @@ class ConsoleChatController(
                         )
                         val elapsedSeconds = startedAt.elapsedNow().inWholeMilliseconds / 1000.0
                         sessionMemory.recordSuccessfulTurn(preparedPrompt.requestPrompt, response.content)
-                        val compacted = sessionMemoryCompactionCoordinator.compactIfNeeded(
-                            sessionMemory = sessionMemory,
-                            model = currentModel,
-                        )
+                        val compacted = activeCompactionCoordinator()
+                            ?.compactIfNeeded(
+                                sessionMemory = sessionMemory,
+                                model = currentModel,
+                            )
+                            ?: false
                         memoryUsageSnapshot = buildUsageSnapshotAfterSuccessfulTurn(
                             responseContent = response.content,
                             usage = response.usage,
@@ -451,6 +467,11 @@ class ConsoleChatController(
                 true
             }
 
+            input == "/compact" -> {
+                handleCompactionModeCommand()
+                true
+            }
+
             isModelCommand(input) -> {
                 handleModelCommand(input)
                 true
@@ -508,6 +529,13 @@ class ConsoleChatController(
             persistedMessages = persistedState.messages,
             persistedCompactedSummary = persistedState.compactedSummary,
         )
+        activeCompactionMode = if (restored) {
+            SessionCompactionMode.fromIdOrNull(persistedState.activeCompactionModeId)
+                ?.takeIf { mode -> mode in availableCompactionModes }
+                ?: defaultCompactionMode
+        } else {
+            defaultCompactionMode
+        }
         memoryUsageSnapshot = if (!restored) {
             estimateHeuristicUsage(sessionMemory.contextSnapshot())
         } else {
@@ -526,6 +554,7 @@ class ConsoleChatController(
             messages = sessionMemory.snapshot(),
             compactedSummary = sessionMemory.compactedSummarySnapshot(),
             usage = memoryUsageSnapshot,
+            activeCompactionModeId = activeCompactionMode.id,
         )
         runCatching {
             sessionMemoryStore?.save(state)
@@ -540,7 +569,7 @@ class ConsoleChatController(
         io.writeLine(logoBanner())
         io.writeLine()
         io.writeLine("    type your prompt and press Enter")
-        io.writeLine("    commands: /help, /models, /model <id|number>, /memory, /config, /temp <0..2>, /reset, /exit, @<path>")
+        io.writeLine("    commands: /help, /models, /model <id|number>, /memory, /compact, /config, /temp <0..2>, /reset, /exit, @<path>")
         io.writeLine()
 
         dialogBlocks.forEachIndexed { index, block ->
@@ -570,6 +599,7 @@ class ConsoleChatController(
         /models              list available built-in models
         /model <id|number>   switch active model (must be from /models)
         /memory              show session-memory context usage
+        /compact             choose memory compaction strategy
         /config              open config menu (ESC to close)
         /temp <temperature>  set response temperature (0..2)
         /reset               clear conversation and keep current system prompt
@@ -617,6 +647,40 @@ class ConsoleChatController(
             memory> [${buildMemoryUsageBar(usedTokens, contextWindow)}]
             memory> Estimate: ${memoryEstimateLabel(memoryUsageSnapshot.source)}
         """.trimIndent()
+    }
+
+    private fun handleCompactionModeCommand() {
+        if (availableCompactionModes.isEmpty()) {
+            dialogBlocks += "system> no compaction strategies are available"
+            return
+        }
+
+        val options = availableCompactionModes.map { mode -> mode.label }
+        val currentSelection = availableCompactionModes.indexOf(activeCompactionMode)
+            .takeIf { index -> index >= 0 }
+            ?: 0
+        val selectedIndex = io.openCompactionMenu(
+            options = options,
+            currentSelection = currentSelection,
+        ) ?: return
+        val selectedMode = availableCompactionModes.getOrNull(selectedIndex) ?: return
+
+        if (selectedMode == activeCompactionMode) {
+            dialogBlocks += "system> compaction strategy is already '${selectedMode.label}'"
+            return
+        }
+
+        activeCompactionMode = selectedMode
+        if (selectedMode == SessionCompactionMode.SLIDING_WINDOW) {
+            sessionMemory.clearCompactedSummary()
+        }
+        memoryUsageSnapshot = estimateHeuristicUsage(sessionMemory.contextSnapshot())
+        persistMemorySnapshot()
+        dialogBlocks += "system> compaction strategy set to '${selectedMode.label}'"
+    }
+
+    private fun activeCompactionCoordinator(): SessionMemoryCompactionCoordinator? {
+        return compactionCoordinators[activeCompactionMode]
     }
 
     private fun memoryEstimateLabel(source: MemoryEstimateSource): String = when (source) {

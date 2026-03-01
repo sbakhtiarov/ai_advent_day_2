@@ -66,18 +66,24 @@ class SessionMemory(
 
     fun compactedSummarySnapshot(): CompactedSessionSummary? = compactedSummary?.copy()
 
+    fun clearCompactedSummary() {
+        compactedSummary = null
+    }
+
     fun applyCompaction(
-        compactedSummary: CompactedSessionSummary,
+        compactedSummary: CompactedSessionSummary?,
         compactedCount: Int,
     ) {
         require(compactedCount >= 0) {
             "compactedCount must be >= 0."
         }
-        require(compactedSummary.strategyId.isNotBlank()) {
-            "compactedSummary strategyId must not be blank."
-        }
-        require(compactedSummary.content.isNotBlank()) {
-            "compactedSummary content must not be blank."
+        if (compactedSummary != null) {
+            require(compactedSummary.strategyId.isNotBlank()) {
+                "compactedSummary strategyId must not be blank."
+            }
+            require(compactedSummary.content.isNotBlank()) {
+                "compactedSummary content must not be blank."
+            }
         }
 
         val nonSystemMessages = nonSystemMessagesSnapshot()
@@ -96,7 +102,7 @@ class SessionMemory(
 
         messages.clear()
         messages += nextMessages
-        this.compactedSummary = compactedSummary.copy()
+        this.compactedSummary = compactedSummary?.copy()
     }
 
     private fun isValidCompactedSummary(summary: CompactedSessionSummary?): Boolean {

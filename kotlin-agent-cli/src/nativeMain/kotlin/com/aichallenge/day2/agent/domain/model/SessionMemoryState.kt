@@ -4,6 +4,7 @@ data class SessionMemoryState(
     val messages: List<ConversationMessage>,
     val compactedSummary: CompactedSessionSummary? = null,
     val usage: MemoryUsageSnapshot? = null,
+    val activeCompactionModeId: String? = null,
 )
 
 data class CompactedSessionSummary(

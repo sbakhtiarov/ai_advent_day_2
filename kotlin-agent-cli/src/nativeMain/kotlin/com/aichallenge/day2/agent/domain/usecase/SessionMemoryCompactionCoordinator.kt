@@ -3,6 +3,7 @@ package com.aichallenge.day2.agent.domain.usecase
 import com.aichallenge.day2.agent.domain.model.CompactedSessionSummary
 import com.aichallenge.day2.agent.domain.model.ConversationMessage
 import com.aichallenge.day2.agent.domain.model.SessionCompactionStartPolicy
+import com.aichallenge.day2.agent.domain.model.SessionCompactionSummaryMode
 import com.aichallenge.day2.agent.domain.model.SessionCompactionStrategy
 import com.aichallenge.day2.agent.domain.model.SessionMemory
 
@@ -17,24 +18,32 @@ class SessionMemoryCompactionCoordinator(
         val nonSystemMessages = sessionMemory.nonSystemMessagesSnapshot()
         val candidate = startPolicy.select(nonSystemMessages) ?: return false
 
-        val previousSummary = sessionMemory.compactedSummarySnapshot()?.content
-        val nextSummary = runCatching {
-            strategy.compact(
-                previousSummary = previousSummary,
-                messagesToCompact = candidate.messagesToCompact,
-                model = model,
-            ).trim()
-        }.getOrNull()
+        val compactedSummary = when (strategy.summaryMode) {
+            SessionCompactionSummaryMode.GENERATE -> {
+                val previousSummary = sessionMemory.compactedSummarySnapshot()?.content
+                val nextSummary = runCatching {
+                    strategy.compact(
+                        previousSummary = previousSummary,
+                        messagesToCompact = candidate.messagesToCompact,
+                        model = model,
+                    ).trim()
+                }.getOrNull()
 
-        if (nextSummary.isNullOrBlank()) {
-            return false
+                if (nextSummary.isNullOrBlank()) {
+                    return false
+                }
+
+                CompactedSessionSummary(
+                    strategyId = strategy.id,
+                    content = nextSummary,
+                )
+            }
+
+            SessionCompactionSummaryMode.CLEAR -> null
         }
 
         sessionMemory.applyCompaction(
-            compactedSummary = CompactedSessionSummary(
-                strategyId = strategy.id,
-                content = nextSummary,
-            ),
+            compactedSummary = compactedSummary,
             compactedCount = candidate.compactedCount,
         )
         return true
@@ -54,6 +63,7 @@ private object NeverCompactionStartPolicy : SessionCompactionStartPolicy {
 
 private object DisabledCompactionStrategy : SessionCompactionStrategy {
     override val id: String = "disabled"
+    override val summaryMode: SessionCompactionSummaryMode = SessionCompactionSummaryMode.CLEAR
 
     override suspend fun compact(
         previousSummary: String?,

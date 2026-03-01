@@ -9,13 +9,17 @@ import com.aichallenge.day2.agent.domain.model.MemoryEstimateSource
 import com.aichallenge.day2.agent.domain.model.MemoryUsageSnapshot
 import com.aichallenge.day2.agent.domain.model.MessageRole
 import com.aichallenge.day2.agent.domain.model.RollingWindowCompactionStartPolicy
+import com.aichallenge.day2.agent.domain.model.SessionCompactionMode
+import com.aichallenge.day2.agent.domain.model.SessionCompactionSummaryMode
 import com.aichallenge.day2.agent.domain.model.SessionCompactionStrategy
 import com.aichallenge.day2.agent.domain.model.SessionMemoryState
+import com.aichallenge.day2.agent.domain.model.SlidingWindowCompactionStartPolicy
 import com.aichallenge.day2.agent.domain.model.TokenUsage
 import com.aichallenge.day2.agent.domain.repository.AgentRepository
 import com.aichallenge.day2.agent.domain.repository.SessionMemoryStore
 import com.aichallenge.day2.agent.domain.usecase.SessionMemoryCompactionCoordinator
 import com.aichallenge.day2.agent.domain.usecase.SendPromptUseCase
+import com.aichallenge.day2.agent.domain.usecase.SlidingWindowCompactionStrategy
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertContains
@@ -469,13 +473,15 @@ class ConsoleChatControllerSessionMemoryTest {
             repository = repository,
             io = io,
             sessionMemoryStore = store,
-            sessionMemoryCompactionCoordinator = SessionMemoryCompactionCoordinator(
-                startPolicy = RollingWindowCompactionStartPolicy(
-                    threshold = 12,
-                    compactCount = 10,
-                    keepCount = 2,
+            compactionCoordinators = mapOf(
+                SessionCompactionMode.ROLLING_SUMMARY to SessionMemoryCompactionCoordinator(
+                    startPolicy = RollingWindowCompactionStartPolicy(
+                        threshold = 12,
+                        compactCount = 10,
+                        keepCount = 2,
+                    ),
+                    strategy = strategy,
                 ),
-                strategy = strategy,
             ),
         )
 
@@ -523,13 +529,15 @@ class ConsoleChatControllerSessionMemoryTest {
             io = FakeCliIO(
                 inputs = (1..12).map { index -> "prompt $index" } + "/exit",
             ),
-            sessionMemoryCompactionCoordinator = SessionMemoryCompactionCoordinator(
-                startPolicy = RollingWindowCompactionStartPolicy(
-                    threshold = 12,
-                    compactCount = 10,
-                    keepCount = 2,
+            compactionCoordinators = mapOf(
+                SessionCompactionMode.ROLLING_SUMMARY to SessionMemoryCompactionCoordinator(
+                    startPolicy = RollingWindowCompactionStartPolicy(
+                        threshold = 12,
+                        compactCount = 10,
+                        keepCount = 2,
+                    ),
+                    strategy = strategy,
                 ),
-                strategy = strategy,
             ),
         )
 
@@ -717,9 +725,136 @@ class ConsoleChatControllerSessionMemoryTest {
         controller.runInteractive()
 
         val output = io.outputText()
-        assertContains(output, "commands: /help, /models, /model <id|number>, /memory, /config, /temp <0..2>, /reset, /exit, @<path>")
+        assertContains(output, "commands: /help, /models, /model <id|number>, /memory, /compact, /config, /temp <0..2>, /reset, /exit, @<path>")
         assertContains(output, "/memory              show session-memory context usage")
+        assertContains(output, "/compact             choose memory compaction strategy")
         assertContains(output, "@<path>              attach file for the next prompt")
+    }
+
+    @Test
+    fun compactCommandSwitchesModeAndPersistsIt() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val store = RecordingSessionMemoryStore()
+        val io = FakeCliIO(
+            inputs = listOf("/compact", "/exit"),
+            compactionSelections = listOf(1),
+        )
+        val controller = createController(
+            repository = repository,
+            io = io,
+            sessionMemoryStore = store,
+            compactionCoordinators = mapOf(
+                SessionCompactionMode.ROLLING_SUMMARY to SessionMemoryCompactionCoordinator.disabled(),
+                SessionCompactionMode.SLIDING_WINDOW to SessionMemoryCompactionCoordinator.disabled(),
+            ),
+        )
+
+        controller.runInteractive()
+
+        assertEquals(1, store.saveStates.size)
+        assertEquals("sliding-window", store.saveStates.single().activeCompactionModeId)
+        assertContains(io.outputText(), "system> compaction strategy set to 'Sliding window'")
+    }
+
+    @Test
+    fun compactCommandCancelKeepsCurrentModeAndDoesNotPersist() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val store = RecordingSessionMemoryStore()
+        val io = FakeCliIO(
+            inputs = listOf("/compact", "/exit"),
+            compactionSelections = listOf(null),
+        )
+        val controller = createController(
+            repository = repository,
+            io = io,
+            sessionMemoryStore = store,
+            compactionCoordinators = mapOf(
+                SessionCompactionMode.ROLLING_SUMMARY to SessionMemoryCompactionCoordinator.disabled(),
+                SessionCompactionMode.SLIDING_WINDOW to SessionMemoryCompactionCoordinator.disabled(),
+            ),
+        )
+
+        controller.runInteractive()
+
+        assertEquals(0, store.saveStates.size)
+        assertFalse(io.outputText().contains("compaction strategy set"))
+    }
+
+    @Test
+    fun switchingToSlidingWindowClearsPersistedSummaryImmediately() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val store = RecordingSessionMemoryStore(
+            loadedState = SessionMemoryState(
+                messages = listOf(
+                    ConversationMessage.system("persisted system"),
+                    ConversationMessage.user("old question"),
+                    ConversationMessage.assistant("old answer"),
+                ),
+                compactedSummary = CompactedSessionSummary(
+                    strategyId = "rolling-summary-v1",
+                    content = "persisted summary",
+                ),
+                usage = null,
+                activeCompactionModeId = "rolling-summary",
+            ),
+        )
+        val io = FakeCliIO(
+            inputs = listOf("/compact", "/exit"),
+            compactionSelections = listOf(1),
+        )
+        val controller = createController(
+            repository = repository,
+            io = io,
+            sessionMemoryStore = store,
+            compactionCoordinators = mapOf(
+                SessionCompactionMode.ROLLING_SUMMARY to SessionMemoryCompactionCoordinator.disabled(),
+                SessionCompactionMode.SLIDING_WINDOW to SessionMemoryCompactionCoordinator.disabled(),
+            ),
+        )
+
+        controller.runInteractive()
+
+        assertEquals(1, store.saveStates.size)
+        assertEquals(null, store.saveStates.single().compactedSummary)
+        assertEquals("sliding-window", store.saveStates.single().activeCompactionModeId)
+    }
+
+    @Test
+    fun slidingWindowModeCompactsToLastTenMessagesWithoutSummaryInjection() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = (1..7).map { index ->
+                Result.success(AgentResponse(content = "answer $index"))
+            },
+        )
+        val store = RecordingSessionMemoryStore()
+        val controller = createController(
+            repository = repository,
+            io = FakeCliIO(inputs = (1..7).map { index -> "prompt $index" } + "/exit"),
+            sessionMemoryStore = store,
+            compactionCoordinators = mapOf(
+                SessionCompactionMode.ROLLING_SUMMARY to SessionMemoryCompactionCoordinator.disabled(),
+                SessionCompactionMode.SLIDING_WINDOW to SessionMemoryCompactionCoordinator(
+                    startPolicy = SlidingWindowCompactionStartPolicy(maxMessages = 10),
+                    strategy = SlidingWindowCompactionStrategy(),
+                ),
+            ),
+            defaultCompactionMode = SessionCompactionMode.SLIDING_WINDOW,
+        )
+
+        controller.runInteractive()
+
+        val requestAfterCompaction = repository.conversations[6]
+        assertEquals(MessageRole.SYSTEM, requestAfterCompaction.first().role)
+        assertFalse(requestAfterCompaction.drop(1).any { message -> message.role == MessageRole.SYSTEM })
+        assertEquals("prompt 2", requestAfterCompaction[1].content)
+        assertEquals("prompt 7", requestAfterCompaction.last().content)
+
+        val finalSaved = store.saveStates.last()
+        assertEquals(11, finalSaved.messages.size)
+        assertEquals(10, finalSaved.messages.drop(1).size)
+        assertEquals("prompt 3", finalSaved.messages[1].content)
+        assertEquals(null, finalSaved.compactedSummary)
+        assertEquals("sliding-window", finalSaved.activeCompactionModeId)
     }
 
     private fun createController(
@@ -728,7 +863,10 @@ class ConsoleChatControllerSessionMemoryTest {
         sessionMemoryStore: SessionMemoryStore? = null,
         persistentMemoryEnabled: Boolean = true,
         fileReferenceReader: FileReferenceReader = RecordingFileReferenceReader(emptyMap()),
-        sessionMemoryCompactionCoordinator: SessionMemoryCompactionCoordinator = SessionMemoryCompactionCoordinator.disabled(),
+        compactionCoordinators: Map<SessionCompactionMode, SessionMemoryCompactionCoordinator> = mapOf(
+            SessionCompactionMode.ROLLING_SUMMARY to SessionMemoryCompactionCoordinator.disabled(),
+        ),
+        defaultCompactionMode: SessionCompactionMode = SessionCompactionMode.ROLLING_SUMMARY,
     ): ConsoleChatController {
         return ConsoleChatController(
             sendPromptUseCase = SendPromptUseCase(repository),
@@ -748,7 +886,8 @@ class ConsoleChatControllerSessionMemoryTest {
             sessionMemoryStore = sessionMemoryStore,
             persistentMemoryEnabled = persistentMemoryEnabled,
             fileReferenceReader = fileReferenceReader,
-            sessionMemoryCompactionCoordinator = sessionMemoryCompactionCoordinator,
+            compactionCoordinators = compactionCoordinators,
+            defaultCompactionMode = defaultCompactionMode,
         )
     }
 }
@@ -774,9 +913,11 @@ private class RecordingAgentRepository(
 private class FakeCliIO(
     inputs: List<String>,
     configSelections: List<ConfigMenuSelection> = emptyList(),
+    private val compactionSelections: List<Int?> = emptyList(),
 ) : CliIO {
     private val queuedInputs = ArrayDeque<String?>(inputs)
     private val queuedConfigSelections = ArrayDeque(configSelections)
+    private var nextCompactionSelectionIndex = 0
     private val lines = mutableListOf<String>()
     var showThinkingIndicatorCalls: Int = 0
         private set
@@ -822,6 +963,15 @@ private class FakeCliIO(
         return queuedConfigSelections.removeFirstOrNull() ?: currentSelection
     }
 
+    override fun openCompactionMenu(options: List<String>, currentSelection: Int): Int? {
+        val selection = compactionSelections.getOrNull(nextCompactionSelectionIndex)
+        if (nextCompactionSelectionIndex < compactionSelections.size) {
+            nextCompactionSelectionIndex += 1
+            return selection
+        }
+        return currentSelection
+    }
+
     private fun nextInput(): String? = queuedInputs.removeFirstOrNull()
 
     fun outputText(): String = lines.joinToString(separator = "\n")
@@ -842,6 +992,7 @@ private class RecordingSessionMemoryStore(
             messages = loadedState.messages.toList(),
             compactedSummary = loadedState.compactedSummary?.copy(),
             usage = loadedState.usage?.copy(),
+            activeCompactionModeId = loadedState.activeCompactionModeId,
         )
     }
 
@@ -850,6 +1001,7 @@ private class RecordingSessionMemoryStore(
             messages = state.messages.toList(),
             compactedSummary = state.compactedSummary?.copy(),
             usage = state.usage?.copy(),
+            activeCompactionModeId = state.activeCompactionModeId,
         )
     }
 
@@ -878,6 +1030,7 @@ private class RecordingCompactionStrategy(
     val compactedMessageBatches = mutableListOf<List<ConversationMessage>>()
 
     override val id: String = "rolling-summary-v1"
+    override val summaryMode: SessionCompactionSummaryMode = SessionCompactionSummaryMode.GENERATE
 
     override suspend fun compact(
         previousSummary: String?,

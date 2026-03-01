@@ -4,8 +4,11 @@ import com.aichallenge.day2.agent.core.config.AppConfig
 import com.aichallenge.day2.agent.core.di.AppContainer
 import com.aichallenge.day2.agent.data.local.JsonFileSessionMemoryStore
 import com.aichallenge.day2.agent.domain.model.RollingWindowCompactionStartPolicy
+import com.aichallenge.day2.agent.domain.model.SessionCompactionMode
+import com.aichallenge.day2.agent.domain.model.SlidingWindowCompactionStartPolicy
 import com.aichallenge.day2.agent.domain.usecase.RollingSummaryCompactionStrategy
 import com.aichallenge.day2.agent.domain.usecase.SessionMemoryCompactionCoordinator
+import com.aichallenge.day2.agent.domain.usecase.SlidingWindowCompactionStrategy
 import com.aichallenge.day2.agent.presentation.cli.ConsoleChatController
 import kotlinx.coroutines.runBlocking
 import kotlin.system.exitProcess
@@ -37,14 +40,22 @@ private suspend fun runApp(args: Array<String>): Int {
     }
 
     val container = AppContainer(config)
-    val sessionMemoryCompactionCoordinator = SessionMemoryCompactionCoordinator(
-        startPolicy = RollingWindowCompactionStartPolicy(
-            threshold = 12,
-            compactCount = 10,
-            keepCount = 2,
+    val sessionMemoryCompactionCoordinators = mapOf(
+        SessionCompactionMode.ROLLING_SUMMARY to SessionMemoryCompactionCoordinator(
+            startPolicy = RollingWindowCompactionStartPolicy(
+                threshold = 12,
+                compactCount = 10,
+                keepCount = 2,
+            ),
+            strategy = RollingSummaryCompactionStrategy(
+                sendPromptUseCase = container.sendPromptUseCase,
+            ),
         ),
-        strategy = RollingSummaryCompactionStrategy(
-            sendPromptUseCase = container.sendPromptUseCase,
+        SessionCompactionMode.SLIDING_WINDOW to SessionMemoryCompactionCoordinator(
+            startPolicy = SlidingWindowCompactionStartPolicy(
+                maxMessages = 10,
+            ),
+            strategy = SlidingWindowCompactionStrategy(),
         ),
     )
     val isInteractiveMode = prompt == null
@@ -60,7 +71,8 @@ private suspend fun runApp(args: Array<String>): Int {
         models = config.models,
         sessionMemoryStore = sessionMemoryStore,
         persistentMemoryEnabled = isInteractiveMode,
-        sessionMemoryCompactionCoordinator = sessionMemoryCompactionCoordinator,
+        compactionCoordinators = sessionMemoryCompactionCoordinators,
+        defaultCompactionMode = SessionCompactionMode.ROLLING_SUMMARY,
     )
 
     return try {

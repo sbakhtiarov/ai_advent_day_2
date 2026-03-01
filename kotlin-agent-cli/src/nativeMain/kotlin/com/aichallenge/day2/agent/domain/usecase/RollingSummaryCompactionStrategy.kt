@@ -1,12 +1,14 @@
 package com.aichallenge.day2.agent.domain.usecase
 
 import com.aichallenge.day2.agent.domain.model.ConversationMessage
+import com.aichallenge.day2.agent.domain.model.SessionCompactionSummaryMode
 import com.aichallenge.day2.agent.domain.model.SessionCompactionStrategy
 
 class RollingSummaryCompactionStrategy(
     private val sendPromptUseCase: SendPromptUseCase,
 ) : SessionCompactionStrategy {
     override val id: String = STRATEGY_ID
+    override val summaryMode: SessionCompactionSummaryMode = SessionCompactionSummaryMode.GENERATE
 
     override suspend fun compact(
         previousSummary: String?,

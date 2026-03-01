@@ -14,6 +14,7 @@ data class SessionMemorySnapshotDto(
     val messages: List<PersistedConversationMessageDto>,
     val compactedSummary: PersistedCompactedSessionSummaryDto? = null,
     val memoryUsage: PersistedMemoryUsageSnapshotDto? = null,
+    val activeCompactionModeId: String? = null,
 )
 
 @Serializable
@@ -59,12 +60,14 @@ fun SessionMemoryState.toPersistedDto(version: Int): SessionMemorySnapshotDto = 
     messages = messages.map { it.toPersistedDto() },
     compactedSummary = compactedSummary?.toPersistedDto(),
     memoryUsage = usage?.toPersistedDto(),
+    activeCompactionModeId = activeCompactionModeId,
 )
 
 fun SessionMemorySnapshotDto.toDomainModel(): SessionMemoryState = SessionMemoryState(
     messages = messages.map { it.toDomainModel() },
     compactedSummary = compactedSummary?.toDomainModel(),
     usage = memoryUsage?.toDomainModel(),
+    activeCompactionModeId = activeCompactionModeId,
 )
 
 fun ConversationMessage.toPersistedDto(): PersistedConversationMessageDto = PersistedConversationMessageDto(
