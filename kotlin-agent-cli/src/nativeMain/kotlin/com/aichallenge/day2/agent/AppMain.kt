@@ -6,6 +6,7 @@ import com.aichallenge.day2.agent.data.local.JsonFileSessionMemoryStore
 import com.aichallenge.day2.agent.domain.model.RollingWindowCompactionStartPolicy
 import com.aichallenge.day2.agent.domain.model.SessionCompactionMode
 import com.aichallenge.day2.agent.domain.model.SlidingWindowCompactionStartPolicy
+import com.aichallenge.day2.agent.domain.usecase.FactMapCompactionStrategy
 import com.aichallenge.day2.agent.domain.usecase.RollingSummaryCompactionStrategy
 import com.aichallenge.day2.agent.domain.usecase.SessionMemoryCompactionCoordinator
 import com.aichallenge.day2.agent.domain.usecase.SlidingWindowCompactionStrategy
@@ -56,6 +57,14 @@ private suspend fun runApp(args: Array<String>): Int {
                 maxMessages = 10,
             ),
             strategy = SlidingWindowCompactionStrategy(),
+        ),
+        SessionCompactionMode.FACT_MAP to SessionMemoryCompactionCoordinator(
+            startPolicy = SlidingWindowCompactionStartPolicy(
+                maxMessages = 10,
+            ),
+            strategy = FactMapCompactionStrategy(
+                sendPromptUseCase = container.sendPromptUseCase,
+            ),
         ),
     )
     val isInteractiveMode = prompt == null

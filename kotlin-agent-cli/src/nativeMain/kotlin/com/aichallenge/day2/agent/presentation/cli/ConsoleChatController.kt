@@ -492,7 +492,7 @@ class ConsoleChatController(
 
             input == "/reset" -> {
                 resetConversation()
-                persistMemorySnapshot()
+                clearPersistedMemorySnapshot()
                 dialogBlocks.clear()
                 dialogBlocks += "system> conversation has been reset"
                 true
@@ -558,6 +558,16 @@ class ConsoleChatController(
         )
         runCatching {
             sessionMemoryStore?.save(state)
+        }
+    }
+
+    private fun clearPersistedMemorySnapshot() {
+        if (!persistentMemoryEnabled) {
+            return
+        }
+
+        runCatching {
+            sessionMemoryStore?.clear()
         }
     }
 
@@ -671,7 +681,7 @@ class ConsoleChatController(
         }
 
         activeCompactionMode = selectedMode
-        if (selectedMode == SessionCompactionMode.SLIDING_WINDOW) {
+        if (selectedMode == SessionCompactionMode.SLIDING_WINDOW || selectedMode == SessionCompactionMode.FACT_MAP) {
             sessionMemory.clearCompactedSummary()
         }
         memoryUsageSnapshot = estimateHeuristicUsage(sessionMemory.contextSnapshot())

@@ -294,15 +294,16 @@ class ConsoleChatControllerSessionMemoryTest {
         )
         assertEquals(firstRequest[0].content, secondRequest[0].content)
         assertEquals("prompt two", secondRequest[1].content)
-        assertEquals(0, store.clearCalls)
-        assertEquals(3, store.saveStates.size)
+        assertEquals(1, store.clearCalls)
+        assertEquals(2, store.saveStates.size)
         assertEquals(
-            listOf(MessageRole.SYSTEM),
+            listOf(MessageRole.SYSTEM, MessageRole.USER, MessageRole.ASSISTANT),
             store.saveStates[1].messages.map { it.role },
         )
         val usage = assertNotNull(store.saveStates[1].usage)
         assertEquals(MemoryEstimateSource.HEURISTIC, usage.source)
-        assertEquals(1, usage.messageCount)
+        assertEquals(3, usage.messageCount)
+        assertEquals("prompt two", store.saveStates[1].messages[1].content)
     }
 
     @Test
@@ -820,6 +821,46 @@ class ConsoleChatControllerSessionMemoryTest {
     }
 
     @Test
+    fun switchingToFactMapClearsPersistedSummaryImmediately() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val store = RecordingSessionMemoryStore(
+            loadedState = SessionMemoryState(
+                messages = listOf(
+                    ConversationMessage.system("persisted system"),
+                    ConversationMessage.user("old question"),
+                    ConversationMessage.assistant("old answer"),
+                ),
+                compactedSummary = CompactedSessionSummary(
+                    strategyId = "rolling-summary-v1",
+                    content = "persisted summary",
+                ),
+                usage = null,
+                activeCompactionModeId = "rolling-summary",
+            ),
+        )
+        val io = FakeCliIO(
+            inputs = listOf("/compact", "/exit"),
+            compactionSelections = listOf(2),
+        )
+        val controller = createController(
+            repository = repository,
+            io = io,
+            sessionMemoryStore = store,
+            compactionCoordinators = mapOf(
+                SessionCompactionMode.ROLLING_SUMMARY to SessionMemoryCompactionCoordinator.disabled(),
+                SessionCompactionMode.SLIDING_WINDOW to SessionMemoryCompactionCoordinator.disabled(),
+                SessionCompactionMode.FACT_MAP to SessionMemoryCompactionCoordinator.disabled(),
+            ),
+        )
+
+        controller.runInteractive()
+
+        assertEquals(1, store.saveStates.size)
+        assertEquals(null, store.saveStates.single().compactedSummary)
+        assertEquals("fact-map", store.saveStates.single().activeCompactionModeId)
+    }
+
+    @Test
     fun slidingWindowModeCompactsToLastTenMessagesWithoutSummaryInjection() = runBlocking {
         val repository = RecordingAgentRepository(
             responses = (1..7).map { index ->
@@ -855,6 +896,95 @@ class ConsoleChatControllerSessionMemoryTest {
         assertEquals("prompt 3", finalSaved.messages[1].content)
         assertEquals(null, finalSaved.compactedSummary)
         assertEquals("sliding-window", finalSaved.activeCompactionModeId)
+    }
+
+    @Test
+    fun factMapModeCompactsToLastTenMessagesAndInjectsSummary() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = (1..7).map { index ->
+                Result.success(AgentResponse(content = "answer $index"))
+            },
+        )
+        val store = RecordingSessionMemoryStore()
+        val strategy = RecordingCompactionStrategy(
+            summariesToReturn = listOf(
+                """
+                {
+                  "goal": "implement fact map",
+                  "constraints": ["keep 10 messages"],
+                  "decisions": ["use fact-map strategy"],
+                  "preferences": [],
+                  "agreements": ["ship in this iteration"]
+                }
+                """.trimIndent(),
+                """
+                {
+                  "goal": "implement fact map",
+                  "constraints": ["keep 10 messages"],
+                  "decisions": ["use fact-map strategy"],
+                  "preferences": [],
+                  "agreements": ["ship in this iteration"]
+                }
+                """.trimIndent(),
+            ),
+            id = "fact-map-v1",
+        )
+        val controller = createController(
+            repository = repository,
+            io = FakeCliIO(inputs = (1..7).map { index -> "prompt $index" } + "/exit"),
+            sessionMemoryStore = store,
+            compactionCoordinators = mapOf(
+                SessionCompactionMode.FACT_MAP to SessionMemoryCompactionCoordinator(
+                    startPolicy = SlidingWindowCompactionStartPolicy(maxMessages = 10),
+                    strategy = strategy,
+                ),
+            ),
+            defaultCompactionMode = SessionCompactionMode.FACT_MAP,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(2, strategy.previousSummaries.size)
+        assertEquals(null, strategy.previousSummaries[0])
+        assertContains(strategy.previousSummaries[1].orEmpty(), "\"goal\": \"implement fact map\"")
+        assertEquals(2, strategy.compactedMessageBatches.size)
+        assertEquals(2, strategy.compactedMessageBatches[0].size)
+        assertEquals(2, strategy.compactedMessageBatches[1].size)
+        assertEquals("prompt 1", strategy.compactedMessageBatches[0][0].content)
+        assertEquals("answer 1", strategy.compactedMessageBatches[0][1].content)
+        assertEquals("prompt 2", strategy.compactedMessageBatches[1][0].content)
+        assertEquals("answer 2", strategy.compactedMessageBatches[1][1].content)
+
+        val requestAfterCompaction = repository.conversations[6]
+        assertEquals(
+            listOf(
+                MessageRole.SYSTEM,
+                MessageRole.SYSTEM,
+                MessageRole.USER,
+                MessageRole.ASSISTANT,
+                MessageRole.USER,
+                MessageRole.ASSISTANT,
+                MessageRole.USER,
+                MessageRole.ASSISTANT,
+                MessageRole.USER,
+                MessageRole.ASSISTANT,
+                MessageRole.USER,
+                MessageRole.ASSISTANT,
+                MessageRole.USER,
+            ),
+            requestAfterCompaction.map { it.role },
+        )
+        assertContains(requestAfterCompaction[1].content, "\"goal\": \"implement fact map\"")
+        assertEquals("prompt 2", requestAfterCompaction[2].content)
+        assertEquals("prompt 7", requestAfterCompaction.last().content)
+
+        val finalSaved = store.saveStates.last()
+        assertEquals(11, finalSaved.messages.size)
+        assertEquals(10, finalSaved.messages.drop(1).size)
+        assertEquals("prompt 3", finalSaved.messages[1].content)
+        assertEquals("fact-map-v1", finalSaved.compactedSummary?.strategyId)
+        assertContains(finalSaved.compactedSummary?.content.orEmpty(), "\"goal\": \"implement fact map\"")
+        assertEquals("fact-map", finalSaved.activeCompactionModeId)
     }
 
     private fun createController(
@@ -1024,12 +1154,12 @@ private class RecordingFileReferenceReader(
 
 private class RecordingCompactionStrategy(
     private val summariesToReturn: List<String>,
+    override val id: String = "rolling-summary-v1",
 ) : SessionCompactionStrategy {
     private val queuedSummaries = ArrayDeque(summariesToReturn)
     val previousSummaries = mutableListOf<String?>()
     val compactedMessageBatches = mutableListOf<List<ConversationMessage>>()
 
-    override val id: String = "rolling-summary-v1"
     override val summaryMode: SessionCompactionSummaryMode = SessionCompactionSummaryMode.GENERATE
 
     override suspend fun compact(

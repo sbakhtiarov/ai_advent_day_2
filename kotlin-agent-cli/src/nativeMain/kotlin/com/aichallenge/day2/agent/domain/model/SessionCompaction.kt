@@ -17,6 +17,10 @@ enum class SessionCompactionMode(
         id = "sliding-window",
         label = "Sliding window",
     ),
+    FACT_MAP(
+        id = "fact-map",
+        label = "Fact map",
+    ),
     ;
 
     companion object {
