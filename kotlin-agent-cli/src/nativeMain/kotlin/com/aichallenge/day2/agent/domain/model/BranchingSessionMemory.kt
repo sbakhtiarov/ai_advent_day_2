@@ -2,8 +2,8 @@ package com.aichallenge.day2.agent.domain.model
 
 class BranchingSessionMemory {
     private val topicsByKey = linkedMapOf<String, TopicMemory>()
-    private var activeTopicKey: String = normalizeKey(DEFAULT_TOPIC_NAME)
-    private var activeSubtopicKey: String = normalizeKey(DEFAULT_SUBTOPIC_NAME)
+    private var activeTopicKey: String = ""
+    private var activeSubtopicKey: String = ""
 
     init {
         reset()
@@ -11,21 +11,8 @@ class BranchingSessionMemory {
 
     fun reset() {
         topicsByKey.clear()
-        val topic = TopicMemory(
-            key = normalizeKey(DEFAULT_TOPIC_NAME),
-            displayName = DEFAULT_TOPIC_NAME,
-            rollingSummary = "",
-            subtopicsByKey = linkedMapOf(
-                normalizeKey(DEFAULT_SUBTOPIC_NAME) to SubtopicMemory(
-                    key = normalizeKey(DEFAULT_SUBTOPIC_NAME),
-                    displayName = DEFAULT_SUBTOPIC_NAME,
-                    messages = mutableListOf(),
-                ),
-            ),
-        )
-        topicsByKey[topic.key] = topic
-        activeTopicKey = topic.key
-        activeSubtopicKey = normalizeKey(DEFAULT_SUBTOPIC_NAME)
+        activeTopicKey = ""
+        activeSubtopicKey = ""
     }
 
     fun restore(state: BranchingMemoryState?): Boolean {
@@ -36,32 +23,35 @@ class BranchingSessionMemory {
 
         val requestedActiveTopicKey = normalizeKey(state.activeTopicKey)
         val requestedActiveSubtopicKey = normalizeKey(state.activeSubtopicKey)
-        if (requestedActiveTopicKey.isEmpty() || requestedActiveSubtopicKey.isEmpty() || state.topics.isEmpty()) {
-            reset()
-            return false
-        }
 
         val loadedTopics = linkedMapOf<String, TopicMemory>()
         for (topicState in state.topics) {
             val topicKey = normalizeKey(topicState.key)
-            val topicDisplayName = normalizeDisplayName(topicState.displayName, DEFAULT_TOPIC_NAME)
-            if (topicKey.isEmpty() || loadedTopics.containsKey(topicKey)) {
+            if (topicKey.isEmpty() || topicKey == LEGACY_GENERAL_KEY) {
+                continue
+            }
+
+            val topicDisplayName = normalizeDisplayName(topicState.displayName)
+            if (topicDisplayName.isEmpty() || loadedTopics.containsKey(topicKey)) {
                 reset()
                 return false
             }
 
             if (topicState.subtopics.isEmpty()) {
-                reset()
-                return false
+                continue
             }
 
             val loadedSubtopics = linkedMapOf<String, SubtopicMemory>()
             for (subtopicState in topicState.subtopics) {
                 val subtopicKey = normalizeKey(subtopicState.key)
-                val subtopicDisplayName = normalizeDisplayName(subtopicState.displayName, DEFAULT_SUBTOPIC_NAME)
+                if (subtopicKey.isEmpty() || subtopicKey == LEGACY_GENERAL_KEY) {
+                    continue
+                }
+
+                val subtopicDisplayName = normalizeDisplayName(subtopicState.displayName)
                 val messageCopies = subtopicState.messages.map { it.copy() }
 
-                if (subtopicKey.isEmpty() || loadedSubtopics.containsKey(subtopicKey)) {
+                if (subtopicDisplayName.isEmpty() || loadedSubtopics.containsKey(subtopicKey)) {
                     reset()
                     return false
                 }
@@ -76,6 +66,9 @@ class BranchingSessionMemory {
                     messages = messageCopies.toMutableList(),
                 )
             }
+            if (loadedSubtopics.isEmpty()) {
+                continue
+            }
 
             loadedTopics[topicKey] = TopicMemory(
                 key = topicKey,
@@ -85,17 +78,24 @@ class BranchingSessionMemory {
             )
         }
 
-        val activeTopic = loadedTopics[requestedActiveTopicKey]
-        val activeSubtopic = activeTopic?.subtopicsByKey?.get(requestedActiveSubtopicKey)
-        if (activeTopic == null || activeSubtopic == null) {
-            reset()
-            return false
-        }
-
         topicsByKey.clear()
         topicsByKey.putAll(loadedTopics)
-        activeTopicKey = requestedActiveTopicKey
-        activeSubtopicKey = requestedActiveSubtopicKey
+        if (loadedTopics.isEmpty()) {
+            activeTopicKey = ""
+            activeSubtopicKey = ""
+            return true
+        }
+
+        val resolvedActiveTopicKey = requestedActiveTopicKey
+            .takeIf { key -> key.isNotEmpty() && loadedTopics.containsKey(key) }
+            ?: loadedTopics.keys.first()
+        val resolvedTopic = loadedTopics.getValue(resolvedActiveTopicKey)
+        val resolvedActiveSubtopicKey = requestedActiveSubtopicKey
+            .takeIf { key -> key.isNotEmpty() && resolvedTopic.subtopicsByKey.containsKey(key) }
+            ?: resolvedTopic.subtopicsByKey.keys.first()
+
+        activeTopicKey = resolvedActiveTopicKey
+        activeSubtopicKey = resolvedActiveSubtopicKey
         return true
     }
 
@@ -132,30 +132,41 @@ class BranchingSessionMemory {
     fun topicCatalog(): List<BranchTopicCatalogEntry> {
         return topicsByKey.values.map { topic ->
             BranchTopicCatalogEntry(
+                key = topic.key,
                 topic = topic.displayName,
-                subtopics = topic.subtopicsByKey.values.map { subtopic -> subtopic.displayName },
+                isActive = topic.key == activeTopicKey,
+                subtopics = topic.subtopicsByKey.values.map { subtopic ->
+                    BranchSubtopicCatalogEntry(
+                        key = subtopic.key,
+                        subtopic = subtopic.displayName,
+                        isActive = topic.key == activeTopicKey && subtopic.key == activeSubtopicKey,
+                    )
+                },
             )
         }
     }
 
     fun activeContextSnapshot(systemPrompt: String): List<ConversationMessage> {
-        val topic = activeTopic()
-        val subtopic = activeSubtopic(topic)
-        val summary = topic.rollingSummary.trim()
+        val topic = activeTopicOrNull()
+        val subtopic = topic?.let { activeSubtopicOrNull(it) }
+        val summary = topic?.rollingSummary?.trim().orEmpty()
 
         return buildList {
             add(ConversationMessage.system(systemPrompt))
             if (summary.isNotEmpty()) {
+                val topicDisplayName = topic?.displayName ?: "Unknown Topic"
                 add(
                     ConversationMessage.system(
                         buildTopicSummarySystemMessage(
-                            topicDisplayName = topic.displayName,
+                            topicDisplayName = topicDisplayName,
                             summary = summary,
                         ),
                     ),
                 )
             }
-            addAll(subtopic.messages.map { message -> message.copy() })
+            if (subtopic != null) {
+                addAll(subtopic.messages.map { message -> message.copy() })
+            }
         }
     }
 
@@ -165,8 +176,18 @@ class BranchingSessionMemory {
         maxEstimatedTokens: Int?,
         estimateTokens: (List<ConversationMessage>) -> Int,
     ): BranchingConversation {
-        val topic = activeTopic()
-        val subtopic = activeSubtopic(topic)
+        val topic = activeTopicOrNull()
+        val subtopic = topic?.let { activeSubtopicOrNull(it) }
+        if (topic == null || subtopic == null) {
+            return BranchingConversation(
+                conversation = listOf(
+                    ConversationMessage.system(systemPrompt),
+                    ConversationMessage.user(prompt),
+                ),
+                truncatedTurns = 0,
+            )
+        }
+
         var visibleSubtopicMessages = subtopic.messages.map { message -> message.copy() }
         var truncatedTurns = 0
 
@@ -196,9 +217,15 @@ class BranchingSessionMemory {
         topicName: String,
         subtopicName: String,
     ): BranchActivationResult {
-        val normalizedTopicName = normalizeDisplayName(topicName, DEFAULT_TOPIC_NAME)
+        val normalizedTopicName = normalizeDisplayName(topicName)
+        require(normalizedTopicName.isNotEmpty()) {
+            "Branch topic name must not be blank."
+        }
         val topicKey = normalizeKey(normalizedTopicName)
-        val normalizedSubtopicName = normalizeDisplayName(subtopicName, DEFAULT_SUBTOPIC_NAME)
+        val normalizedSubtopicName = normalizeDisplayName(subtopicName)
+        require(normalizedSubtopicName.isNotEmpty()) {
+            "Branch subtopic name must not be blank."
+        }
         val subtopicKey = normalizeKey(normalizedSubtopicName)
 
         val previousTopicKey = activeTopicKey
@@ -245,25 +272,43 @@ class BranchingSessionMemory {
         prompt: String,
         response: String,
     ) {
-        val subtopic = activeSubtopic(activeTopic())
+        val topic = activeTopicOrNull()
+            ?: error("Cannot store turn without an active topic.")
+        val subtopic = activeSubtopicOrNull(topic)
+            ?: error("Cannot store turn without an active subtopic.")
         subtopic.messages += ConversationMessage.user(prompt)
         subtopic.messages += ConversationMessage.assistant(response)
     }
 
     fun activeTopicSummary(): String? {
-        val summary = activeTopic().rollingSummary.trim()
+        val summary = activeTopicOrNull()?.rollingSummary?.trim().orEmpty()
         return summary.ifEmpty { null }
     }
 
     fun updateActiveTopicSummary(summary: String?) {
-        activeTopic().rollingSummary = summary?.trim().orEmpty()
+        val topic = activeTopicOrNull() ?: return
+        topic.rollingSummary = summary?.trim().orEmpty()
     }
 
     private fun activeTopic(): TopicMemory = topicsByKey[activeTopicKey]
         ?: error("Missing active topic '$activeTopicKey'.")
 
+    private fun activeTopicOrNull(): TopicMemory? {
+        if (activeTopicKey.isEmpty()) {
+            return null
+        }
+        return topicsByKey[activeTopicKey]
+    }
+
     private fun activeSubtopic(topic: TopicMemory): SubtopicMemory = topic.subtopicsByKey[activeSubtopicKey]
         ?: error("Missing active subtopic '$activeSubtopicKey' in topic '${topic.key}'.")
+
+    private fun activeSubtopicOrNull(topic: TopicMemory): SubtopicMemory? {
+        if (activeSubtopicKey.isEmpty()) {
+            return null
+        }
+        return topic.subtopicsByKey[activeSubtopicKey]
+    }
 
     private fun buildConversation(
         systemPrompt: String,
@@ -323,18 +368,17 @@ class BranchingSessionMemory {
     """.trimIndent()
 
     private fun normalizeKey(value: String): String {
-        return normalizeDisplayName(value, "").lowercase()
+        return normalizeDisplayName(value).lowercase()
     }
 
     private fun normalizeDisplayName(
         value: String,
-        fallback: String,
     ): String {
         val normalized = value.trim()
             .split(Regex("\\s+"))
             .filter { token -> token.isNotBlank() }
             .joinToString(separator = " ")
-        return normalized.ifEmpty { fallback }
+        return normalized
     }
 
     private data class TopicMemory(
@@ -351,8 +395,7 @@ class BranchingSessionMemory {
     )
 
     companion object {
-        private const val DEFAULT_TOPIC_NAME = "General"
-        private const val DEFAULT_SUBTOPIC_NAME = "General"
+        private const val LEGACY_GENERAL_KEY = "general"
     }
 }
 
@@ -362,8 +405,16 @@ data class ActiveBranch(
 )
 
 data class BranchTopicCatalogEntry(
+    val key: String,
     val topic: String,
-    val subtopics: List<String>,
+    val isActive: Boolean,
+    val subtopics: List<BranchSubtopicCatalogEntry>,
+)
+
+data class BranchSubtopicCatalogEntry(
+    val key: String,
+    val subtopic: String,
+    val isActive: Boolean,
 )
 
 data class BranchingConversation(

@@ -1057,8 +1057,9 @@ class ConsoleChatControllerSessionMemoryTest {
         assertEquals(null, saved.compactedSummary)
         assertEquals("branching", saved.activeCompactionModeId)
         val branchingState = assertNotNull(saved.branchingState)
-        assertEquals("general", branchingState.activeTopicKey)
-        assertEquals("general", branchingState.activeSubtopicKey)
+        assertEquals("", branchingState.activeTopicKey)
+        assertEquals("", branchingState.activeSubtopicKey)
+        assertTrue(branchingState.topics.isEmpty())
     }
 
     @Test
@@ -1127,7 +1128,24 @@ class ConsoleChatControllerSessionMemoryTest {
                 Result.success(AgentResponse(content = "assistant answer")),
                 Result.success(
                     AgentResponse(
-                        content = """{"topic":"Building new application","subtopic":"Architecture"}""",
+                        content = """
+                        {
+                          "topic": {"kind": "new", "key": "", "name": "Building new application"},
+                          "subtopic": {"kind": "new", "key": "", "name": "Architecture"}
+                        }
+                        """.trimIndent(),
+                    ),
+                ),
+                Result.success(
+                    AgentResponse(
+                        content = """
+                        {
+                          "allowNewTopic": true,
+                          "reuseTopicKey": "",
+                          "allowNewSubtopic": true,
+                          "reuseSubtopicKey": ""
+                        }
+                        """.trimIndent(),
                     ),
                 ),
                 Result.success(AgentResponse(content = "updated topic summary")),
@@ -1160,13 +1178,75 @@ class ConsoleChatControllerSessionMemoryTest {
         val repository = RecordingAgentRepository(
             responses = listOf(
                 Result.success(AgentResponse(content = "answer one")),
-                Result.success(AgentResponse(content = """{"topic":"Building new application","subtopic":"Architecture"}""")),
+                Result.success(
+                    AgentResponse(
+                        content = """
+                        {
+                          "topic": {"kind": "new", "key": "", "name": "Building new application"},
+                          "subtopic": {"kind": "new", "key": "", "name": "Architecture"}
+                        }
+                        """.trimIndent(),
+                    ),
+                ),
+                Result.success(
+                    AgentResponse(
+                        content = """
+                        {
+                          "allowNewTopic": true,
+                          "reuseTopicKey": "",
+                          "allowNewSubtopic": true,
+                          "reuseSubtopicKey": ""
+                        }
+                        """.trimIndent(),
+                    ),
+                ),
                 Result.success(AgentResponse(content = "summary one")),
                 Result.success(AgentResponse(content = "answer two")),
-                Result.success(AgentResponse(content = """{"topic":"Building new application","subtopic":"Network API"}""")),
+                Result.success(
+                    AgentResponse(
+                        content = """
+                        {
+                          "topic": {"kind": "existing", "key": "building new application", "name": "Building new application"},
+                          "subtopic": {"kind": "new", "key": "", "name": "Network API"}
+                        }
+                        """.trimIndent(),
+                    ),
+                ),
+                Result.success(
+                    AgentResponse(
+                        content = """
+                        {
+                          "createNewTopic": false,
+                          "topic": "",
+                          "subtopic": ""
+                        }
+                        """.trimIndent(),
+                    ),
+                ),
+                Result.success(
+                    AgentResponse(
+                        content = """
+                        {
+                          "allowNewTopic": false,
+                          "reuseTopicKey": "building new application",
+                          "allowNewSubtopic": true,
+                          "reuseSubtopicKey": ""
+                        }
+                        """.trimIndent(),
+                    ),
+                ),
                 Result.success(AgentResponse(content = "summary two")),
                 Result.success(AgentResponse(content = "answer three")),
-                Result.success(AgentResponse(content = """{"topic":"Building new application","subtopic":"Architecture"}""")),
+                Result.success(
+                    AgentResponse(
+                        content = """
+                        {
+                          "topic": {"kind": "existing", "key": "building new application", "name": "Building new application"},
+                          "subtopic": {"kind": "existing", "key": "architecture", "name": "Architecture"}
+                        }
+                        """.trimIndent(),
+                    ),
+                ),
                 Result.success(AgentResponse(content = "summary three")),
             ),
         )
@@ -1210,8 +1290,158 @@ class ConsoleChatControllerSessionMemoryTest {
 
         controller.runInteractive()
 
-        assertContains(io.outputText(), "system> branch classification failed twice; using current topic/subtopic")
+        assertContains(io.outputText(), "system> branch classification failed twice; using strict specific fallback routing")
         assertEquals(4, repository.conversations.size)
+    }
+
+    @Test
+    fun branchingValidationRejectsNewSubtopicAndKeepsExistingDesignSubtopic() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "answer one")),
+                Result.success(
+                    AgentResponse(
+                        content = """
+                        {
+                          "topic": {"kind": "new", "key": "", "name": "Game Development"},
+                          "subtopic": {"kind": "new", "key": "", "name": "Game Design"}
+                        }
+                        """.trimIndent(),
+                    ),
+                ),
+                Result.success(
+                    AgentResponse(
+                        content = """
+                        {
+                          "allowNewTopic": true,
+                          "reuseTopicKey": "",
+                          "allowNewSubtopic": true,
+                          "reuseSubtopicKey": ""
+                        }
+                        """.trimIndent(),
+                    ),
+                ),
+                Result.success(AgentResponse(content = "summary one")),
+                Result.success(AgentResponse(content = "answer two")),
+                Result.success(
+                    AgentResponse(
+                        content = """
+                        {
+                          "topic": {"kind": "existing", "key": "game development", "name": "Game Development"},
+                          "subtopic": {"kind": "new", "key": "", "name": "Characters System"}
+                        }
+                        """.trimIndent(),
+                    ),
+                ),
+                Result.success(
+                    AgentResponse(
+                        content = """
+                        {
+                          "allowNewTopic": false,
+                          "reuseTopicKey": "game development",
+                          "allowNewSubtopic": false,
+                          "reuseSubtopicKey": "game design"
+                        }
+                        """.trimIndent(),
+                    ),
+                ),
+                Result.success(AgentResponse(content = "summary two")),
+            ),
+        )
+        val store = RecordingSessionMemoryStore()
+        val io = FakeCliIO(inputs = listOf("Start game design", "Discuss character traits", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            sessionMemoryStore = store,
+            compactionCoordinators = mapOf(
+                SessionCompactionMode.BRANCHING to SessionMemoryCompactionCoordinator.disabled(),
+            ),
+            defaultCompactionMode = SessionCompactionMode.BRANCHING,
+        )
+
+        controller.runInteractive()
+
+        val output = io.outputText()
+        assertFalse(output.contains("new subtopic found in 'Game Development': 'Characters System'"))
+        val finalState = assertNotNull(store.saveStates.last().branchingState)
+        assertEquals("game development", finalState.activeTopicKey)
+        assertEquals("game design", finalState.activeSubtopicKey)
+    }
+
+    @Test
+    fun branchingTopicShiftDetectorCreatesNewTopicForUnrelatedDomain() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "answer one")),
+                Result.success(
+                    AgentResponse(
+                        content = """
+                        {
+                          "topic": {"kind": "new", "key": "", "name": "Game Development"},
+                          "subtopic": {"kind": "new", "key": "", "name": "Game Design"}
+                        }
+                        """.trimIndent(),
+                    ),
+                ),
+                Result.success(
+                    AgentResponse(
+                        content = """
+                        {
+                          "allowNewTopic": true,
+                          "reuseTopicKey": "",
+                          "allowNewSubtopic": true,
+                          "reuseSubtopicKey": ""
+                        }
+                        """.trimIndent(),
+                    ),
+                ),
+                Result.success(AgentResponse(content = "summary one")),
+                Result.success(AgentResponse(content = "answer two")),
+                Result.success(
+                    AgentResponse(
+                        content = """
+                        {
+                          "topic": {"kind": "existing", "key": "game development", "name": "Game Development"},
+                          "subtopic": {"kind": "existing", "key": "game design", "name": "Game Design"}
+                        }
+                        """.trimIndent(),
+                    ),
+                ),
+                Result.success(
+                    AgentResponse(
+                        content = """
+                        {
+                          "createNewTopic": true,
+                          "topic": "Apartment Painting",
+                          "subtopic": "Wall Preparation"
+                        }
+                        """.trimIndent(),
+                    ),
+                ),
+                Result.success(AgentResponse(content = "summary two")),
+            ),
+        )
+        val store = RecordingSessionMemoryStore()
+        val io = FakeCliIO(inputs = listOf("Let's design RPG classes", "Need help painting apartment walls", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            sessionMemoryStore = store,
+            compactionCoordinators = mapOf(
+                SessionCompactionMode.BRANCHING to SessionMemoryCompactionCoordinator.disabled(),
+            ),
+            defaultCompactionMode = SessionCompactionMode.BRANCHING,
+        )
+
+        controller.runInteractive()
+
+        val output = io.outputText()
+        assertContains(output, "system> new topic found: 'Apartment Painting'")
+        assertContains(output, "system> new subtopic found in 'Apartment Painting': 'Wall Preparation'")
+        val finalState = assertNotNull(store.saveStates.last().branchingState)
+        assertEquals("apartment painting", finalState.activeTopicKey)
+        assertEquals("wall preparation", finalState.activeSubtopicKey)
     }
 
     @Test
@@ -1219,10 +1449,51 @@ class ConsoleChatControllerSessionMemoryTest {
         val repository = RecordingAgentRepository(
             responses = listOf(
                 Result.success(AgentResponse(content = "answer one")),
-                Result.success(AgentResponse(content = """{"topic":"Building new application","subtopic":"Architecture"}""")),
+                Result.success(
+                    AgentResponse(
+                        content = """
+                        {
+                          "topic": {"kind": "new", "key": "", "name": "Building new application"},
+                          "subtopic": {"kind": "new", "key": "", "name": "Architecture"}
+                        }
+                        """.trimIndent(),
+                    ),
+                ),
+                Result.success(
+                    AgentResponse(
+                        content = """
+                        {
+                          "allowNewTopic": true,
+                          "reuseTopicKey": "",
+                          "allowNewSubtopic": true,
+                          "reuseSubtopicKey": ""
+                        }
+                        """.trimIndent(),
+                    ),
+                ),
                 Result.success(AgentResponse(content = "summary one")),
                 Result.success(AgentResponse(content = "answer two")),
-                Result.success(AgentResponse(content = """{"topic":"Building new application","subtopic":"Architecture"}""")),
+                Result.success(
+                    AgentResponse(
+                        content = """
+                        {
+                          "topic": {"kind": "existing", "key": "building new application", "name": "Building new application"},
+                          "subtopic": {"kind": "existing", "key": "architecture", "name": "Architecture"}
+                        }
+                        """.trimIndent(),
+                    ),
+                ),
+                Result.success(
+                    AgentResponse(
+                        content = """
+                        {
+                          "createNewTopic": false,
+                          "topic": "",
+                          "subtopic": ""
+                        }
+                        """.trimIndent(),
+                    ),
+                ),
                 Result.success(AgentResponse(content = "summary two")),
             ),
         )
@@ -1237,7 +1508,7 @@ class ConsoleChatControllerSessionMemoryTest {
 
         controller.runInteractive()
 
-        val secondTurnMainRequest = repository.conversations[3]
+        val secondTurnMainRequest = repository.conversations[4]
         assertEquals(
             listOf(
                 MessageRole.SYSTEM,

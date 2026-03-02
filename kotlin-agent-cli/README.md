@@ -73,6 +73,12 @@ time> <seconds> s
 - Sliding-window compactization keeps only the last 10 non-system messages and does not inject summary context.
 - Fact-map compactization keeps only the last 10 non-system messages and injects a JSON key-value summary for durable facts (`goal`, `constraints`, `decisions`, `preferences`, `agreements`).
 - Branching compactization groups memory by `topic/subtopic`, classifies each completed turn after assistant reply, stores turns only in the resolved subtopic, keeps a topic-level rolling summary, and injects that topic summary for the active branch context.
+- Branching classification is strict-reuse first: existing topic/subtopic is reused whenever there is a reasonable semantic match, especially for details that stay within the same design scope.
+- Branching starts with no default topic/subtopic branch and always routes each completed turn to a concrete specific topic/subtopic.
+- When classifier proposes a new topic/subtopic, Branching runs an additional novelty-validation step and only creates a new branch if validation confirms no existing branch matches.
+- If novelty validation fails or returns invalid JSON, Branching falls back to existing branch reuse (preferring active topic/subtopic when available).
+- If classification fails twice and no active branch exists, Branching derives specific topic/subtopic names from the current turn text and creates that branch.
+- Legacy persisted `General` topic/subtopic branches are dropped on restore.
 - Branching mode truncates oldest active-subtopic turns at request-build time when estimated context exceeds model window; stored branch history is not mutated by this truncation.
 - Branching mode prints system messages when a new topic/subtopic is found or when switching to an existing branch.
 - Switching to or from Branching mode via `/compact` resets active memory immediately.

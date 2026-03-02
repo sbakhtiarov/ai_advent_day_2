@@ -264,18 +264,15 @@ class ConsoleChatController(
         prompt: String,
         response: String,
     ): List<String> {
-        val fallbackBranch = branchingSessionMemory.activeBranch()
         val classification = branchClassificationUseCase.classify(
             existingTopics = branchingSessionMemory.topicCatalog(),
             userPrompt = prompt,
             assistantResponse = response,
-            fallbackTopic = fallbackBranch.topic,
-            fallbackSubtopic = fallbackBranch.subtopic,
             model = currentModel,
         )
         val activation = branchingSessionMemory.resolveAndActivate(
-            topicName = classification.topic,
-            subtopicName = classification.subtopic,
+            topicName = classification.topicName,
+            subtopicName = classification.subtopicName,
         )
 
         branchingSessionMemory.recordSuccessfulTurn(
@@ -299,7 +296,7 @@ class ConsoleChatController(
 
         val messages = mutableListOf<String>()
         if (classification.usedFallback) {
-            messages += "system> branch classification failed twice; using current topic/subtopic"
+            messages += "system> branch classification failed twice; using strict specific fallback routing"
         }
         if (activation.isNewTopic) {
             messages += "system> new topic found: '${activation.topic}'"
