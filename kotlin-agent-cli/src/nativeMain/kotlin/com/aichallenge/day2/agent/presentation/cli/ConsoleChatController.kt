@@ -16,10 +16,12 @@ import com.aichallenge.day2.agent.domain.model.TokenUsage
 import com.aichallenge.day2.agent.domain.model.WorkingMemoryState
 import com.aichallenge.day2.agent.domain.repository.ProfileMemoryStore
 import com.aichallenge.day2.agent.domain.repository.SessionMemoryStore
+import com.aichallenge.day2.agent.domain.repository.UserDefinedProfileStore
 import com.aichallenge.day2.agent.domain.repository.WorkingMemoryStore
 import com.aichallenge.day2.agent.domain.usecase.BranchClassificationUseCase
 import com.aichallenge.day2.agent.domain.usecase.BuildPromptRequest
 import com.aichallenge.day2.agent.domain.usecase.BuildPromptUseCase
+import com.aichallenge.day2.agent.domain.usecase.ProfilePreferenceStateMerger
 import com.aichallenge.day2.agent.domain.usecase.ProfileMemoryDistillationUseCase
 import com.aichallenge.day2.agent.domain.usecase.SessionMemoryCompactionCoordinator
 import com.aichallenge.day2.agent.domain.usecase.RollingSummaryCompactionStrategy
@@ -45,6 +47,7 @@ class ConsoleChatController(
     private val sessionMemoryStore: SessionMemoryStore? = null,
     private val workingMemoryStore: WorkingMemoryStore? = null,
     private val profileMemoryStore: ProfileMemoryStore? = null,
+    private val userDefinedProfileStore: UserDefinedProfileStore? = null,
     private val persistentMemoryEnabled: Boolean = true,
     private val workingMemoryDistillationUseCase: WorkingMemoryDistillationUseCase? = null,
     private val workingMemoryEnabled: Boolean = true,
@@ -67,7 +70,12 @@ class ConsoleChatController(
     )
     private var baseSystemPrompt = initialSystemPrompt
     private var configSelection = ConfigMenuSelection.default()
-    private var systemPrompt = systemPromptBuilder.build(baseSystemPrompt, configSelection)
+    private var userDefinedProfilePreferences: ProfilePreferenceState? = null
+    private var systemPrompt = systemPromptBuilder.build(
+        basePrompt = baseSystemPrompt,
+        selection = configSelection,
+        userDefinedProfile = userDefinedProfilePreferences,
+    )
     private val availableModelIds = models.map { it.id }.distinct().ifEmpty { listOf(initialModel) }
     private val modelById = models.associateBy { it.id }
     private var currentModel = initialModel
@@ -83,7 +91,7 @@ class ConsoleChatController(
             systemPrompt = systemPrompt,
             session = sessionMemory.promptDataSnapshot(),
             workingTaskState = workingMemoryState?.taskState,
-            profileMemoryState = profileMemoryState,
+            profileMemoryState = effectiveProfileMemoryState(),
         ).toConversation(),
     )
     private val dialogBlocks = mutableListOf<String>()
@@ -92,6 +100,7 @@ class ConsoleChatController(
     private var persistentMemoryInitialized = false
     private var workingMemoryInitialized = false
     private var profileMemoryInitialized = false
+    private var userDefinedProfileInitialized = false
     private val availableCompactionModes = SessionCompactionMode.entries.filter { mode ->
         compactionCoordinators.containsKey(mode)
     }
@@ -110,6 +119,7 @@ class ConsoleChatController(
     }
 
     suspend fun runInteractive() {
+        initializeUserDefinedProfile()
         initializePersistentMemory()
         initializeWorkingMemory()
         initializeProfileMemory()
@@ -121,7 +131,6 @@ class ConsoleChatController(
                 val input = io.readLineInFooter(
                     prompt = "> ",
                     divider = inputDivider,
-                    systemPromptText = systemPrompt,
                 ) ?: break
                 if (input.isBlank()) {
                     continue
@@ -157,6 +166,7 @@ class ConsoleChatController(
             io.writeLine("error> --prompt must not be empty")
             return 1
         }
+        initializeUserDefinedProfile()
 
         return runCatching {
             val startedAt = TimeSource.Monotonic.markNow()
@@ -166,7 +176,7 @@ class ConsoleChatController(
                     session = sessionMemory.promptDataSnapshot(),
                     userPrompt = prompt,
                     workingTaskState = workingMemoryState?.taskState,
-                    profileMemoryState = profileMemoryState,
+                    profileMemoryState = effectiveProfileMemoryState(),
                 ),
             )
             val response = sendPromptUseCase.execute(
@@ -264,7 +274,7 @@ class ConsoleChatController(
                 session = sessionMemory.promptDataSnapshot(),
                 userPrompt = requestPrompt,
                 workingTaskState = workingMemoryState?.taskState,
-                profileMemoryState = profileMemoryState,
+                profileMemoryState = effectiveProfileMemoryState(),
             ),
         )
         val response = sendPromptUseCase.execute(
@@ -298,7 +308,7 @@ class ConsoleChatController(
                         session = sessionPromptData,
                         userPrompt = requestPrompt,
                         workingTaskState = workingMemoryState?.taskState,
-                        profileMemoryState = profileMemoryState,
+                        profileMemoryState = effectiveProfileMemoryState(),
                     ),
                 )
                 estimateSessionTokensHeuristically(promptRequest.toConversation())
@@ -310,7 +320,7 @@ class ConsoleChatController(
                 session = branchingPromptData.session,
                 userPrompt = requestPrompt,
                 workingTaskState = workingMemoryState?.taskState,
-                profileMemoryState = profileMemoryState,
+                profileMemoryState = effectiveProfileMemoryState(),
             ),
         )
         val response = sendPromptUseCase.execute(
@@ -658,7 +668,7 @@ class ConsoleChatController(
                     descriptions = configDescriptions,
                     currentSelection = configSelection,
                 )
-                systemPrompt = systemPromptBuilder.build(baseSystemPrompt, configSelection)
+                rebuildSystemPrompt()
                 resetConversation()
                 persistMemorySnapshot()
                 dialogBlocks += "system> configuration applied"
@@ -692,6 +702,27 @@ class ConsoleChatController(
         branchingSessionMemory.reset()
         memoryUsageSnapshot = estimateHeuristicUsage(activeContextMessages())
         pendingFileReferences.clear()
+    }
+
+    private fun initializeUserDefinedProfile() {
+        if (userDefinedProfileInitialized) {
+            return
+        }
+
+        userDefinedProfileInitialized = true
+        userDefinedProfilePreferences = runCatching {
+            userDefinedProfileStore?.load()
+        }.getOrNull()
+        rebuildSystemPrompt()
+        memoryUsageSnapshot = estimateHeuristicUsage(activeContextMessages())
+    }
+
+    private fun rebuildSystemPrompt() {
+        systemPrompt = systemPromptBuilder.build(
+            basePrompt = baseSystemPrompt,
+            selection = configSelection,
+            userDefinedProfile = userDefinedProfilePreferences,
+        )
     }
 
     private fun initializePersistentMemory() {
@@ -987,20 +1018,29 @@ class ConsoleChatController(
         return compactionCoordinators[activeCompactionMode]
     }
 
+    private fun effectiveProfileMemoryState(): ProfileMemoryState? {
+        val distilledState = profileMemoryState ?: return null
+        val mergedPreferences = ProfilePreferenceStateMerger.merge(
+            distilled = distilledState.preferences,
+            userDefined = userDefinedProfilePreferences,
+        )
+        return distilledState.copy(preferences = mergedPreferences)
+    }
+
     private fun activeContextMessages(): List<ConversationMessage> {
         return if (activeCompactionMode == SessionCompactionMode.BRANCHING) {
             buildPromptUseCase.buildContext(
                 systemPrompt = systemPrompt,
                 session = branchingSessionMemory.activePromptDataSnapshot(),
                 workingTaskState = workingMemoryState?.taskState,
-                profileMemoryState = profileMemoryState,
+                profileMemoryState = effectiveProfileMemoryState(),
             ).toConversation()
         } else {
             buildPromptUseCase.buildContext(
                 systemPrompt = systemPrompt,
                 session = sessionMemory.promptDataSnapshot(),
                 workingTaskState = workingMemoryState?.taskState,
-                profileMemoryState = profileMemoryState,
+                profileMemoryState = effectiveProfileMemoryState(),
             ).toConversation()
         }
     }

@@ -51,7 +51,7 @@ interface CliIO {
     fun showCursor()
     fun writeLine(text: String = "")
     fun readLine(prompt: String): String?
-    fun readLineInFooter(prompt: String, divider: String, systemPromptText: String): String?
+    fun readLineInFooter(prompt: String, divider: String): String?
     fun showThinkingIndicator() {}
     fun updateThinkingIndicator(progressText: String) {}
     fun hideThinkingIndicator() {}
@@ -126,14 +126,13 @@ object StdCliIO : CliIO {
         thinkingIndicatorVisible = false
     }
 
-    override fun readLineInFooter(prompt: String, divider: String, systemPromptText: String): String? {
+    override fun readLineInFooter(prompt: String, divider: String): String? {
         val input = StringBuilder()
         val pendingKeys = ArrayDeque<Int>()
         val terminalWidth = detectTerminalWidth().coerceAtLeast(prompt.length + 1)
         val dividerChar = divider.firstOrNull() ?: '─'
         val dividerLine = dividerChar.toString().repeat(terminalWidth)
         val coloredDividerLine = colorizeDivider(dividerLine)
-        val systemLine = formatSystemPromptLine(systemPromptText)
 
         // Initial footer render:
         // divider
@@ -141,8 +140,7 @@ object StdCliIO : CliIO {
         // divider
         print(coloredDividerLine)
         print('\n')
-        val systemLineVisualLines = calculateVisualLineCount(stripAnsi(systemLine).length, terminalWidth)
-        val reservedFooterLines = FOOTER_RESERVED_INPUT_LINES + 1 + systemLineVisualLines
+        val reservedFooterLines = FOOTER_RESERVED_INPUT_LINES
         ensureMenuFits(requiredMenuLines = reservedFooterLines)
         print("\u001B7")
         redrawFooterFromPromptAnchor(
@@ -150,7 +148,6 @@ object StdCliIO : CliIO {
             input = input,
             divider = coloredDividerLine,
             width = terminalWidth,
-            systemLine = systemLine,
         )
 
         return withRawInput<String?> {
@@ -192,7 +189,6 @@ object StdCliIO : CliIO {
                                 input = input,
                                 divider = coloredDividerLine,
                                 width = terminalWidth,
-                                systemLine = systemLine,
                             )
                             continue@loop
                         }
@@ -216,7 +212,6 @@ object StdCliIO : CliIO {
                                 input = input,
                                 divider = coloredDividerLine,
                                 width = terminalWidth,
-                                systemLine = systemLine,
                             )
                         }
                     }
@@ -233,7 +228,6 @@ object StdCliIO : CliIO {
                                     input = input,
                                     divider = coloredDividerLine,
                                     width = terminalWidth,
-                                    systemLine = systemLine,
                                 )
                             }
                         }
@@ -257,7 +251,6 @@ object StdCliIO : CliIO {
                                 input = input,
                                 divider = coloredDividerLine,
                                 width = terminalWidth,
-                                systemLine = systemLine,
                             )
                         }
                     }
@@ -270,7 +263,6 @@ object StdCliIO : CliIO {
                                 input = input,
                                 divider = coloredDividerLine,
                                 width = terminalWidth,
-                                systemLine = systemLine,
                             )
                         }
                     }
@@ -582,7 +574,6 @@ object StdCliIO : CliIO {
         input: StringBuilder,
         divider: String,
         width: Int,
-        systemLine: String,
     ) {
         val inputPreview = buildInputPreview(input.toString())
         val continuationPrefix = " ".repeat(prompt.length)
@@ -602,8 +593,6 @@ object StdCliIO : CliIO {
         }
         print('\n')
         print(divider)
-        print('\n')
-        print(systemLine)
         print("\u001B8")
         moveCursorToPreviewEnd(
             prompt = prompt,
@@ -639,14 +628,6 @@ object StdCliIO : CliIO {
     }
 
     private fun colorizeDivider(divider: String): String = "$DIVIDER_COLOR$divider$ANSI_RESET"
-
-    private fun formatSystemPromptLine(systemPromptText: String): String {
-        val normalizedPrompt = systemPromptText.trim()
-            .replace('\n', ' ')
-            .replace(Regex("\\s+"), " ")
-            .ifBlank { "emtpty" }
-        return "${SYSTEM_PROMPT_LABEL_COLOR}System prompt:${ANSI_RESET} $normalizedPrompt"
-    }
 
     @OptIn(ExperimentalForeignApi::class)
     private fun readClipboardText(): String? = memScoped {
@@ -887,7 +868,6 @@ object StdCliIO : CliIO {
     private const val ARROW_LEFT = 68
     private const val ARROW_RIGHT = 67
     private const val DIVIDER_COLOR = "\u001B[38;5;240m"
-    private const val SYSTEM_PROMPT_LABEL_COLOR = "\u001B[38;5;40m"
     private const val THINKING_LABEL_COLOR = "\u001B[38;5;45m"
     private const val OPTION_SELECTED_COLOR = "\u001B[38;5;39m"
     private const val ANSI_RESET = "\u001B[0m"

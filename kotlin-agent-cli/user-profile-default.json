@@ -1,0 +1,16 @@
+{
+    "writingStyle": "concise bullets",
+    "workflowDefaults": [
+      "show findings first in reviews",
+      "summarize changes with file references"
+    ],
+    "stableConstraints": [
+      "do not edit unrelated files"
+    ],
+    "name": "Sergei",
+    "work": "Mobile engineer at Wire",
+    "profession": "Senior Engineer",
+    "otherFacts": [
+      "prefers pragmatic answers"
+    ]
+}

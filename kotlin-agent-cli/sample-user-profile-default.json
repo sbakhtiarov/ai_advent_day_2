@@ -1,0 +1,22 @@
+{
+  "writingStyle": "concise bullets",
+  "toolingPreferences": [
+    "use rg for search",
+    "run focused tests before final response"
+  ],
+  "workflowDefaults": [
+    "show findings first in reviews",
+    "summarize changes with file references"
+  ],
+  "stableConstraints": [
+    "avoid destructive git commands",
+    "do not edit unrelated files"
+  ],
+  "name": "Alex",
+  "work": "Mobile platform at Wire",
+  "profession": "Staff Engineer",
+  "otherFacts": [
+    "based in Berlin",
+    "prefers pragmatic answers"
+  ]
+}

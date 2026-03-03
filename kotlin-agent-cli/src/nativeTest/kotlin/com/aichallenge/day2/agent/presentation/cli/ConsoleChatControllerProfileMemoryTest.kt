@@ -13,6 +13,7 @@ import com.aichallenge.day2.agent.domain.model.PromptRequestData
 import com.aichallenge.day2.agent.domain.model.SessionCompactionMode
 import com.aichallenge.day2.agent.domain.repository.AgentRepository
 import com.aichallenge.day2.agent.domain.repository.ProfileMemoryStore
+import com.aichallenge.day2.agent.domain.repository.UserDefinedProfileStore
 import com.aichallenge.day2.agent.domain.usecase.ProfileMemoryDistillationUseCase
 import com.aichallenge.day2.agent.domain.usecase.SendPromptUseCase
 import com.aichallenge.day2.agent.domain.usecase.SessionMemoryCompactionCoordinator
@@ -115,6 +116,93 @@ class ConsoleChatControllerProfileMemoryTest {
     }
 
     @Test
+    fun firstInteractivePromptInjectsUserDefinedProfileIntoSystemPrompt() = runBlocking {
+        val repository = ProfileMemoryControllerTestAgentRepository(
+            responses = listOf(Result.success(AgentResponse(content = "assistant answer"))),
+        )
+        val userDefinedProfileStore = RecordingUserDefinedProfileStore(
+            loadedState = ProfilePreferenceState(
+                writingStyle = "concise bullets",
+                toolingPreferences = listOf("use rg"),
+            ),
+        )
+        val controller = createController(
+            repository = repository,
+            io = ProfileMemoryControllerTestCliIO(inputs = listOf("Prompt one", "/exit")),
+            profileMemoryStore = RecordingProfileMemoryStore(
+                loadedState = ProfileMemoryState(
+                    preferences = ProfilePreferenceState(),
+                    environmentFacts = ProfileEnvironmentFacts(
+                        timezone = "UTC",
+                        os = "MACOS",
+                        repoPath = "/repo/path",
+                    ),
+                ),
+            ),
+            userDefinedProfileStore = userDefinedProfileStore,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(1, userDefinedProfileStore.loadCalls)
+        val firstRequest = repository.conversations.single()
+        assertContains(firstRequest[0].content, "User-defined profile defaults (highest priority):")
+        assertContains(firstRequest[0].content, "\"writing_style\":\"concise bullets\"")
+        assertContains(firstRequest[0].content, "\"tooling_preferences\":[\"use rg\"]")
+    }
+
+    @Test
+    fun profileMemoryContextUsesUserDefinedOverridesOverDistilledState() = runBlocking {
+        val repository = ProfileMemoryControllerTestAgentRepository(
+            responses = listOf(Result.success(AgentResponse(content = "assistant answer"))),
+        )
+        val profileStore = RecordingProfileMemoryStore(
+            loadedState = ProfileMemoryState(
+                preferences = ProfilePreferenceState(
+                    writingStyle = "verbose style",
+                    toolingPreferences = listOf("use grep"),
+                    workflowDefaults = listOf("wait for confirmation"),
+                ),
+                environmentFacts = ProfileEnvironmentFacts(
+                    timezone = "Europe/Berlin",
+                    os = "MACOS",
+                    repoPath = "/repo/path",
+                ),
+            ),
+        )
+        val userDefinedProfileStore = RecordingUserDefinedProfileStore(
+            loadedState = ProfilePreferenceState(
+                writingStyle = "concise bullets",
+                toolingPreferences = listOf("use rg"),
+                work = "Mobile platform at Wire",
+            ),
+        )
+        val controller = createController(
+            repository = repository,
+            io = ProfileMemoryControllerTestCliIO(inputs = listOf("Prompt one", "/exit")),
+            profileMemoryStore = profileStore,
+            userDefinedProfileStore = userDefinedProfileStore,
+            profileEnvironmentFactsProvider = FixedProfileEnvironmentFactsProvider(
+                ProfileEnvironmentFacts(
+                    timezone = "Europe/Berlin",
+                    os = "MACOS",
+                    repoPath = "/repo/path",
+                ),
+            ),
+        )
+
+        controller.runInteractive()
+
+        val firstRequest = repository.conversations.single()
+        assertContains(firstRequest[2].content, "\"writing_style\":\"concise bullets\"")
+        assertContains(firstRequest[2].content, "\"tooling_preferences\":[\"use rg\"]")
+        assertContains(firstRequest[2].content, "\"workflow_defaults\":[\"wait for confirmation\"]")
+        assertContains(firstRequest[2].content, "\"work\":\"Mobile platform at Wire\"")
+        assertFalse(firstRequest[2].content.contains("\"writing_style\":\"verbose style\""))
+        assertFalse(firstRequest[2].content.contains("\"tooling_preferences\":[\"use grep\"]"))
+    }
+
+    @Test
     fun successfulTurnDistillsAndSavesProfileMemory() = runBlocking {
         val repository = ProfileMemoryControllerTestAgentRepository(
             responses = listOf(
@@ -167,6 +255,64 @@ class ConsoleChatControllerProfileMemoryTest {
         assertEquals(2, repository.conversations.size)
         assertContains(repository.conversations[1][1].content, "USER: Implement this")
         assertFalse(repository.conversations[1][1].content.contains("ASSISTANT:"))
+    }
+
+    @Test
+    fun distilledProfileStateIsSavedButUserDefinedOverridesRemainEffectiveInPrompt() = runBlocking {
+        val repository = ProfileMemoryControllerTestAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "assistant one")),
+                Result.success(
+                    AgentResponse(
+                        content = """
+                        {
+                          "writing_style": "verbose distilled style",
+                          "tooling_preferences": ["use grep"],
+                          "workflow_defaults": [],
+                          "stable_constraints": [],
+                          "name": "",
+                          "work": "",
+                          "profession": "",
+                          "other_facts": []
+                        }
+                        """.trimIndent(),
+                    ),
+                ),
+                Result.success(AgentResponse(content = "assistant two")),
+            ),
+        )
+        val profileStore = RecordingProfileMemoryStore()
+        val userDefinedProfileStore = RecordingUserDefinedProfileStore(
+            loadedState = ProfilePreferenceState(
+                writingStyle = "concise bullets",
+                toolingPreferences = listOf("use rg"),
+            ),
+        )
+        val controller = createController(
+            repository = repository,
+            io = ProfileMemoryControllerTestCliIO(inputs = listOf("Prompt one", "Prompt two", "/exit")),
+            profileMemoryStore = profileStore,
+            profileMemoryDistillationUseCase = ProfileMemoryDistillationUseCase(SendPromptUseCase(repository)),
+            userDefinedProfileStore = userDefinedProfileStore,
+            profileEnvironmentFactsProvider = FixedProfileEnvironmentFactsProvider(
+                ProfileEnvironmentFacts(
+                    timezone = "Europe/Berlin",
+                    os = "MACOS",
+                    repoPath = "/repo/path",
+                ),
+            ),
+        )
+
+        controller.runInteractive()
+
+        assertEquals(1, profileStore.saveStates.size)
+        val savedDistilledState = profileStore.saveStates.single()
+        assertEquals("verbose distilled style", savedDistilledState.preferences.writingStyle)
+        assertEquals(listOf("use grep"), savedDistilledState.preferences.toolingPreferences)
+        val secondMainRequest = repository.conversations[2]
+        assertContains(secondMainRequest[2].content, "\"writing_style\":\"concise bullets\"")
+        assertContains(secondMainRequest[2].content, "\"tooling_preferences\":[\"use rg\"]")
+        assertFalse(secondMainRequest[2].content.contains("\"writing_style\":\"verbose distilled style\""))
     }
 
     @Test
@@ -245,11 +391,18 @@ class ConsoleChatControllerProfileMemoryTest {
                 ),
             ),
         )
+        val userDefinedProfileStore = RecordingUserDefinedProfileStore(
+            loadedState = ProfilePreferenceState(
+                writingStyle = "concise bullets",
+                toolingPreferences = listOf("use rg"),
+            ),
+        )
         val controller = createController(
             repository = repository,
             io = ProfileMemoryControllerTestCliIO(inputs = emptyList()),
             profileMemoryStore = profileStore,
             profileMemoryDistillationUseCase = ProfileMemoryDistillationUseCase(SendPromptUseCase(repository)),
+            userDefinedProfileStore = userDefinedProfileStore,
         )
 
         val exitCode = controller.runSinglePrompt("One-shot prompt")
@@ -257,10 +410,15 @@ class ConsoleChatControllerProfileMemoryTest {
         assertEquals(0, exitCode)
         assertEquals(0, profileStore.loadCalls)
         assertEquals(0, profileStore.saveStates.size)
+        assertEquals(1, userDefinedProfileStore.loadCalls)
         assertEquals(1, repository.conversations.size)
         assertEquals(
             listOf(MessageRole.SYSTEM, MessageRole.USER),
             repository.conversations.single().map { it.role },
+        )
+        assertContains(
+            repository.conversations.single().first().content,
+            "User-defined profile defaults (highest priority):",
         )
         assertFalse(
             repository.conversations.single().any { message ->
@@ -273,6 +431,7 @@ class ConsoleChatControllerProfileMemoryTest {
         repository: ProfileMemoryControllerTestAgentRepository,
         io: CliIO,
         profileMemoryStore: ProfileMemoryStore? = null,
+        userDefinedProfileStore: UserDefinedProfileStore? = null,
         profileMemoryDistillationUseCase: ProfileMemoryDistillationUseCase? = null,
         profileEnvironmentFactsProvider: ProfileEnvironmentFactsProvider = FixedProfileEnvironmentFactsProvider(
             ProfileEnvironmentFacts(
@@ -301,6 +460,7 @@ class ConsoleChatControllerProfileMemoryTest {
             ),
             io = io,
             profileMemoryStore = profileMemoryStore,
+            userDefinedProfileStore = userDefinedProfileStore,
             profileMemoryDistillationUseCase = profileMemoryDistillationUseCase,
             profileEnvironmentFactsProvider = profileEnvironmentFactsProvider,
             compactionCoordinators = compactionCoordinators,
@@ -366,6 +526,23 @@ private class RecordingProfileMemoryStore(
     }
 }
 
+private class RecordingUserDefinedProfileStore(
+    private val loadedState: ProfilePreferenceState? = null,
+) : UserDefinedProfileStore {
+    var loadCalls: Int = 0
+        private set
+
+    override fun load(): ProfilePreferenceState? {
+        loadCalls += 1
+        return loadedState?.copy(
+            toolingPreferences = loadedState.toolingPreferences.toList(),
+            workflowDefaults = loadedState.workflowDefaults.toList(),
+            stableConstraints = loadedState.stableConstraints.toList(),
+            otherFacts = loadedState.otherFacts.toList(),
+        )
+    }
+}
+
 private class FixedProfileEnvironmentFactsProvider(
     private val environmentFacts: ProfileEnvironmentFacts,
 ) : ProfileEnvironmentFactsProvider() {
@@ -392,7 +569,7 @@ private class ProfileMemoryControllerTestCliIO(
 
     override fun readLine(prompt: String): String? = queuedInputs.removeFirstOrNull()
 
-    override fun readLineInFooter(prompt: String, divider: String, systemPromptText: String): String? =
+    override fun readLineInFooter(prompt: String, divider: String): String? =
         queuedInputs.removeFirstOrNull()
 
     override fun openConfigMenu(

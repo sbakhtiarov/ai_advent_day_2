@@ -1623,7 +1623,7 @@ private class FakeCliIO(
 
     override fun readLine(prompt: String): String? = nextInput()
 
-    override fun readLineInFooter(prompt: String, divider: String, systemPromptText: String): String? = nextInput()
+    override fun readLineInFooter(prompt: String, divider: String): String? = nextInput()
 
     override fun showThinkingIndicator() {
         showThinkingIndicatorCalls += 1

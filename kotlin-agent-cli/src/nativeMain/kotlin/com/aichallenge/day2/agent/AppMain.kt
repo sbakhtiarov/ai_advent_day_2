@@ -5,6 +5,7 @@ import com.aichallenge.day2.agent.core.config.ProfileEnvironmentFactsProvider
 import com.aichallenge.day2.agent.core.di.AppContainer
 import com.aichallenge.day2.agent.data.local.JsonFileProfileMemoryStore
 import com.aichallenge.day2.agent.data.local.JsonFileSessionMemoryStore
+import com.aichallenge.day2.agent.data.local.JsonFileUserDefinedProfileStore
 import com.aichallenge.day2.agent.data.local.JsonFileWorkingMemoryStore
 import com.aichallenge.day2.agent.domain.model.RollingWindowCompactionStartPolicy
 import com.aichallenge.day2.agent.domain.model.SessionCompactionMode
@@ -90,6 +91,7 @@ private suspend fun runApp(args: Array<String>): Int {
     } else {
         null
     }
+    val userDefinedProfileStore = JsonFileUserDefinedProfileStore.fromDefaultLocation()
     val workingMemoryDistillationUseCase = if (isInteractiveMode) {
         WorkingMemoryDistillationUseCase(container.sendPromptUseCase)
     } else {
@@ -110,6 +112,7 @@ private suspend fun runApp(args: Array<String>): Int {
         sessionMemoryStore = sessionMemoryStore,
         workingMemoryStore = workingMemoryStore,
         profileMemoryStore = profileMemoryStore,
+        userDefinedProfileStore = userDefinedProfileStore,
         workingMemoryDistillationUseCase = workingMemoryDistillationUseCase,
         profileMemoryDistillationUseCase = profileMemoryDistillationUseCase,
         profileEnvironmentFactsProvider = ProfileEnvironmentFactsProvider(),
