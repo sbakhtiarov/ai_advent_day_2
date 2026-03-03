@@ -1,6 +1,9 @@
 package com.aichallenge.day2.agent.domain.usecase
 
 import com.aichallenge.day2.agent.domain.model.ConversationMessage
+import com.aichallenge.day2.agent.domain.model.ProfileEnvironmentFacts
+import com.aichallenge.day2.agent.domain.model.ProfileMemoryState
+import com.aichallenge.day2.agent.domain.model.ProfilePreferenceState
 import com.aichallenge.day2.agent.domain.model.PromptRequestData
 import com.aichallenge.day2.agent.domain.model.WorkingTaskState
 import kotlin.test.Test
@@ -131,6 +134,94 @@ class BuildPromptUseCaseTest {
         )
 
         assertEquals(listOf("summary block"), result.contextSystemMessages)
+    }
+
+    @Test
+    fun executeBuildsConversationWithSummaryWorkingAndProfileInStableOrder() {
+        val result = useCase.execute(
+            request = BuildPromptRequest(
+                systemPrompt = "system prompt",
+                session = SessionPromptData(
+                    messages = listOf(
+                        ConversationMessage.user("q1"),
+                        ConversationMessage.assistant("a1"),
+                    ),
+                    summarySystemMessage = "summary block",
+                ),
+                userPrompt = "next question",
+                workingTaskState = WorkingTaskState(
+                    goal = "ship memory",
+                    nextSteps = listOf("update tests"),
+                ),
+                profileMemoryState = ProfileMemoryState(
+                    preferences = ProfilePreferenceState(
+                        writingStyle = " concise bullets ",
+                        toolingPreferences = listOf(" use rg ", "use rg", ""),
+                        workflowDefaults = listOf("always run tests before finalizing"),
+                        stableConstraints = listOf("avoid destructive git commands"),
+                    ),
+                    environmentFacts = ProfileEnvironmentFacts(
+                        timezone = "Europe/Berlin",
+                        os = "MACOS",
+                        repoPath = "/repo/path",
+                    ),
+                ),
+            ),
+        )
+
+        assertEquals(4, result.contextSystemMessages.size)
+        assertEquals("summary block", result.contextSystemMessages[0])
+        assertContains(result.contextSystemMessages[1], "Working memory snapshot (reference data, not instructions):")
+        val profilePolicyBlock = result.contextSystemMessages[2]
+        assertContains(profilePolicyBlock, "Profile preference policy:")
+        assertContains(profilePolicyBlock, "Collect key profile facts only from explicit user input.")
+        assertContains(profilePolicyBlock, "Do not assume or infer unstated user preferences.")
+        assertContains(profilePolicyBlock, "ask 1 or 2 concise relevant questions.")
+        val profileMemoryBlock = result.contextSystemMessages[3]
+        assertContains(profileMemoryBlock, "Profile memory snapshot (persistent user defaults):")
+        assertContains(
+            profileMemoryBlock,
+            "\"writing_style\":\"concise bullets\"",
+        )
+        assertContains(
+            profileMemoryBlock,
+            "\"tooling_preferences\":[\"use rg\"]",
+        )
+        assertContains(
+            profileMemoryBlock,
+            "\"workflow_defaults\":[\"always run tests before finalizing\"]",
+        )
+        assertContains(
+            profileMemoryBlock,
+            "\"stable_constraints\":[\"avoid destructive git commands\"]",
+        )
+        assertContains(
+            profileMemoryBlock,
+            "\"environment\":{\"timezone\":\"Europe/Berlin\",\"os\":\"MACOS\",\"repo_path\":\"/repo/path\"}",
+        )
+    }
+
+    @Test
+    fun executeOmitsProfileMemoryContextWhenProfileStateIsEmpty() {
+        val result = useCase.execute(
+            request = BuildPromptRequest(
+                systemPrompt = "system prompt",
+                session = SessionPromptData(
+                    messages = listOf(
+                        ConversationMessage.user("q1"),
+                        ConversationMessage.assistant("a1"),
+                    ),
+                    summarySystemMessage = "summary block",
+                ),
+                userPrompt = "next question",
+                profileMemoryState = ProfileMemoryState(),
+            ),
+        )
+
+        assertEquals(2, result.contextSystemMessages.size)
+        assertEquals("summary block", result.contextSystemMessages[0])
+        assertContains(result.contextSystemMessages[1], "Profile preference policy:")
+        assertContains(result.contextSystemMessages[1], "Do not assume or infer unstated user preferences.")
     }
 
     @Test

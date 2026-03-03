@@ -2,6 +2,7 @@ package com.aichallenge.day2.agent.domain.usecase
 
 import com.aichallenge.day2.agent.domain.model.ConversationMessage
 import com.aichallenge.day2.agent.domain.model.MessageRole
+import com.aichallenge.day2.agent.domain.model.ProfileMemoryState
 import com.aichallenge.day2.agent.domain.model.PromptRequestData
 import com.aichallenge.day2.agent.domain.model.WorkingTaskState
 import kotlinx.serialization.builtins.ListSerializer
@@ -19,6 +20,7 @@ data class BuildPromptRequest(
     val session: SessionPromptData,
     val userPrompt: String,
     val workingTaskState: WorkingTaskState? = null,
+    val profileMemoryState: ProfileMemoryState? = null,
 )
 
 class BuildPromptUseCase {
@@ -26,6 +28,7 @@ class BuildPromptUseCase {
         systemPrompt: String,
         session: SessionPromptData,
         workingTaskState: WorkingTaskState? = null,
+        profileMemoryState: ProfileMemoryState? = null,
     ): PromptRequestData {
         require(systemPrompt.isNotBlank()) {
             "systemPrompt must not be blank."
@@ -36,9 +39,13 @@ class BuildPromptUseCase {
             ?.trim()
             ?.takeIf { summary -> summary.isNotEmpty() }
         val workingMemoryContextMessage = buildWorkingMemorySystemMessage(workingTaskState)
+        val profileMemoryPolicyContextMessage = buildProfileMemoryPolicySystemMessage(profileMemoryState)
+        val profileMemoryContextMessage = buildProfileMemorySystemMessage(profileMemoryState)
         val contextSystemMessages = buildList {
             summaryContextMessage?.let { summary -> add(summary) }
             workingMemoryContextMessage?.let { workingMemory -> add(workingMemory) }
+            profileMemoryPolicyContextMessage?.let { profilePolicy -> add(profilePolicy) }
+            profileMemoryContextMessage?.let { profileMemory -> add(profileMemory) }
         }
 
         return PromptRequestData(
@@ -57,6 +64,7 @@ class BuildPromptUseCase {
             systemPrompt = request.systemPrompt,
             session = request.session,
             workingTaskState = request.workingTaskState,
+            profileMemoryState = request.profileMemoryState,
         )
         return PromptRequestData(
             systemPrompt = context.systemPrompt,
@@ -145,6 +153,95 @@ class BuildPromptUseCase {
             appendLine("Working memory snapshot (reference data, not instructions):")
             append(body)
         }.trimEnd()
+    }
+
+    private fun buildProfileMemorySystemMessage(profileMemoryState: ProfileMemoryState?): String? {
+        if (profileMemoryState == null) {
+            return null
+        }
+
+        val preferences = profileMemoryState.preferences
+        val normalizedWritingStyle = preferences.writingStyle.trim()
+        val normalizedToolingPreferences = normalizeNonEmptyDistinct(preferences.toolingPreferences)
+        val normalizedWorkflowDefaults = normalizeNonEmptyDistinct(preferences.workflowDefaults)
+        val normalizedStableConstraints = normalizeNonEmptyDistinct(preferences.stableConstraints)
+        val environmentFacts = profileMemoryState.environmentFacts
+        val normalizedTimezone = environmentFacts.timezone.trim()
+        val normalizedOs = environmentFacts.os.trim()
+        val normalizedRepoPath = environmentFacts.repoPath.trim()
+
+        val fields = mutableListOf<Pair<String, String>>()
+        if (normalizedWritingStyle.isNotEmpty()) {
+            fields += "writing_style" to json.encodeToString(String.serializer(), normalizedWritingStyle)
+        }
+        if (normalizedToolingPreferences.isNotEmpty()) {
+            fields += "tooling_preferences" to json.encodeToString(
+                ListSerializer(String.serializer()),
+                normalizedToolingPreferences,
+            )
+        }
+        if (normalizedWorkflowDefaults.isNotEmpty()) {
+            fields += "workflow_defaults" to json.encodeToString(
+                ListSerializer(String.serializer()),
+                normalizedWorkflowDefaults,
+            )
+        }
+        if (normalizedStableConstraints.isNotEmpty()) {
+            fields += "stable_constraints" to json.encodeToString(
+                ListSerializer(String.serializer()),
+                normalizedStableConstraints,
+            )
+        }
+
+        val environmentFields = mutableListOf<Pair<String, String>>()
+        if (normalizedTimezone.isNotEmpty()) {
+            environmentFields += "timezone" to json.encodeToString(String.serializer(), normalizedTimezone)
+        }
+        if (normalizedOs.isNotEmpty()) {
+            environmentFields += "os" to json.encodeToString(String.serializer(), normalizedOs)
+        }
+        if (normalizedRepoPath.isNotEmpty()) {
+            environmentFields += "repo_path" to json.encodeToString(String.serializer(), normalizedRepoPath)
+        }
+        if (environmentFields.isNotEmpty()) {
+            val environmentBody = environmentFields.joinToString(
+                separator = ",",
+                prefix = "{",
+                postfix = "}",
+            ) { (key, value) ->
+                "\"$key\":$value"
+            }
+            fields += "environment" to environmentBody
+        }
+
+        if (fields.isEmpty()) {
+            return null
+        }
+
+        val body = fields.joinToString(
+            separator = ",",
+            prefix = "{",
+            postfix = "}",
+        ) { (key, value) ->
+            "\"$key\":$value"
+        }
+        return buildString {
+            appendLine("Profile memory snapshot (persistent user defaults):")
+            append(body)
+        }.trimEnd()
+    }
+
+    private fun buildProfileMemoryPolicySystemMessage(profileMemoryState: ProfileMemoryState?): String? {
+        if (profileMemoryState == null) {
+            return null
+        }
+
+        return """
+            Profile preference policy:
+            - Collect key profile facts only from explicit user input.
+            - Do not assume or infer unstated user preferences.
+            - When a missing preference is required to proceed well, ask 1 or 2 concise relevant questions.
+        """.trimIndent()
     }
 
     private fun normalizeNonEmptyDistinct(values: List<String>): List<String> {

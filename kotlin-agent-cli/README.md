@@ -67,9 +67,13 @@ time> <seconds> s
 - Interactive mode keeps session memory in process and persists it to `~/.kotlin-agent-cli/session-memory.json`.
 - Rolling-summary compactization also persists current summary to `~/.kotlin-agent-cli/session-summary.json`.
 - Interactive mode also persists independent working memory to `~/.kotlin-agent-cli/working-memory.json`.
+- Interactive mode also persists independent profile/preference memory to `~/.kotlin-agent-cli/profile-memory.json`.
 - Working memory is a distilled structured task state updated incrementally after each successful turn from previous working state + latest user/assistant messages.
 - Working memory lifecycle is independent from session memory compaction strategy and session-memory snapshot files.
 - Working memory is injected into interactive prompt context as a dedicated system-context block with normalized JSON task state.
+- Profile memory stores persistent user defaults (writing style, tooling preferences, workflow defaults, stable constraints) plus deterministic environment facts (timezone, OS, repo path).
+- Profile memory is injected into interactive prompt context as a dedicated system-context block with normalized JSON state and is distilled incrementally after each successful turn.
+- Profile memory distillation captures only explicit user-provided facts (no inferred assumptions), and the assistant asks 1–2 concise relevant preference questions when needed to fill missing preferences.
 - Session snapshot persistence includes both conversation messages and a context-usage estimate.
 - On interactive startup, the app restores persisted memory exactly as previously saved.
 - Each successful prompt turn is persisted immediately.
@@ -86,10 +90,10 @@ time> <seconds> s
 - Branching mode truncates oldest active-subtopic turns at request-build time when estimated context exceeds model window; stored branch history is not mutated by this truncation.
 - Branching mode prints system messages when a new topic/subtopic is found or when switching to an existing branch.
 - Switching to or from Branching mode via `/compact` resets active memory immediately.
-- Prompt context order is: system prompt, compacted summary (as system context when present), working-memory block (as system context when present), remaining conversation, current user prompt.
+- Prompt context order is: system prompt, compacted summary (as system context when present), working-memory block (as system context when present), profile-memory block (as system context when present), remaining conversation, current user prompt.
 - If you attach files with `@<path>`, their text content is injected into the next submitted prompt and persisted in session memory.
 - `/config` resets session memory after applying output configuration and persists the reset state.
-- `/reset` clears in-memory session memory, clears the visible transcript, and deletes persisted session memory on disk (working memory is not cleared).
+- `/reset` clears in-memory session memory, clears the visible transcript, and deletes persisted session memory on disk (working/profile memory are not cleared).
 - One-shot mode (`--prompt`) does not read or write persistent memory.
 - If persistence read/write fails, the app continues with in-memory session behavior.
 
@@ -102,7 +106,7 @@ time> <seconds> s
 - `/compact` - choose compaction strategy (`Rolling summary`, `Sliding window`, `Fact map`, or `Branching`)
 - `/config` - open config menu (ESC to close)
 - `/temp <temperature>` - set OpenAI temperature (`0..2`)
-- `/reset` - clear conversation memory and transcript, then delete persisted session memory on disk
+- `/reset` - clear conversation memory and transcript, then delete persisted session memory on disk (working/profile remain intact)
 - `/exit` - close app
 - `@<path>` - attach file path as dialog reference; file text is read only when the next prompt is submitted
 - Inline refs are also supported in prompts (example: `Review @/abs/path/File.kt` or `Review @"~/path with spaces/File.kt"`).

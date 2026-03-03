@@ -1,13 +1,16 @@
 package com.aichallenge.day2.agent
 
 import com.aichallenge.day2.agent.core.config.AppConfig
+import com.aichallenge.day2.agent.core.config.ProfileEnvironmentFactsProvider
 import com.aichallenge.day2.agent.core.di.AppContainer
+import com.aichallenge.day2.agent.data.local.JsonFileProfileMemoryStore
 import com.aichallenge.day2.agent.data.local.JsonFileSessionMemoryStore
 import com.aichallenge.day2.agent.data.local.JsonFileWorkingMemoryStore
 import com.aichallenge.day2.agent.domain.model.RollingWindowCompactionStartPolicy
 import com.aichallenge.day2.agent.domain.model.SessionCompactionMode
 import com.aichallenge.day2.agent.domain.model.SlidingWindowCompactionStartPolicy
 import com.aichallenge.day2.agent.domain.usecase.FactMapCompactionStrategy
+import com.aichallenge.day2.agent.domain.usecase.ProfileMemoryDistillationUseCase
 import com.aichallenge.day2.agent.domain.usecase.RollingSummaryCompactionStrategy
 import com.aichallenge.day2.agent.domain.usecase.SessionMemoryCompactionCoordinator
 import com.aichallenge.day2.agent.domain.usecase.SlidingWindowCompactionStrategy
@@ -82,8 +85,18 @@ private suspend fun runApp(args: Array<String>): Int {
     } else {
         null
     }
+    val profileMemoryStore = if (isInteractiveMode) {
+        JsonFileProfileMemoryStore.fromDefaultLocation()
+    } else {
+        null
+    }
     val workingMemoryDistillationUseCase = if (isInteractiveMode) {
         WorkingMemoryDistillationUseCase(container.sendPromptUseCase)
+    } else {
+        null
+    }
+    val profileMemoryDistillationUseCase = if (isInteractiveMode) {
+        ProfileMemoryDistillationUseCase(container.sendPromptUseCase)
     } else {
         null
     }
@@ -96,9 +109,13 @@ private suspend fun runApp(args: Array<String>): Int {
         models = config.models,
         sessionMemoryStore = sessionMemoryStore,
         workingMemoryStore = workingMemoryStore,
+        profileMemoryStore = profileMemoryStore,
         workingMemoryDistillationUseCase = workingMemoryDistillationUseCase,
+        profileMemoryDistillationUseCase = profileMemoryDistillationUseCase,
+        profileEnvironmentFactsProvider = ProfileEnvironmentFactsProvider(),
         persistentMemoryEnabled = isInteractiveMode,
         workingMemoryEnabled = isInteractiveMode,
+        profileMemoryEnabled = isInteractiveMode,
         compactionCoordinators = sessionMemoryCompactionCoordinators,
         defaultCompactionMode = SessionCompactionMode.ROLLING_SUMMARY,
     )
