@@ -11,10 +11,13 @@ import com.aichallenge.day2.agent.domain.model.SessionMemory
 import com.aichallenge.day2.agent.domain.model.SessionMemoryState
 import com.aichallenge.day2.agent.domain.model.TokenUsage
 import com.aichallenge.day2.agent.domain.repository.SessionMemoryStore
+import com.aichallenge.day2.agent.domain.repository.WorkingMemoryStore
 import com.aichallenge.day2.agent.domain.usecase.BranchClassificationUseCase
 import com.aichallenge.day2.agent.domain.usecase.SessionMemoryCompactionCoordinator
 import com.aichallenge.day2.agent.domain.usecase.RollingSummaryCompactionStrategy
 import com.aichallenge.day2.agent.domain.usecase.SendPromptUseCase
+import com.aichallenge.day2.agent.domain.usecase.WorkingMemoryDistillationUseCase
+import com.aichallenge.day2.agent.domain.model.WorkingMemoryState
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -33,7 +36,10 @@ class ConsoleChatController(
     models: List<ModelProperties>,
     private val io: CliIO = StdCliIO,
     private val sessionMemoryStore: SessionMemoryStore? = null,
+    private val workingMemoryStore: WorkingMemoryStore? = null,
     private val persistentMemoryEnabled: Boolean = true,
+    private val workingMemoryDistillationUseCase: WorkingMemoryDistillationUseCase? = null,
+    private val workingMemoryEnabled: Boolean = true,
     private val fileReferenceReader: FileReferenceReader = PosixFileReferenceReader,
     private val compactionCoordinators: Map<SessionCompactionMode, SessionMemoryCompactionCoordinator> = mapOf(
         SessionCompactionMode.ROLLING_SUMMARY to SessionMemoryCompactionCoordinator.disabled(),
@@ -62,6 +68,8 @@ class ConsoleChatController(
     private val pendingFileReferences = mutableListOf<String>()
     private val inputDivider = "─".repeat(80)
     private var persistentMemoryInitialized = false
+    private var workingMemoryInitialized = false
+    private var workingMemoryState: WorkingMemoryState? = null
     private val availableCompactionModes = SessionCompactionMode.entries.filter { mode ->
         compactionCoordinators.containsKey(mode)
     }
@@ -81,6 +89,7 @@ class ConsoleChatController(
 
     suspend fun runInteractive() {
         initializePersistentMemory()
+        initializeWorkingMemory()
 
         try {
             while (true) {
@@ -182,6 +191,10 @@ class ConsoleChatController(
                         } else {
                             executeLinearTurn(preparedPrompt.requestPrompt)
                         }
+                        updateWorkingMemoryAfterSuccessfulTurn(
+                            userPrompt = preparedPrompt.displayPrompt,
+                            assistantResponse = turnResult.response.content,
+                        )
                         val elapsedSeconds = startedAt.elapsedNow().inWholeMilliseconds / 1000.0
                         persistMemorySnapshot()
                         pendingFileReferences.clear()
@@ -660,6 +673,42 @@ class ConsoleChatController(
         memoryUsageSnapshot = persistedState.usage?.takeIf { usage ->
             usage.estimatedTokens > 0 && usage.messageCount == activeContext.size
         } ?: estimateHeuristicUsage(activeContext)
+    }
+
+    private fun initializeWorkingMemory() {
+        if (!workingMemoryEnabled || workingMemoryInitialized) {
+            return
+        }
+
+        workingMemoryInitialized = true
+        workingMemoryState = runCatching { workingMemoryStore?.load() }.getOrNull()
+    }
+
+    private suspend fun updateWorkingMemoryAfterSuccessfulTurn(
+        userPrompt: String,
+        assistantResponse: String,
+    ) {
+        if (!workingMemoryEnabled) {
+            return
+        }
+
+        val distillationUseCase = workingMemoryDistillationUseCase ?: return
+        val nextTaskState = runCatching {
+            distillationUseCase.distill(
+                previousTaskState = workingMemoryState?.taskState,
+                recentMessages = listOf(
+                    ConversationMessage.user(userPrompt),
+                    ConversationMessage.assistant(assistantResponse),
+                ),
+                model = currentModel,
+            )
+        }.getOrNull() ?: return
+
+        val nextState = WorkingMemoryState(taskState = nextTaskState)
+        workingMemoryState = nextState
+        runCatching {
+            workingMemoryStore?.save(nextState)
+        }
     }
 
     private fun persistMemorySnapshot() {

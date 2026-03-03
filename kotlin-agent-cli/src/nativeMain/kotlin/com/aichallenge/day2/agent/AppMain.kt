@@ -3,6 +3,7 @@ package com.aichallenge.day2.agent
 import com.aichallenge.day2.agent.core.config.AppConfig
 import com.aichallenge.day2.agent.core.di.AppContainer
 import com.aichallenge.day2.agent.data.local.JsonFileSessionMemoryStore
+import com.aichallenge.day2.agent.data.local.JsonFileWorkingMemoryStore
 import com.aichallenge.day2.agent.domain.model.RollingWindowCompactionStartPolicy
 import com.aichallenge.day2.agent.domain.model.SessionCompactionMode
 import com.aichallenge.day2.agent.domain.model.SlidingWindowCompactionStartPolicy
@@ -10,6 +11,7 @@ import com.aichallenge.day2.agent.domain.usecase.FactMapCompactionStrategy
 import com.aichallenge.day2.agent.domain.usecase.RollingSummaryCompactionStrategy
 import com.aichallenge.day2.agent.domain.usecase.SessionMemoryCompactionCoordinator
 import com.aichallenge.day2.agent.domain.usecase.SlidingWindowCompactionStrategy
+import com.aichallenge.day2.agent.domain.usecase.WorkingMemoryDistillationUseCase
 import com.aichallenge.day2.agent.presentation.cli.ConsoleChatController
 import kotlinx.coroutines.runBlocking
 import kotlin.system.exitProcess
@@ -74,13 +76,26 @@ private suspend fun runApp(args: Array<String>): Int {
     } else {
         null
     }
+    val workingMemoryStore = if (isInteractiveMode) {
+        JsonFileWorkingMemoryStore.fromDefaultLocation()
+    } else {
+        null
+    }
+    val workingMemoryDistillationUseCase = if (isInteractiveMode) {
+        WorkingMemoryDistillationUseCase(container.sendPromptUseCase)
+    } else {
+        null
+    }
     val controller = ConsoleChatController(
         sendPromptUseCase = container.sendPromptUseCase,
         initialSystemPrompt = config.systemPrompt,
         initialModel = config.model,
         models = config.models,
         sessionMemoryStore = sessionMemoryStore,
+        workingMemoryStore = workingMemoryStore,
+        workingMemoryDistillationUseCase = workingMemoryDistillationUseCase,
         persistentMemoryEnabled = isInteractiveMode,
+        workingMemoryEnabled = isInteractiveMode,
         compactionCoordinators = sessionMemoryCompactionCoordinators,
         defaultCompactionMode = SessionCompactionMode.ROLLING_SUMMARY,
     )

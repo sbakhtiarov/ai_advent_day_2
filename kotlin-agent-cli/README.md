@@ -66,6 +66,10 @@ time> <seconds> s
 
 - Interactive mode keeps session memory in process and persists it to `~/.kotlin-agent-cli/session-memory.json`.
 - Rolling-summary compactization also persists current summary to `~/.kotlin-agent-cli/session-summary.json`.
+- Interactive mode also persists independent working memory to `~/.kotlin-agent-cli/working-memory.json`.
+- Working memory is a distilled structured task state updated incrementally after each successful turn from previous working state + latest user/assistant messages.
+- Working memory lifecycle is independent from session memory compaction strategy and session-memory snapshot files.
+- Working memory is currently persisted only; it is not injected into prompt context yet.
 - Session snapshot persistence includes both conversation messages and a context-usage estimate.
 - On interactive startup, the app restores persisted memory exactly as previously saved.
 - Each successful prompt turn is persisted immediately.
@@ -85,7 +89,7 @@ time> <seconds> s
 - Prompt context order is: system prompt, compacted summary (as system context when present), remaining conversation, current user prompt.
 - If you attach files with `@<path>`, their text content is injected into the next submitted prompt and persisted in session memory.
 - `/config` resets session memory after applying output configuration and persists the reset state.
-- `/reset` clears in-memory session memory, clears the visible transcript, and deletes persisted session memory on disk.
+- `/reset` clears in-memory session memory, clears the visible transcript, and deletes persisted session memory on disk (working memory is not cleared).
 - One-shot mode (`--prompt`) does not read or write persistent memory.
 - If persistence read/write fails, the app continues with in-memory session behavior.
 

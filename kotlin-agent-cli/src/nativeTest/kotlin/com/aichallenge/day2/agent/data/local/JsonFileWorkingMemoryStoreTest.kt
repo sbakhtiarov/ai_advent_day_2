@@ -1,0 +1,111 @@
+package com.aichallenge.day2.agent.data.local
+
+import com.aichallenge.day2.agent.domain.model.WorkingMemoryState
+import com.aichallenge.day2.agent.domain.model.WorkingTaskState
+import kotlin.random.Random
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.cinterop.convert
+import platform.posix.EEXIST
+import platform.posix.errno
+import platform.posix.fclose
+import platform.posix.fopen
+import platform.posix.fputs
+import platform.posix.mkdir
+import platform.posix.mode_t
+
+class JsonFileWorkingMemoryStoreTest {
+    @Test
+    fun saveAndLoadRoundTripPreservesState() {
+        val filePath = uniqueWorkingMemoryPath()
+        val store = JsonFileWorkingMemoryStore(filePath)
+        val state = WorkingMemoryState(
+            taskState = WorkingTaskState(
+                goal = "Ship working memory",
+                constraints = listOf("No prompt injection", "Independent from session"),
+                decisions = listOf("Incremental updates"),
+                assumptions = listOf("Interactive mode only"),
+                openQuestions = listOf("How to consume working memory"),
+                nextSteps = listOf("Define usage strategy"),
+                artifacts = listOf("README"),
+            ),
+        )
+
+        store.save(state)
+
+        assertEquals(state, store.load())
+    }
+
+    @Test
+    fun loadReturnsNullWhenFileDoesNotExist() {
+        val filePath = uniqueWorkingMemoryPath()
+        val store = JsonFileWorkingMemoryStore(filePath)
+
+        assertEquals(null, store.load())
+    }
+
+    @Test
+    fun loadReturnsNullWhenJsonIsMalformed() {
+        val filePath = uniqueWorkingMemoryPath()
+        ensureDirectoryExists(parentDirectory(filePath))
+        writeTextFile(filePath, "{ malformed json")
+        val store = JsonFileWorkingMemoryStore(filePath)
+
+        assertEquals(null, store.load())
+    }
+
+    @Test
+    fun clearDeletesSavedSnapshotAndIsIdempotent() {
+        val filePath = uniqueWorkingMemoryPath()
+        val store = JsonFileWorkingMemoryStore(filePath)
+        val state = WorkingMemoryState(
+            taskState = WorkingTaskState(
+                goal = "Goal",
+            ),
+        )
+        store.save(state)
+
+        store.clear()
+        store.clear()
+
+        assertEquals(null, store.load())
+    }
+}
+
+private fun uniqueWorkingMemoryPath(): String {
+    val seed = Random.nextLong().toString().replace('-', '0')
+    return "/tmp/kotlin-agent-cli-tests/$seed/working-memory.json"
+}
+
+private fun parentDirectory(path: String): String {
+    val normalized = path.trimEnd('/')
+    val separatorIndex = normalized.lastIndexOf('/')
+    return if (separatorIndex <= 0) "/" else normalized.substring(0, separatorIndex)
+}
+
+@OptIn(ExperimentalForeignApi::class)
+private fun ensureDirectoryExists(path: String) {
+    if (path.isBlank() || path == "/") return
+
+    val parent = parentDirectory(path)
+    if (parent != path) {
+        ensureDirectoryExists(parent)
+    }
+
+    val result = mkdir(path, 493.convert<mode_t>())
+    if (result == 0 || errno == EEXIST) return
+    error("Failed to create test directory '$path'.")
+}
+
+@OptIn(ExperimentalForeignApi::class)
+private fun writeTextFile(path: String, text: String) {
+    val file = fopen(path, "w") ?: error("Unable to open test file '$path'.")
+    try {
+        if (fputs(text, file) < 0) {
+            error("Unable to write test file '$path'.")
+        }
+    } finally {
+        fclose(file)
+    }
+}
