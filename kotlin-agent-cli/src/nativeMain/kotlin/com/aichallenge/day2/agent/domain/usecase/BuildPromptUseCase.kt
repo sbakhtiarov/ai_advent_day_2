@@ -165,6 +165,10 @@ class BuildPromptUseCase {
         val normalizedToolingPreferences = normalizeNonEmptyDistinct(preferences.toolingPreferences)
         val normalizedWorkflowDefaults = normalizeNonEmptyDistinct(preferences.workflowDefaults)
         val normalizedStableConstraints = normalizeNonEmptyDistinct(preferences.stableConstraints)
+        val normalizedName = preferences.name.trim()
+        val normalizedWork = preferences.work.trim()
+        val normalizedProfession = preferences.profession.trim()
+        val normalizedOtherFacts = normalizeNonEmptyDistinct(preferences.otherFacts)
         val environmentFacts = profileMemoryState.environmentFacts
         val normalizedTimezone = environmentFacts.timezone.trim()
         val normalizedOs = environmentFacts.os.trim()
@@ -190,6 +194,21 @@ class BuildPromptUseCase {
             fields += "stable_constraints" to json.encodeToString(
                 ListSerializer(String.serializer()),
                 normalizedStableConstraints,
+            )
+        }
+        if (normalizedName.isNotEmpty()) {
+            fields += "name" to json.encodeToString(String.serializer(), normalizedName)
+        }
+        if (normalizedWork.isNotEmpty()) {
+            fields += "work" to json.encodeToString(String.serializer(), normalizedWork)
+        }
+        if (normalizedProfession.isNotEmpty()) {
+            fields += "profession" to json.encodeToString(String.serializer(), normalizedProfession)
+        }
+        if (normalizedOtherFacts.isNotEmpty()) {
+            fields += "other_facts" to json.encodeToString(
+                ListSerializer(String.serializer()),
+                normalizedOtherFacts,
             )
         }
 
@@ -239,6 +258,7 @@ class BuildPromptUseCase {
         return """
             Profile preference policy:
             - Collect key profile facts only from explicit user input.
+            - Include explicit general user facts when available (name, work, profession, other facts).
             - Do not assume or infer unstated user preferences.
             - When a missing preference is required to proceed well, ask 1 or 2 concise relevant questions.
         """.trimIndent()

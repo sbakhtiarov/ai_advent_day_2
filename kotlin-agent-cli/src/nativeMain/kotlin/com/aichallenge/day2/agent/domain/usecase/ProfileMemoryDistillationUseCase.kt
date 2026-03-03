@@ -75,6 +75,10 @@ class ProfileMemoryDistillationUseCase(
             put(TOOLING_PREFERENCES_KEY, JsonArray(state.toolingPreferences.map { JsonPrimitive(it) }))
             put(WORKFLOW_DEFAULTS_KEY, JsonArray(state.workflowDefaults.map { JsonPrimitive(it) }))
             put(STABLE_CONSTRAINTS_KEY, JsonArray(state.stableConstraints.map { JsonPrimitive(it) }))
+            put(NAME_KEY, JsonPrimitive(state.name))
+            put(WORK_KEY, JsonPrimitive(state.work))
+            put(PROFESSION_KEY, JsonPrimitive(state.profession))
+            put(OTHER_FACTS_KEY, JsonArray(state.otherFacts.map { JsonPrimitive(it) }))
         }
 
         return json.encodeToString(JsonObject.serializer(), jsonObject)
@@ -111,6 +115,13 @@ class ProfileMemoryDistillationUseCase(
             stableConstraints = normalizeStringArray(
                 STABLE_CONSTRAINTS_KEY,
                 jsonObject.getValue(STABLE_CONSTRAINTS_KEY),
+            ),
+            name = normalizeStringValue(NAME_KEY, jsonObject.getValue(NAME_KEY)),
+            work = normalizeStringValue(WORK_KEY, jsonObject.getValue(WORK_KEY)),
+            profession = normalizeStringValue(PROFESSION_KEY, jsonObject.getValue(PROFESSION_KEY)),
+            otherFacts = normalizeStringArray(
+                OTHER_FACTS_KEY,
+                jsonObject.getValue(OTHER_FACTS_KEY),
             ),
         )
     }
@@ -151,11 +162,19 @@ class ProfileMemoryDistillationUseCase(
         private const val TOOLING_PREFERENCES_KEY = "tooling_preferences"
         private const val WORKFLOW_DEFAULTS_KEY = "workflow_defaults"
         private const val STABLE_CONSTRAINTS_KEY = "stable_constraints"
+        private const val NAME_KEY = "name"
+        private const val WORK_KEY = "work"
+        private const val PROFESSION_KEY = "profession"
+        private const val OTHER_FACTS_KEY = "other_facts"
         private val PREFERENCE_STATE_KEYS = listOf(
             WRITING_STYLE_KEY,
             TOOLING_PREFERENCES_KEY,
             WORKFLOW_DEFAULTS_KEY,
             STABLE_CONSTRAINTS_KEY,
+            NAME_KEY,
+            WORK_KEY,
+            PROFESSION_KEY,
+            OTHER_FACTS_KEY,
         )
         private val PROFILE_MEMORY_SYSTEM_PROMPT = """
             You maintain a strict structured profile memory for an AI assistant.
@@ -164,9 +183,11 @@ class ProfileMemoryDistillationUseCase(
             Rules:
             - Output valid JSON only, with no markdown and no explanation.
             - Use exactly these keys:
-              writing_style, tooling_preferences, workflow_defaults, stable_constraints
+              writing_style, tooling_preferences, workflow_defaults, stable_constraints,
+              name, work, profession, other_facts
             - writing_style must be a string.
-            - tooling_preferences, workflow_defaults, stable_constraints must be arrays of strings.
+            - name, work, profession must be strings.
+            - tooling_preferences, workflow_defaults, stable_constraints, other_facts must be arrays of strings.
             - Keep entries concise and stable.
             - Remove duplicates, obsolete details, and empty strings.
             - Collect facts only from explicit USER messages.

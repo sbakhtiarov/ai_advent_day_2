@@ -27,6 +27,10 @@ class JsonFileProfileMemoryStoreTest {
                 toolingPreferences = listOf("use rg", "prefer TypeScript"),
                 workflowDefaults = listOf("always run tests before finalizing"),
                 stableConstraints = listOf("avoid destructive git commands"),
+                name = "Alex",
+                work = "Mobile platform at Wire",
+                profession = "Staff Engineer",
+                otherFacts = listOf("based in Berlin"),
             ),
             environmentFacts = ProfileEnvironmentFacts(
                 timezone = "Europe/Berlin",

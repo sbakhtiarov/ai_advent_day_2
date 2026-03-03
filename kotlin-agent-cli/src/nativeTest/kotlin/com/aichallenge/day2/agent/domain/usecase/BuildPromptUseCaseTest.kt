@@ -159,6 +159,10 @@ class BuildPromptUseCaseTest {
                         toolingPreferences = listOf(" use rg ", "use rg", ""),
                         workflowDefaults = listOf("always run tests before finalizing"),
                         stableConstraints = listOf("avoid destructive git commands"),
+                        name = "  Alex ",
+                        work = "Mobile platform at Wire",
+                        profession = "Staff Engineer",
+                        otherFacts = listOf("based in Berlin", "based in Berlin", ""),
                     ),
                     environmentFacts = ProfileEnvironmentFacts(
                         timezone = "Europe/Berlin",
@@ -194,6 +198,22 @@ class BuildPromptUseCaseTest {
         assertContains(
             profileMemoryBlock,
             "\"stable_constraints\":[\"avoid destructive git commands\"]",
+        )
+        assertContains(
+            profileMemoryBlock,
+            "\"name\":\"Alex\"",
+        )
+        assertContains(
+            profileMemoryBlock,
+            "\"work\":\"Mobile platform at Wire\"",
+        )
+        assertContains(
+            profileMemoryBlock,
+            "\"profession\":\"Staff Engineer\"",
+        )
+        assertContains(
+            profileMemoryBlock,
+            "\"other_facts\":[\"based in Berlin\"]",
         )
         assertContains(
             profileMemoryBlock,

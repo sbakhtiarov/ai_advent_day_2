@@ -24,7 +24,11 @@ class ProfileMemoryDistillationUseCaseTest {
                           "writing_style": " concise bullets ",
                           "tooling_preferences": [" use rg ", "", "use rg", "prefer TypeScript"],
                           "workflow_defaults": ["always run tests before finalizing", "always run tests before finalizing"],
-                          "stable_constraints": ["avoid destructive git commands", " "]
+                          "stable_constraints": ["avoid destructive git commands", " "],
+                          "name": " Alex ",
+                          "work": " Mobile platform at Wire ",
+                          "profession": " Staff Engineer ",
+                          "other_facts": ["based in Berlin", "", "based in Berlin"]
                         }
                         """.trimIndent(),
                     ),
@@ -51,6 +55,10 @@ class ProfileMemoryDistillationUseCaseTest {
         assertEquals(listOf("use rg", "prefer TypeScript"), result.toolingPreferences)
         assertEquals(listOf("always run tests before finalizing"), result.workflowDefaults)
         assertEquals(listOf("avoid destructive git commands"), result.stableConstraints)
+        assertEquals("Alex", result.name)
+        assertEquals("Mobile platform at Wire", result.work)
+        assertEquals("Staff Engineer", result.profession)
+        assertEquals(listOf("based in Berlin"), result.otherFacts)
 
         assertEquals(0.0, repository.temperatures.single())
         assertEquals("gpt-4.1-mini", repository.models.single())
@@ -107,7 +115,11 @@ class ProfileMemoryDistillationUseCaseTest {
                           "writing_style": "concise",
                           "tooling_preferences": [1],
                           "workflow_defaults": [],
-                          "stable_constraints": []
+                          "stable_constraints": [],
+                          "name": "",
+                          "work": "",
+                          "profession": "",
+                          "other_facts": []
                         }
                         """.trimIndent(),
                     ),

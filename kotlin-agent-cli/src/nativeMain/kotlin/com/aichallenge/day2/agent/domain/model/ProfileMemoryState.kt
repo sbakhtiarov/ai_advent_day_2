@@ -10,6 +10,10 @@ data class ProfilePreferenceState(
     val toolingPreferences: List<String> = emptyList(),
     val workflowDefaults: List<String> = emptyList(),
     val stableConstraints: List<String> = emptyList(),
+    val name: String = "",
+    val work: String = "",
+    val profession: String = "",
+    val otherFacts: List<String> = emptyList(),
 )
 
 data class ProfileEnvironmentFacts(

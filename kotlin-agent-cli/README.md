@@ -71,7 +71,7 @@ time> <seconds> s
 - Working memory is a distilled structured task state updated incrementally after each successful turn from previous working state + latest user/assistant messages.
 - Working memory lifecycle is independent from session memory compaction strategy and session-memory snapshot files.
 - Working memory is injected into interactive prompt context as a dedicated system-context block with normalized JSON task state.
-- Profile memory stores persistent user defaults (writing style, tooling preferences, workflow defaults, stable constraints) plus deterministic environment facts (timezone, OS, repo path).
+- Profile memory stores persistent user defaults (writing style, tooling preferences, workflow defaults, stable constraints), explicit general user facts (name, work, profession, other facts), plus deterministic environment facts (timezone, OS, repo path).
 - Profile memory is injected into interactive prompt context as a dedicated system-context block with normalized JSON state and is distilled incrementally after each successful turn.
 - Profile memory distillation captures only explicit user-provided facts (no inferred assumptions), and the assistant asks 1–2 concise relevant preference questions when needed to fill missing preferences.
 - Session snapshot persistence includes both conversation messages and a context-usage estimate.

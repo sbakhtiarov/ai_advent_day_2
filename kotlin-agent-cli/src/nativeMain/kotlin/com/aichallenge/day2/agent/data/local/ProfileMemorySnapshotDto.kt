@@ -18,6 +18,10 @@ data class PersistedProfilePreferenceStateDto(
     val toolingPreferences: List<String> = emptyList(),
     val workflowDefaults: List<String> = emptyList(),
     val stableConstraints: List<String> = emptyList(),
+    val name: String = "",
+    val work: String = "",
+    val profession: String = "",
+    val otherFacts: List<String> = emptyList(),
 )
 
 @Serializable
@@ -43,6 +47,10 @@ private fun ProfilePreferenceState.toPersistedDto(): PersistedProfilePreferenceS
     toolingPreferences = toolingPreferences,
     workflowDefaults = workflowDefaults,
     stableConstraints = stableConstraints,
+    name = name,
+    work = work,
+    profession = profession,
+    otherFacts = otherFacts,
 )
 
 private fun PersistedProfilePreferenceStateDto.toDomainModel(): ProfilePreferenceState = ProfilePreferenceState(
@@ -50,6 +58,10 @@ private fun PersistedProfilePreferenceStateDto.toDomainModel(): ProfilePreferenc
     toolingPreferences = toolingPreferences,
     workflowDefaults = workflowDefaults,
     stableConstraints = stableConstraints,
+    name = name,
+    work = work,
+    profession = profession,
+    otherFacts = otherFacts,
 )
 
 private fun ProfileEnvironmentFacts.toPersistedDto(): PersistedProfileEnvironmentFactsDto = PersistedProfileEnvironmentFactsDto(

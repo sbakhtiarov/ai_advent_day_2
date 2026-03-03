@@ -126,7 +126,11 @@ class ConsoleChatControllerProfileMemoryTest {
                           "writing_style": "concise bullets",
                           "tooling_preferences": ["use rg", "prefer TypeScript"],
                           "workflow_defaults": ["always run tests before finalizing"],
-                          "stable_constraints": ["avoid destructive git commands"]
+                          "stable_constraints": ["avoid destructive git commands"],
+                          "name": "Alex",
+                          "work": "Mobile platform at Wire",
+                          "profession": "Staff Engineer",
+                          "other_facts": ["based in Berlin"]
                         }
                         """.trimIndent(),
                     ),
@@ -155,6 +159,10 @@ class ConsoleChatControllerProfileMemoryTest {
         assertEquals(listOf("use rg", "prefer TypeScript"), savedState.preferences.toolingPreferences)
         assertEquals(listOf("always run tests before finalizing"), savedState.preferences.workflowDefaults)
         assertEquals(listOf("avoid destructive git commands"), savedState.preferences.stableConstraints)
+        assertEquals("Alex", savedState.preferences.name)
+        assertEquals("Mobile platform at Wire", savedState.preferences.work)
+        assertEquals("Staff Engineer", savedState.preferences.profession)
+        assertEquals(listOf("based in Berlin"), savedState.preferences.otherFacts)
         assertEquals(environmentFacts, savedState.environmentFacts)
         assertEquals(2, repository.conversations.size)
         assertContains(repository.conversations[1][1].content, "USER: Implement this")
@@ -197,7 +205,11 @@ class ConsoleChatControllerProfileMemoryTest {
                           "writing_style": "concise",
                           "tooling_preferences": [],
                           "workflow_defaults": [],
-                          "stable_constraints": []
+                          "stable_constraints": [],
+                          "name": "",
+                          "work": "",
+                          "profession": "",
+                          "other_facts": []
                         }
                         """.trimIndent(),
                     ),
@@ -331,6 +343,7 @@ private class RecordingProfileMemoryStore(
                 toolingPreferences = loadedState.preferences.toolingPreferences.toList(),
                 workflowDefaults = loadedState.preferences.workflowDefaults.toList(),
                 stableConstraints = loadedState.preferences.stableConstraints.toList(),
+                otherFacts = loadedState.preferences.otherFacts.toList(),
             ),
             environmentFacts = loadedState.environmentFacts.copy(),
         )
@@ -342,6 +355,7 @@ private class RecordingProfileMemoryStore(
                 toolingPreferences = state.preferences.toolingPreferences.toList(),
                 workflowDefaults = state.preferences.workflowDefaults.toList(),
                 stableConstraints = state.preferences.stableConstraints.toList(),
+                otherFacts = state.preferences.otherFacts.toList(),
             ),
             environmentFacts = state.environmentFacts.copy(),
         )
