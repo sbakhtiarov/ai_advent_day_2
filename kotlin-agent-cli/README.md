@@ -68,7 +68,9 @@ time> <seconds> s
 - Rolling-summary compactization also persists current summary to `~/.kotlin-agent-cli/session-summary.json`.
 - Interactive mode also persists independent working memory to `~/.kotlin-agent-cli/working-memory.json`.
 - Interactive mode also persists independent profile/preference memory to `~/.kotlin-agent-cli/profile-memory.json`.
-- Optional user-defined profile overrides are loaded from `~/.kotlin-agent-cli/user-profile-default.json` (partial JSON with existing profile-preference keys only).
+- Optional user-defined profile overrides are discovered from `~/.kotlin-agent-cli/user-profile-<name>.json`.
+- Profile files must match `user-profile-<name>.json`; each file can include optional `display_name` (used only in `/profile` menu labels).
+- Active user profile file selection is persisted in `~/.kotlin-agent-cli/active-user-profile.json` as `{ "active_file_name": "<file-name>" }`.
 - Working memory is a distilled structured task state updated incrementally after each successful turn from previous working state + latest user/assistant messages.
 - Working memory lifecycle is independent from session memory compaction strategy and session-memory snapshot files.
 - Working memory is injected into interactive prompt context as a dedicated system-context block with normalized JSON task state.
@@ -96,8 +98,9 @@ time> <seconds> s
 - Prompt context order is: system prompt (includes optional user-defined profile defaults), compacted summary (as system context when present), working-memory block (as system context when present), profile-memory block (as system context when present), remaining conversation, current user prompt.
 - If you attach files with `@<path>`, their text content is injected into the next submitted prompt and persisted in session memory.
 - `/config` resets session memory after applying output configuration and persists the reset state.
+- `/profile` opens profile selection menu, switches active user-defined profile, resets in-memory session context, and persists reset snapshot.
 - `/reset` clears in-memory session memory, clears the visible transcript, and deletes persisted session memory on disk (working/profile memory are not cleared).
-- One-shot mode (`--prompt`) still does not read/write session/working/profile persisted memory, but it does load `user-profile-default.json` and inject those defaults into the system prompt.
+- One-shot mode (`--prompt`) still does not read/write session/working/profile persisted memory, but it does load the active `user-profile-<name>.json` and inject those defaults into the system prompt.
 - If persistence read/write fails, the app continues with in-memory session behavior.
 
 ## Interactive Commands
@@ -107,6 +110,7 @@ time> <seconds> s
 - `/model <id|number>` - switch active model (must be listed in `/models`)
 - `/memory` - show estimated session-memory context usage
 - `/compact` - choose compaction strategy (`Rolling summary`, `Sliding window`, `Fact map`, or `Branching`)
+- `/profile` - choose active user profile (`user-profile-<name>.json`)
 - `/config` - open config menu (ESC to close)
 - `/temp <temperature>` - set OpenAI temperature (`0..2`)
 - `/reset` - clear conversation memory and transcript, then delete persisted session memory on disk (working/profile remain intact)

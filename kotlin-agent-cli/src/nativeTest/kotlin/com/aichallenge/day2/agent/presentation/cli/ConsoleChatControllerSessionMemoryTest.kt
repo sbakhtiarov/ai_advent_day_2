@@ -10,6 +10,7 @@ import com.aichallenge.day2.agent.domain.model.MemoryEstimateSource
 import com.aichallenge.day2.agent.domain.model.MemoryUsageSnapshot
 import com.aichallenge.day2.agent.domain.model.MessageRole
 import com.aichallenge.day2.agent.domain.model.PromptRequestData
+import com.aichallenge.day2.agent.domain.model.ProfilePreferenceState
 import com.aichallenge.day2.agent.domain.model.RollingWindowCompactionStartPolicy
 import com.aichallenge.day2.agent.domain.model.SessionCompactionMode
 import com.aichallenge.day2.agent.domain.model.SessionCompactionSummaryMode
@@ -19,8 +20,10 @@ import com.aichallenge.day2.agent.domain.model.SlidingWindowCompactionStartPolic
 import com.aichallenge.day2.agent.domain.model.SubtopicBranchState
 import com.aichallenge.day2.agent.domain.model.TokenUsage
 import com.aichallenge.day2.agent.domain.model.TopicBranchState
+import com.aichallenge.day2.agent.domain.model.UserProfileOption
 import com.aichallenge.day2.agent.domain.repository.AgentRepository
 import com.aichallenge.day2.agent.domain.repository.SessionMemoryStore
+import com.aichallenge.day2.agent.domain.repository.UserDefinedProfileStore
 import com.aichallenge.day2.agent.domain.usecase.SessionMemoryCompactionCoordinator
 import com.aichallenge.day2.agent.domain.usecase.SendPromptUseCase
 import com.aichallenge.day2.agent.domain.usecase.SlidingWindowCompactionStrategy
@@ -752,10 +755,132 @@ class ConsoleChatControllerSessionMemoryTest {
         controller.runInteractive()
 
         val output = io.outputText()
-        assertContains(output, "commands: /help, /models, /model <id|number>, /memory, /compact, /config, /temp <0..2>, /reset, /exit, @<path>")
+        assertContains(output, "commands: /help, /models, /model <id|number>, /memory, /compact, /profile, /config, /temp <0..2>, /reset, /exit, @<path>")
         assertContains(output, "/memory              show session-memory context usage")
         assertContains(output, "/compact             choose memory compaction strategy")
+        assertContains(output, "/profile             choose active user profile")
         assertContains(output, "@<path>              attach file for the next prompt")
+    }
+
+    @Test
+    fun profileCommandSwitchesActiveProfileResetsConversationAndPersistsSnapshot() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val sessionStore = RecordingSessionMemoryStore(
+            loadedState = SessionMemoryState(
+                messages = listOf(
+                    ConversationMessage.user("old question"),
+                    ConversationMessage.assistant("old answer"),
+                ),
+                usage = MemoryUsageSnapshot(
+                    estimatedTokens = 200,
+                    source = MemoryEstimateSource.HYBRID,
+                    messageCount = 3,
+                ),
+            ),
+        )
+        val userDefinedProfileStore = RecordingSelectableUserDefinedProfileStore(
+            profiles = listOf(
+                UserProfileOption("user-profile-default.json", "Default"),
+                UserProfileOption("user-profile-work.json", "Work"),
+            ),
+            profilesByFileName = mapOf(
+                "user-profile-default.json" to ProfilePreferenceState(writingStyle = "default style"),
+                "user-profile-work.json" to ProfilePreferenceState(writingStyle = "work style"),
+            ),
+            activeFileName = "user-profile-default.json",
+        )
+        val io = FakeCliIO(
+            inputs = listOf("/profile", "/exit"),
+            profileSelections = listOf(1),
+        )
+        val controller = createController(
+            repository = repository,
+            io = io,
+            sessionMemoryStore = sessionStore,
+            userDefinedProfileStore = userDefinedProfileStore,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(listOf("user-profile-work.json"), userDefinedProfileStore.setActiveCalls)
+        assertEquals(1, sessionStore.saveStates.size)
+        assertEquals(emptyList(), sessionStore.saveStates.single().messages)
+        assertContains(io.outputText(), "system> active profile set to 'Work'")
+    }
+
+    @Test
+    fun profileCommandCancelKeepsCurrentProfileAndDoesNotPersistSnapshot() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val sessionStore = RecordingSessionMemoryStore()
+        val userDefinedProfileStore = RecordingSelectableUserDefinedProfileStore(
+            profiles = listOf(
+                UserProfileOption("user-profile-default.json", "Default"),
+                UserProfileOption("user-profile-work.json", "Work"),
+            ),
+            activeFileName = "user-profile-default.json",
+        )
+        val io = FakeCliIO(
+            inputs = listOf("/profile", "/exit"),
+            profileSelections = listOf(null),
+        )
+        val controller = createController(
+            repository = repository,
+            io = io,
+            sessionMemoryStore = sessionStore,
+            userDefinedProfileStore = userDefinedProfileStore,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(emptyList(), userDefinedProfileStore.setActiveCalls)
+        assertEquals(0, sessionStore.saveStates.size)
+        assertFalse(io.outputText().contains("active profile set"))
+    }
+
+    @Test
+    fun profileCommandSelectingAlreadyActiveShowsMessage() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val sessionStore = RecordingSessionMemoryStore()
+        val userDefinedProfileStore = RecordingSelectableUserDefinedProfileStore(
+            profiles = listOf(
+                UserProfileOption("user-profile-default.json", "Default"),
+                UserProfileOption("user-profile-work.json", "Work"),
+            ),
+            activeFileName = "user-profile-default.json",
+        )
+        val io = FakeCliIO(
+            inputs = listOf("/profile", "/exit"),
+            profileSelections = listOf(0),
+        )
+        val controller = createController(
+            repository = repository,
+            io = io,
+            sessionMemoryStore = sessionStore,
+            userDefinedProfileStore = userDefinedProfileStore,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(emptyList(), userDefinedProfileStore.setActiveCalls)
+        assertEquals(0, sessionStore.saveStates.size)
+        assertContains(io.outputText(), "system> profile 'Default' is already active")
+    }
+
+    @Test
+    fun profileCommandShowsMessageWhenNoValidProfilesFound() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val io = FakeCliIO(inputs = listOf("/profile", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            userDefinedProfileStore = RecordingSelectableUserDefinedProfileStore(
+                profiles = emptyList(),
+            ),
+        )
+
+        controller.runInteractive()
+
+        assertContains(io.outputText(), "system> no valid user profiles found")
     }
 
     @Test
@@ -1544,6 +1669,7 @@ class ConsoleChatControllerSessionMemoryTest {
         repository: RecordingAgentRepository,
         io: CliIO,
         sessionMemoryStore: SessionMemoryStore? = null,
+        userDefinedProfileStore: UserDefinedProfileStore? = null,
         persistentMemoryEnabled: Boolean = true,
         fileReferenceReader: FileReferenceReader = RecordingFileReferenceReader(emptyMap()),
         compactionCoordinators: Map<SessionCompactionMode, SessionMemoryCompactionCoordinator> = mapOf(
@@ -1567,6 +1693,7 @@ class ConsoleChatControllerSessionMemoryTest {
             ),
             io = io,
             sessionMemoryStore = sessionMemoryStore,
+            userDefinedProfileStore = userDefinedProfileStore,
             persistentMemoryEnabled = persistentMemoryEnabled,
             fileReferenceReader = fileReferenceReader,
             compactionCoordinators = compactionCoordinators,
@@ -1597,10 +1724,12 @@ private class FakeCliIO(
     inputs: List<String>,
     configSelections: List<ConfigMenuSelection> = emptyList(),
     private val compactionSelections: List<Int?> = emptyList(),
+    private val profileSelections: List<Int?> = emptyList(),
 ) : CliIO {
     private val queuedInputs = ArrayDeque<String?>(inputs)
     private val queuedConfigSelections = ArrayDeque(configSelections)
     private var nextCompactionSelectionIndex = 0
+    private var nextProfileSelectionIndex = 0
     private val lines = mutableListOf<String>()
     var showThinkingIndicatorCalls: Int = 0
         private set
@@ -1655,9 +1784,44 @@ private class FakeCliIO(
         return currentSelection
     }
 
+    override fun openProfileMenu(options: List<String>, currentSelection: Int): Int? {
+        val selection = profileSelections.getOrNull(nextProfileSelectionIndex)
+        if (nextProfileSelectionIndex < profileSelections.size) {
+            nextProfileSelectionIndex += 1
+            return selection
+        }
+        return currentSelection
+    }
+
     private fun nextInput(): String? = queuedInputs.removeFirstOrNull()
 
     fun outputText(): String = lines.joinToString(separator = "\n")
+}
+
+private class RecordingSelectableUserDefinedProfileStore(
+    private val profiles: List<UserProfileOption>,
+    private val profilesByFileName: Map<String, ProfilePreferenceState> = emptyMap(),
+    private var activeFileName: String? = null,
+) : UserDefinedProfileStore {
+    val setActiveCalls = mutableListOf<String>()
+
+    override fun load(): ProfilePreferenceState? {
+        val fileName = activeFileName ?: profiles.firstOrNull()?.fileName ?: return null
+        return profilesByFileName[fileName]
+    }
+
+    override fun listProfiles(): List<UserProfileOption> = profiles.toList()
+
+    override fun activeProfileFileName(): String? = activeFileName
+
+    override fun setActiveProfile(fileName: String): Boolean {
+        if (profiles.none { profile -> profile.fileName == fileName }) {
+            return false
+        }
+        setActiveCalls += fileName
+        activeFileName = fileName
+        return true
+    }
 }
 
 private class RecordingSessionMemoryStore(

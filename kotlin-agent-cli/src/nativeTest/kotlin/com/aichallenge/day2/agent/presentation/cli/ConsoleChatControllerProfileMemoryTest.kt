@@ -11,6 +11,7 @@ import com.aichallenge.day2.agent.domain.model.ProfileMemoryState
 import com.aichallenge.day2.agent.domain.model.ProfilePreferenceState
 import com.aichallenge.day2.agent.domain.model.PromptRequestData
 import com.aichallenge.day2.agent.domain.model.SessionCompactionMode
+import com.aichallenge.day2.agent.domain.model.UserProfileOption
 import com.aichallenge.day2.agent.domain.repository.AgentRepository
 import com.aichallenge.day2.agent.domain.repository.ProfileMemoryStore
 import com.aichallenge.day2.agent.domain.repository.UserDefinedProfileStore
@@ -541,6 +542,12 @@ private class RecordingUserDefinedProfileStore(
             otherFacts = loadedState.otherFacts.toList(),
         )
     }
+
+    override fun listProfiles(): List<UserProfileOption> = emptyList()
+
+    override fun activeProfileFileName(): String? = null
+
+    override fun setActiveProfile(fileName: String): Boolean = false
 }
 
 private class FixedProfileEnvironmentFactsProvider(
@@ -586,6 +593,8 @@ private class ProfileMemoryControllerTestCliIO(
         }
         return currentSelection
     }
+
+    override fun openProfileMenu(options: List<String>, currentSelection: Int): Int? = currentSelection
 
     fun outputText(): String = lines.joinToString(separator = "\n")
 }

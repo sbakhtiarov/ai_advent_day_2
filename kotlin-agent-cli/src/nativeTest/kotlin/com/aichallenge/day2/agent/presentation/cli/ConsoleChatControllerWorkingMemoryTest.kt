@@ -365,5 +365,7 @@ private class WorkingMemoryControllerTestCliIO(
         return currentSelection
     }
 
+    override fun openProfileMenu(options: List<String>, currentSelection: Int): Int? = currentSelection
+
     fun outputText(): String = lines.joinToString(separator = "\n")
 }

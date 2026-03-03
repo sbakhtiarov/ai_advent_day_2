@@ -1,4 +1,5 @@
 {
+    "display_name": "Default",
     "writingStyle": "concise bullets",
     "workflowDefaults": [
       "show findings first in reviews",

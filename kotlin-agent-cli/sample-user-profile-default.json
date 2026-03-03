@@ -1,4 +1,5 @@
 {
+  "display_name": "Default",
   "writingStyle": "concise bullets",
   "toolingPreferences": [
     "use rg for search",

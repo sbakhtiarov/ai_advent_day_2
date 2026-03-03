@@ -4,6 +4,8 @@ import com.aichallenge.day2.agent.domain.model.ProfilePreferenceState
 import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.convert
 import platform.posix.EEXIST
@@ -17,12 +19,13 @@ import platform.posix.mode_t
 class JsonFileUserDefinedProfileStoreTest {
     @Test
     fun loadParsesPartialJsonAndKeepsDefaultsForMissingKeys() {
-        val filePath = uniqueUserDefinedProfilePath()
-        ensureDirectoryExists(parentDirectory(filePath))
+        val directory = uniqueUserProfileDirectoryPath()
+        ensureDirectoryExists(directory)
         writeTextFile(
-            path = filePath,
+            path = "$directory/user-profile-default.json",
             text = """
                 {
+                  "display_name": "Default profile",
                   "writingStyle": "concise bullets",
                   "toolingPreferences": ["use rg", "use rg"],
                   "name": "Alex",
@@ -30,7 +33,8 @@ class JsonFileUserDefinedProfileStoreTest {
                 }
             """.trimIndent(),
         )
-        val store = JsonFileUserDefinedProfileStore(filePath)
+        val store = JsonFileUserDefinedProfileStore(directory)
+        assertTrue(store.setActiveProfile("user-profile-default.json"))
 
         val loaded = store.load()
 
@@ -50,27 +54,121 @@ class JsonFileUserDefinedProfileStoreTest {
     }
 
     @Test
-    fun loadReturnsNullWhenFileDoesNotExist() {
-        val filePath = uniqueUserDefinedProfilePath()
-        val store = JsonFileUserDefinedProfileStore(filePath)
+    fun listProfilesUsesDisplayNameOrFilenameFallback() {
+        val directory = uniqueUserProfileDirectoryPath()
+        ensureDirectoryExists(directory)
+        writeTextFile(
+            "$directory/user-profile-personal.json",
+            """
+                {
+                  "writingStyle": "casual"
+                }
+            """.trimIndent(),
+        )
+        writeTextFile(
+            "$directory/user-profile-work.json",
+            """
+                {
+                  "display_name": "Work profile",
+                  "writingStyle": "formal"
+                }
+            """.trimIndent(),
+        )
+        val store = JsonFileUserDefinedProfileStore(directory)
 
-        assertEquals(null, store.load())
+        val profiles = store.listProfiles()
+
+        assertEquals(
+            listOf(
+                "user-profile-personal.json" to "personal",
+                "user-profile-work.json" to "Work profile",
+            ),
+            profiles.map { profile -> profile.fileName to profile.displayName },
+        )
     }
 
     @Test
-    fun loadReturnsNullWhenJsonIsMalformed() {
-        val filePath = uniqueUserDefinedProfilePath()
-        ensureDirectoryExists(parentDirectory(filePath))
-        writeTextFile(filePath, "{ malformed json")
-        val store = JsonFileUserDefinedProfileStore(filePath)
+    fun listProfilesSkipsFilesWithInvalidNamePatternOrMalformedJson() {
+        val directory = uniqueUserProfileDirectoryPath()
+        ensureDirectoryExists(directory)
+        writeTextFile(
+            "$directory/user-profile-good.json",
+            """
+                {
+                  "display_name": "Good profile",
+                  "writingStyle": "concise"
+                }
+            """.trimIndent(),
+        )
+        writeTextFile(
+            "$directory/user-profile-bad.json",
+            "{ malformed json",
+        )
+        writeTextFile(
+            "$directory/not-a-profile.json",
+            """
+                {
+                  "display_name": "Ignored"
+                }
+            """.trimIndent(),
+        )
+        val store = JsonFileUserDefinedProfileStore(directory)
+
+        val profiles = store.listProfiles()
+
+        assertEquals(
+            listOf("user-profile-good.json"),
+            profiles.map { profile -> profile.fileName },
+        )
+    }
+
+    @Test
+    fun setActiveProfilePersistsSelectionAcrossStoreInstances() {
+        val directory = uniqueUserProfileDirectoryPath()
+        ensureDirectoryExists(directory)
+        writeTextFile(
+            "$directory/user-profile-default.json",
+            """
+                {
+                  "display_name": "Default",
+                  "writingStyle": "default style"
+                }
+            """.trimIndent(),
+        )
+        writeTextFile(
+            "$directory/user-profile-work.json",
+            """
+                {
+                  "display_name": "Work",
+                  "writingStyle": "work style"
+                }
+            """.trimIndent(),
+        )
+        val firstStore = JsonFileUserDefinedProfileStore(directory)
+        assertTrue(firstStore.setActiveProfile("user-profile-work.json"))
+
+        val secondStore = JsonFileUserDefinedProfileStore(directory)
+
+        assertEquals("user-profile-work.json", secondStore.activeProfileFileName())
+        assertEquals("work style", secondStore.load()?.writingStyle)
+    }
+
+    @Test
+    fun loadReturnsNullWhenNoValidProfilesExist() {
+        val directory = uniqueUserProfileDirectoryPath()
+        ensureDirectoryExists(directory)
+        val store = JsonFileUserDefinedProfileStore(directory)
 
         assertEquals(null, store.load())
+        assertEquals(emptyList(), store.listProfiles())
+        assertEquals(null, store.activeProfileFileName())
+        assertFalse(store.setActiveProfile("user-profile-default.json"))
     }
 }
 
-private fun uniqueUserDefinedProfilePath(): String {
+private fun uniqueUserProfileDirectoryPath(): String {
     val seed = Random.nextLong().toString().replace('-', '0')
-    return "/tmp/kotlin-agent-cli-tests/$seed/user-profile-default.json"
+    return "/tmp/kotlin-agent-cli-tests/$seed/profiles"
 }
 
 private fun parentDirectory(path: String): String {

@@ -13,6 +13,7 @@ import com.aichallenge.day2.agent.domain.model.SessionCompactionMode
 import com.aichallenge.day2.agent.domain.model.SessionMemory
 import com.aichallenge.day2.agent.domain.model.SessionMemoryState
 import com.aichallenge.day2.agent.domain.model.TokenUsage
+import com.aichallenge.day2.agent.domain.model.UserProfileOption
 import com.aichallenge.day2.agent.domain.model.WorkingMemoryState
 import com.aichallenge.day2.agent.domain.repository.ProfileMemoryStore
 import com.aichallenge.day2.agent.domain.repository.SessionMemoryStore
@@ -657,6 +658,11 @@ class ConsoleChatController(
                 true
             }
 
+            input == "/profile" -> {
+                handleProfileCommand()
+                true
+            }
+
             isModelCommand(input) -> {
                 handleModelCommand(input)
                 true
@@ -710,6 +716,10 @@ class ConsoleChatController(
         }
 
         userDefinedProfileInitialized = true
+        reloadUserDefinedProfile()
+    }
+
+    private fun reloadUserDefinedProfile() {
         userDefinedProfilePreferences = runCatching {
             userDefinedProfileStore?.load()
         }.getOrNull()
@@ -898,7 +908,7 @@ class ConsoleChatController(
         io.writeLine(logoBanner())
         io.writeLine()
         io.writeLine("    type your prompt and press Enter")
-        io.writeLine("    commands: /help, /models, /model <id|number>, /memory, /compact, /config, /temp <0..2>, /reset, /exit, @<path>")
+        io.writeLine("    commands: /help, /models, /model <id|number>, /memory, /compact, /profile, /config, /temp <0..2>, /reset, /exit, @<path>")
         io.writeLine()
 
         dialogBlocks.forEachIndexed { index, block ->
@@ -929,6 +939,7 @@ class ConsoleChatController(
         /model <id|number>   switch active model (must be from /models)
         /memory              show session-memory context usage
         /compact             choose memory compaction strategy
+        /profile             choose active user profile
         /config              open config menu (ESC to close)
         /temp <temperature>  set response temperature (0..2)
         /reset               clear conversation and keep current system prompt
@@ -1012,6 +1023,52 @@ class ConsoleChatController(
         }
         persistMemorySnapshot()
         dialogBlocks += "system> compaction strategy set to '${selectedMode.label}'"
+    }
+
+    private fun handleProfileCommand() {
+        val store = userDefinedProfileStore
+        if (store == null) {
+            dialogBlocks += "system> profile store is unavailable"
+            return
+        }
+
+        val profiles = runCatching { store.listProfiles() }.getOrNull().orEmpty()
+        if (profiles.isEmpty()) {
+            dialogBlocks += "system> no valid user profiles found (expected: user-profile-<name>.json)"
+            return
+        }
+
+        val currentFileName = runCatching { store.activeProfileFileName() }.getOrNull()
+        val currentSelection = profiles.indexOfFirst { profile -> profile.fileName == currentFileName }
+            .takeIf { index -> index >= 0 }
+            ?: 0
+        val selectedIndex = io.openProfileMenu(
+            options = profiles.map(::formatProfileMenuOption),
+            currentSelection = currentSelection,
+        ) ?: return
+        val selectedProfile = profiles.getOrNull(selectedIndex) ?: return
+
+        if (selectedProfile.fileName == currentFileName) {
+            dialogBlocks += "system> profile '${selectedProfile.displayName}' is already active"
+            return
+        }
+
+        val switched = runCatching {
+            store.setActiveProfile(selectedProfile.fileName)
+        }.getOrDefault(false)
+        if (!switched) {
+            dialogBlocks += "system> failed to switch profile '${selectedProfile.displayName}'"
+            return
+        }
+
+        reloadUserDefinedProfile()
+        resetConversation()
+        persistMemorySnapshot()
+        dialogBlocks += "system> active profile set to '${selectedProfile.displayName}'"
+    }
+
+    private fun formatProfileMenuOption(profile: UserProfileOption): String {
+        return "${profile.displayName} [${profile.fileName}]"
     }
 
     private fun activeCompactionCoordinator(): SessionMemoryCompactionCoordinator? {
