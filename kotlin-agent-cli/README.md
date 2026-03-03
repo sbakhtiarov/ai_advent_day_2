@@ -69,7 +69,7 @@ time> <seconds> s
 - Interactive mode also persists independent working memory to `~/.kotlin-agent-cli/working-memory.json`.
 - Working memory is a distilled structured task state updated incrementally after each successful turn from previous working state + latest user/assistant messages.
 - Working memory lifecycle is independent from session memory compaction strategy and session-memory snapshot files.
-- Working memory is currently persisted only; it is not injected into prompt context yet.
+- Working memory is injected into interactive prompt context as a dedicated system-context block with normalized JSON task state.
 - Session snapshot persistence includes both conversation messages and a context-usage estimate.
 - On interactive startup, the app restores persisted memory exactly as previously saved.
 - Each successful prompt turn is persisted immediately.
@@ -86,7 +86,7 @@ time> <seconds> s
 - Branching mode truncates oldest active-subtopic turns at request-build time when estimated context exceeds model window; stored branch history is not mutated by this truncation.
 - Branching mode prints system messages when a new topic/subtopic is found or when switching to an existing branch.
 - Switching to or from Branching mode via `/compact` resets active memory immediately.
-- Prompt context order is: system prompt, compacted summary (as system context when present), remaining conversation, current user prompt.
+- Prompt context order is: system prompt, compacted summary (as system context when present), working-memory block (as system context when present), remaining conversation, current user prompt.
 - If you attach files with `@<path>`, their text content is injected into the next submitted prompt and persisted in session memory.
 - `/config` resets session memory after applying output configuration and persists the reset state.
 - `/reset` clears in-memory session memory, clears the visible transcript, and deletes persisted session memory on disk (working memory is not cleared).

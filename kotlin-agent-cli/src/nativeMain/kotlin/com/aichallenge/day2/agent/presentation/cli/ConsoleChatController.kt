@@ -67,10 +67,12 @@ class ConsoleChatController(
     private val branchingSessionMemory = BranchingSessionMemory()
     private val branchClassificationUseCase = BranchClassificationUseCase(sendPromptUseCase)
     private val branchingTopicSummaryStrategy = RollingSummaryCompactionStrategy(sendPromptUseCase)
+    private var workingMemoryState: WorkingMemoryState? = null
     private var memoryUsageSnapshot = estimateHeuristicUsage(
         buildPromptUseCase.buildContext(
             systemPrompt = systemPrompt,
             session = sessionMemory.promptDataSnapshot(),
+            workingTaskState = workingMemoryState?.taskState,
         ).toConversation(),
     )
     private val dialogBlocks = mutableListOf<String>()
@@ -78,7 +80,6 @@ class ConsoleChatController(
     private val inputDivider = "─".repeat(80)
     private var persistentMemoryInitialized = false
     private var workingMemoryInitialized = false
-    private var workingMemoryState: WorkingMemoryState? = null
     private val availableCompactionModes = SessionCompactionMode.entries.filter { mode ->
         compactionCoordinators.containsKey(mode)
     }
@@ -151,6 +152,7 @@ class ConsoleChatController(
                     systemPrompt = systemPrompt,
                     session = sessionMemory.promptDataSnapshot(),
                     userPrompt = prompt,
+                    workingTaskState = workingMemoryState?.taskState,
                 ),
             )
             val response = sendPromptUseCase.execute(
@@ -211,6 +213,11 @@ class ConsoleChatController(
                             userPrompt = preparedPrompt.displayPrompt,
                             assistantResponse = turnResult.response.content,
                         )
+                        memoryUsageSnapshot = buildUsageSnapshotAfterSuccessfulTurn(
+                            responseContent = turnResult.response.content,
+                            usage = turnResult.response.usage,
+                            messages = activeContextMessages(),
+                        )
                         val elapsedSeconds = startedAt.elapsedNow().inWholeMilliseconds / 1000.0
                         persistMemorySnapshot()
                         pendingFileReferences.clear()
@@ -239,6 +246,7 @@ class ConsoleChatController(
                 systemPrompt = systemPrompt,
                 session = sessionMemory.promptDataSnapshot(),
                 userPrompt = requestPrompt,
+                workingTaskState = workingMemoryState?.taskState,
             ),
         )
         val response = sendPromptUseCase.execute(
@@ -253,14 +261,6 @@ class ConsoleChatController(
                 model = currentModel,
             )
             ?: false
-        memoryUsageSnapshot = buildUsageSnapshotAfterSuccessfulTurn(
-            responseContent = response.content,
-            usage = response.usage,
-            messages = buildPromptUseCase.buildContext(
-                systemPrompt = systemPrompt,
-                session = sessionMemory.promptDataSnapshot(),
-            ).toConversation(),
-        )
 
         return TurnExecutionResult(
             response = response,
@@ -279,6 +279,7 @@ class ConsoleChatController(
                         systemPrompt = systemPrompt,
                         session = sessionPromptData,
                         userPrompt = requestPrompt,
+                        workingTaskState = workingMemoryState?.taskState,
                     ),
                 )
                 estimateSessionTokensHeuristically(promptRequest.toConversation())
@@ -289,6 +290,7 @@ class ConsoleChatController(
                 systemPrompt = systemPrompt,
                 session = branchingPromptData.session,
                 userPrompt = requestPrompt,
+                workingTaskState = workingMemoryState?.taskState,
             ),
         )
         val response = sendPromptUseCase.execute(
@@ -299,14 +301,6 @@ class ConsoleChatController(
         val systemMessages = handleBranchingPostResponse(
             prompt = requestPrompt,
             response = response.content,
-        )
-        memoryUsageSnapshot = buildUsageSnapshotAfterSuccessfulTurn(
-            responseContent = response.content,
-            usage = response.usage,
-            messages = buildPromptUseCase.buildContext(
-                systemPrompt = systemPrompt,
-                session = branchingSessionMemory.activePromptDataSnapshot(),
-            ).toConversation(),
         )
 
         return TurnExecutionResult(
@@ -729,6 +723,9 @@ class ConsoleChatController(
 
         workingMemoryInitialized = true
         workingMemoryState = runCatching { workingMemoryStore?.load() }.getOrNull()
+        if (workingMemoryState != null) {
+            memoryUsageSnapshot = estimateHeuristicUsage(activeContextMessages())
+        }
     }
 
     private suspend fun updateWorkingMemoryAfterSuccessfulTurn(
@@ -922,11 +919,13 @@ class ConsoleChatController(
             buildPromptUseCase.buildContext(
                 systemPrompt = systemPrompt,
                 session = branchingSessionMemory.activePromptDataSnapshot(),
+                workingTaskState = workingMemoryState?.taskState,
             ).toConversation()
         } else {
             buildPromptUseCase.buildContext(
                 systemPrompt = systemPrompt,
                 session = sessionMemory.promptDataSnapshot(),
+                workingTaskState = workingMemoryState?.taskState,
             ).toConversation()
         }
     }

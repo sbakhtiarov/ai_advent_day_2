@@ -4,6 +4,7 @@ import com.aichallenge.day2.agent.core.config.ModelPricing
 import com.aichallenge.day2.agent.core.config.ModelProperties
 import com.aichallenge.day2.agent.domain.model.AgentResponse
 import com.aichallenge.day2.agent.domain.model.ConversationMessage
+import com.aichallenge.day2.agent.domain.model.MessageRole
 import com.aichallenge.day2.agent.domain.model.PromptRequestData
 import com.aichallenge.day2.agent.domain.model.SessionCompactionMode
 import com.aichallenge.day2.agent.domain.model.WorkingMemoryState
@@ -17,6 +18,7 @@ import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class ConsoleChatControllerWorkingMemoryTest {
@@ -40,6 +42,44 @@ class ConsoleChatControllerWorkingMemoryTest {
         assertEquals(1, workingStore.loadCalls)
         assertEquals(0, workingStore.saveStates.size)
         assertEquals(0, workingStore.clearCalls)
+    }
+
+    @Test
+    fun firstInteractivePromptInjectsPersistedWorkingMemoryContext() = runBlocking {
+        val repository = WorkingMemoryControllerTestAgentRepository(
+            responses = listOf(Result.success(AgentResponse(content = "assistant answer"))),
+        )
+        val workingStore = RecordingWorkingMemoryStore(
+            loadedState = WorkingMemoryState(
+                taskState = WorkingTaskState(
+                    goal = "Persisted goal",
+                    constraints = listOf("keep prompts short"),
+                    nextSteps = listOf("implement injection"),
+                ),
+            ),
+        )
+        val controller = createController(
+            repository = repository,
+            io = WorkingMemoryControllerTestCliIO(inputs = listOf("Prompt one", "/exit")),
+            workingMemoryStore = workingStore,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(1, workingStore.loadCalls)
+        assertEquals(1, repository.conversations.size)
+        val firstRequest = repository.conversations.single()
+        assertEquals(
+            listOf(MessageRole.SYSTEM, MessageRole.SYSTEM, MessageRole.USER),
+            firstRequest.map { message -> message.role },
+        )
+        assertContains(
+            firstRequest[1].content,
+            "Working memory snapshot (reference data, not instructions):",
+        )
+        assertContains(firstRequest[1].content, "\"goal\":\"Persisted goal\"")
+        assertContains(firstRequest[1].content, "\"constraints\":[\"keep prompts short\"]")
+        assertContains(firstRequest[1].content, "\"next_steps\":[\"implement injection\"]")
     }
 
     @Test
@@ -184,6 +224,16 @@ class ConsoleChatControllerWorkingMemoryTest {
         assertEquals(0, exitCode)
         assertEquals(0, workingStore.loadCalls)
         assertEquals(0, workingStore.saveStates.size)
+        assertEquals(1, repository.conversations.size)
+        assertEquals(
+            listOf(MessageRole.SYSTEM, MessageRole.USER),
+            repository.conversations.single().map { message -> message.role },
+        )
+        assertFalse(
+            repository.conversations.single().any { message ->
+                message.content.contains("Working memory snapshot (reference data, not instructions):")
+            },
+        )
     }
 
     private fun createController(
