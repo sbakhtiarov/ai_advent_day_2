@@ -1,19 +1,10 @@
 package com.aichallenge.day2.agent.domain.model
 
-class SessionMemory(
-    initialSystemPrompt: String,
-) {
+import com.aichallenge.day2.agent.domain.usecase.SessionPromptData
+
+class SessionMemory {
     private val messages = mutableListOf<ConversationMessage>()
-    private var fallbackSystemPrompt = initialSystemPrompt
     private var compactedSummary: CompactedSessionSummary? = null
-
-    init {
-        reset(initialSystemPrompt)
-    }
-
-    fun conversationFor(prompt: String): List<ConversationMessage> {
-        return contextSnapshot() + ConversationMessage.user(prompt)
-    }
 
     fun recordSuccessfulTurn(prompt: String, response: String) {
         messages += ConversationMessage.user(prompt)
@@ -25,44 +16,38 @@ class SessionMemory(
         persistedCompactedSummary: CompactedSessionSummary?,
     ): Boolean {
         if (!isValidSnapshot(persistedMessages) || !isValidCompactedSummary(persistedCompactedSummary)) {
-            reset(fallbackSystemPrompt)
+            reset()
             return false
         }
 
         messages.clear()
         messages += persistedMessages
-        fallbackSystemPrompt = persistedMessages.first().content
         compactedSummary = persistedCompactedSummary?.copy()
         return true
     }
 
-    fun reset(systemPrompt: String) {
-        fallbackSystemPrompt = systemPrompt
+    fun reset() {
         messages.clear()
-        messages += ConversationMessage.system(systemPrompt)
         compactedSummary = null
     }
 
     fun snapshot(): List<ConversationMessage> = messages.toList()
 
-    fun contextSnapshot(): List<ConversationMessage> {
+    fun promptDataSnapshot(): SessionPromptData {
         val summaryText = compactedSummary?.content?.trim().orEmpty()
-        if (summaryText.isEmpty()) {
-            return snapshot()
+        val summarySystemMessage = if (summaryText.isEmpty()) {
+            null
+        } else {
+            buildCompactedSummarySystemMessage(summaryText)
         }
 
-        return buildList {
-            add(messages.first())
-            add(
-                ConversationMessage.system(
-                    buildCompactedSummarySystemMessage(summaryText),
-                ),
-            )
-            addAll(messages.drop(1))
-        }
+        return SessionPromptData(
+            messages = snapshot(),
+            summarySystemMessage = summarySystemMessage,
+        )
     }
 
-    fun nonSystemMessagesSnapshot(): List<ConversationMessage> = messages.drop(1)
+    fun nonSystemMessagesSnapshot(): List<ConversationMessage> = snapshot()
 
     fun compactedSummarySnapshot(): CompactedSessionSummary? = compactedSummary?.copy()
 
@@ -92,16 +77,12 @@ class SessionMemory(
         }
 
         val remainingMessages = nonSystemMessages.drop(compactedCount)
-        val nextMessages = buildList {
-            add(messages.first())
-            addAll(remainingMessages)
-        }
-        require(isValidSnapshot(nextMessages)) {
+        require(isValidSnapshot(remainingMessages)) {
             "Compaction produced invalid message ordering."
         }
 
         messages.clear()
-        messages += nextMessages
+        messages += remainingMessages
         this.compactedSummary = compactedSummary?.copy()
     }
 
@@ -118,24 +99,21 @@ class SessionMemory(
     """.trimIndent()
 
     private fun isValidSnapshot(snapshot: List<ConversationMessage>): Boolean {
-        if (snapshot.isEmpty()) return false
-        val firstMessage = snapshot.first()
-        if (firstMessage.role != MessageRole.SYSTEM || firstMessage.content.isBlank()) return false
-
-        for (index in 1 until snapshot.size) {
+        for (index in snapshot.indices) {
             val message = snapshot[index]
-            if (message.content.isBlank()) return false
-            val expectedRole = if (index % 2 == 1) {
+            if (message.content.isBlank()) {
+                return false
+            }
+
+            val expectedRole = if (index % 2 == 0) {
                 MessageRole.USER
             } else {
                 MessageRole.ASSISTANT
             }
-
             if (message.role != expectedRole) {
                 return false
             }
         }
-
         return true
     }
 }

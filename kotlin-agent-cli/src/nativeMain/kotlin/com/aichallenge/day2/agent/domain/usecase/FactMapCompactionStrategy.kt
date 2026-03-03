@@ -1,6 +1,7 @@
 package com.aichallenge.day2.agent.domain.usecase
 
 import com.aichallenge.day2.agent.domain.model.ConversationMessage
+import com.aichallenge.day2.agent.domain.model.PromptRequestData
 import com.aichallenge.day2.agent.domain.model.SessionCompactionSummaryMode
 import com.aichallenge.day2.agent.domain.model.SessionCompactionStrategy
 import kotlinx.serialization.encodeToString
@@ -34,18 +35,21 @@ class FactMapCompactionStrategy(
             "model must not be blank."
         }
 
-        val conversation = listOf(
-            ConversationMessage.system(FACT_MAP_SYSTEM_PROMPT),
-            ConversationMessage.user(
-                buildFactMapPrompt(
-                    previousSummary = normalizeOrDefaultPreviousSummary(previousSummary),
-                    messagesToCompact = messagesToCompact,
+        val prompt = PromptRequestData(
+            systemPrompt = FACT_MAP_SYSTEM_PROMPT,
+            contextSystemMessages = emptyList(),
+            messages = listOf(
+                ConversationMessage.user(
+                    buildFactMapPrompt(
+                        previousSummary = normalizeOrDefaultPreviousSummary(previousSummary),
+                        messagesToCompact = messagesToCompact,
+                    ),
                 ),
             ),
         )
 
         val response = sendPromptUseCase.execute(
-            conversation = conversation,
+            prompt = prompt,
             temperature = 0.0,
             model = model,
         ).content.trim()

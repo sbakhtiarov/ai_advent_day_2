@@ -1,48 +1,36 @@
 package com.aichallenge.day2.agent.domain.model
 
 import kotlin.test.Test
+import kotlin.test.assertContains
 import kotlin.test.assertEquals
+import kotlin.test.assertNull
 
 class SessionMemoryTest {
     @Test
-    fun initializesWithSystemMessageOnly() {
-        val memory = SessionMemory(initialSystemPrompt = "system one")
+    fun initializesWithEmptySnapshot() {
+        val memory = SessionMemory()
 
-        assertEquals(
-            listOf(ConversationMessage.system("system one")),
-            memory.snapshot(),
-        )
+        assertEquals(emptyList(), memory.snapshot())
     }
 
     @Test
-    fun conversationForAppendsUserPromptWithoutMutatingStoredHistory() {
-        val memory = SessionMemory(initialSystemPrompt = "system one")
-        memory.recordSuccessfulTurn(prompt = "hello", response = "hi")
+    fun recordSuccessfulTurnStoresUserThenAssistant() {
+        val memory = SessionMemory()
 
-        val conversation = memory.conversationFor("what now?")
+        memory.recordSuccessfulTurn(prompt = "question", response = "answer")
 
         assertEquals(
             listOf(
-                ConversationMessage.system("system one"),
-                ConversationMessage.user("hello"),
-                ConversationMessage.assistant("hi"),
-                ConversationMessage.user("what now?"),
-            ),
-            conversation,
-        )
-        assertEquals(
-            listOf(
-                ConversationMessage.system("system one"),
-                ConversationMessage.user("hello"),
-                ConversationMessage.assistant("hi"),
+                ConversationMessage.user("question"),
+                ConversationMessage.assistant("answer"),
             ),
             memory.snapshot(),
         )
     }
 
     @Test
-    fun conversationForIncludesCompactedSummaryWhenPresent() {
-        val memory = SessionMemory(initialSystemPrompt = "system one")
+    fun promptDataIncludesCompactedSummaryWhenPresent() {
+        val memory = SessionMemory()
         memory.recordSuccessfulTurn(prompt = "q1", response = "a1")
         memory.recordSuccessfulTurn(prompt = "q2", response = "a2")
         memory.applyCompaction(
@@ -53,44 +41,21 @@ class SessionMemoryTest {
             compactedCount = 2,
         )
 
-        val conversation = memory.conversationFor("what now?")
+        val promptData = memory.promptDataSnapshot()
 
         assertEquals(
             listOf(
-                ConversationMessage.system("system one"),
-                ConversationMessage.system(
-                    """
-                    Conversation summary from previous compacted turns:
-                    summary text
-                    """.trimIndent(),
-                ),
                 ConversationMessage.user("q2"),
                 ConversationMessage.assistant("a2"),
-                ConversationMessage.user("what now?"),
             ),
-            conversation,
+            promptData.messages,
         )
-    }
-
-    @Test
-    fun recordSuccessfulTurnStoresUserThenAssistant() {
-        val memory = SessionMemory(initialSystemPrompt = "system one")
-
-        memory.recordSuccessfulTurn(prompt = "question", response = "answer")
-
-        assertEquals(
-            listOf(
-                ConversationMessage.system("system one"),
-                ConversationMessage.user("question"),
-                ConversationMessage.assistant("answer"),
-            ),
-            memory.snapshot(),
-        )
+        assertContains(promptData.summarySystemMessage.orEmpty(), "summary text")
     }
 
     @Test
     fun applyCompactionRemovesFirstMessagesAndKeepsTail() {
-        val memory = SessionMemory(initialSystemPrompt = "system one")
+        val memory = SessionMemory()
         memory.recordSuccessfulTurn(prompt = "q1", response = "a1")
         memory.recordSuccessfulTurn(prompt = "q2", response = "a2")
         memory.recordSuccessfulTurn(prompt = "q3", response = "a3")
@@ -105,7 +70,6 @@ class SessionMemoryTest {
 
         assertEquals(
             listOf(
-                ConversationMessage.system("system one"),
                 ConversationMessage.user("q3"),
                 ConversationMessage.assistant("a3"),
             ),
@@ -122,7 +86,7 @@ class SessionMemoryTest {
 
     @Test
     fun applyCompactionWithNullSummaryClearsPreviousSummary() {
-        val memory = SessionMemory(initialSystemPrompt = "system one")
+        val memory = SessionMemory()
         memory.recordSuccessfulTurn(prompt = "q1", response = "a1")
         memory.recordSuccessfulTurn(prompt = "q2", response = "a2")
         memory.applyCompaction(
@@ -138,16 +102,13 @@ class SessionMemoryTest {
             compactedCount = 2,
         )
 
-        assertEquals(
-            listOf(ConversationMessage.system("system one")),
-            memory.snapshot(),
-        )
-        assertEquals(null, memory.compactedSummarySnapshot())
+        assertEquals(emptyList(), memory.snapshot())
+        assertNull(memory.compactedSummarySnapshot())
     }
 
     @Test
-    fun resetClearsPriorTurnsAndKeepsOnlyNewSystemMessage() {
-        val memory = SessionMemory(initialSystemPrompt = "system one")
+    fun resetClearsTurnsAndSummary() {
+        val memory = SessionMemory()
         memory.recordSuccessfulTurn(prompt = "q1", response = "a1")
         memory.applyCompaction(
             compactedSummary = CompactedSessionSummary(
@@ -157,18 +118,15 @@ class SessionMemoryTest {
             compactedCount = 2,
         )
 
-        memory.reset("system two")
+        memory.reset()
 
-        assertEquals(
-            listOf(ConversationMessage.system("system two")),
-            memory.snapshot(),
-        )
-        assertEquals(null, memory.compactedSummarySnapshot())
+        assertEquals(emptyList(), memory.snapshot())
+        assertNull(memory.compactedSummarySnapshot())
     }
 
     @Test
     fun clearCompactedSummaryRemovesSummaryWithoutChangingMessages() {
-        val memory = SessionMemory(initialSystemPrompt = "system one")
+        val memory = SessionMemory()
         memory.recordSuccessfulTurn(prompt = "q1", response = "a1")
         memory.applyCompaction(
             compactedSummary = CompactedSessionSummary(
@@ -182,14 +140,13 @@ class SessionMemoryTest {
         memory.clearCompactedSummary()
 
         assertEquals(snapshotBeforeClear, memory.snapshot())
-        assertEquals(null, memory.compactedSummarySnapshot())
+        assertNull(memory.compactedSummarySnapshot())
     }
 
     @Test
     fun restoreUsesPersistedMessagesAndSummaryWhenSnapshotIsValid() {
-        val memory = SessionMemory(initialSystemPrompt = "initial system")
+        val memory = SessionMemory()
         val persistedMessages = listOf(
-            ConversationMessage.system("persisted system"),
             ConversationMessage.user("question"),
             ConversationMessage.assistant("answer"),
         )
@@ -209,10 +166,10 @@ class SessionMemoryTest {
     }
 
     @Test
-    fun restoreFallsBackToSystemOnlyWhenSummaryIsInvalid() {
-        val memory = SessionMemory(initialSystemPrompt = "system one")
+    fun restoreFallsBackToEmptyWhenSummaryIsInvalid() {
+        val memory = SessionMemory()
+        memory.recordSuccessfulTurn(prompt = "q1", response = "a1")
         val validMessages = listOf(
-            ConversationMessage.system("persisted system"),
             ConversationMessage.user("question"),
             ConversationMessage.assistant("answer"),
         )
@@ -227,10 +184,26 @@ class SessionMemoryTest {
         )
 
         assertEquals(false, restored)
-        assertEquals(
-            listOf(ConversationMessage.system("system one")),
-            memory.snapshot(),
+        assertEquals(emptyList(), memory.snapshot())
+        assertNull(memory.compactedSummarySnapshot())
+    }
+
+    @Test
+    fun restoreRejectsLegacySystemFirstSnapshots() {
+        val memory = SessionMemory()
+        memory.recordSuccessfulTurn(prompt = "q1", response = "a1")
+        val legacyMessages = listOf(
+            ConversationMessage.system("persisted system"),
+            ConversationMessage.user("question"),
+            ConversationMessage.assistant("answer"),
         )
-        assertEquals(null, memory.compactedSummarySnapshot())
+
+        val restored = memory.restore(
+            persistedMessages = legacyMessages,
+            persistedCompactedSummary = null,
+        )
+
+        assertEquals(false, restored)
+        assertEquals(emptyList(), memory.snapshot())
     }
 }

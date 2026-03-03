@@ -13,6 +13,7 @@ import com.aichallenge.day2.agent.domain.usecase.SessionMemoryCompactionCoordina
 import com.aichallenge.day2.agent.domain.usecase.SlidingWindowCompactionStrategy
 import com.aichallenge.day2.agent.domain.usecase.WorkingMemoryDistillationUseCase
 import com.aichallenge.day2.agent.presentation.cli.ConsoleChatController
+import com.aichallenge.day2.agent.presentation.cli.SystemPromptBuilder
 import kotlinx.coroutines.runBlocking
 import kotlin.system.exitProcess
 
@@ -88,6 +89,8 @@ private suspend fun runApp(args: Array<String>): Int {
     }
     val controller = ConsoleChatController(
         sendPromptUseCase = container.sendPromptUseCase,
+        buildPromptUseCase = container.buildPromptUseCase,
+        systemPromptBuilder = SystemPromptBuilder(),
         initialSystemPrompt = config.systemPrompt,
         initialModel = config.model,
         models = config.models,

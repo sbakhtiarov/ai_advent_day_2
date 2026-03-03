@@ -4,6 +4,7 @@ import com.aichallenge.day2.agent.core.config.ModelPricing
 import com.aichallenge.day2.agent.core.config.ModelProperties
 import com.aichallenge.day2.agent.domain.model.AgentResponse
 import com.aichallenge.day2.agent.domain.model.ConversationMessage
+import com.aichallenge.day2.agent.domain.model.PromptRequestData
 import com.aichallenge.day2.agent.domain.model.SessionCompactionMode
 import com.aichallenge.day2.agent.domain.model.WorkingMemoryState
 import com.aichallenge.day2.agent.domain.model.WorkingTaskState
@@ -224,11 +225,11 @@ private class WorkingMemoryControllerTestAgentRepository(
     val conversations = mutableListOf<List<ConversationMessage>>()
 
     override suspend fun complete(
-        conversation: List<ConversationMessage>,
+        prompt: PromptRequestData,
         temperature: Double?,
         model: String?,
     ): AgentResponse {
-        conversations += conversation
+        conversations += prompt.toConversation()
         val response = queuedResponses.removeFirstOrNull()
             ?: error("No prepared response for conversation #${conversations.size}")
         return response.getOrThrow()

@@ -9,6 +9,7 @@ import com.aichallenge.day2.agent.domain.model.ConversationMessage
 import com.aichallenge.day2.agent.domain.model.MemoryEstimateSource
 import com.aichallenge.day2.agent.domain.model.MemoryUsageSnapshot
 import com.aichallenge.day2.agent.domain.model.MessageRole
+import com.aichallenge.day2.agent.domain.model.PromptRequestData
 import com.aichallenge.day2.agent.domain.model.RollingWindowCompactionStartPolicy
 import com.aichallenge.day2.agent.domain.model.SessionCompactionMode
 import com.aichallenge.day2.agent.domain.model.SessionCompactionSummaryMode
@@ -80,7 +81,6 @@ class ConsoleChatControllerSessionMemoryTest {
         val store = RecordingSessionMemoryStore(
             loadedState = SessionMemoryState(
                 messages = listOf(
-                    ConversationMessage.system("persisted system"),
                     ConversationMessage.user("old question"),
                     ConversationMessage.assistant("old answer"),
                 ),
@@ -105,7 +105,7 @@ class ConsoleChatControllerSessionMemoryTest {
             listOf(MessageRole.SYSTEM, MessageRole.USER, MessageRole.ASSISTANT, MessageRole.USER),
             repository.conversations.single().map { it.role },
         )
-        assertEquals("persisted system", repository.conversations.single()[0].content)
+        assertContains(repository.conversations.single()[0].content, "Base system prompt")
     }
 
     @Test
@@ -214,7 +214,7 @@ class ConsoleChatControllerSessionMemoryTest {
         assertEquals(1, store.saveStates.size)
         val savedState = store.saveStates.single()
         assertEquals(
-            listOf(MessageRole.SYSTEM, MessageRole.USER, MessageRole.ASSISTANT),
+            listOf(MessageRole.USER, MessageRole.ASSISTANT),
             savedState.messages.map { it.role },
         )
         val usage = assertNotNull(savedState.usage)
@@ -300,13 +300,13 @@ class ConsoleChatControllerSessionMemoryTest {
         assertEquals(1, store.clearCalls)
         assertEquals(2, store.saveStates.size)
         assertEquals(
-            listOf(MessageRole.SYSTEM, MessageRole.USER, MessageRole.ASSISTANT),
+            listOf(MessageRole.USER, MessageRole.ASSISTANT),
             store.saveStates[1].messages.map { it.role },
         )
         val usage = assertNotNull(store.saveStates[1].usage)
         assertEquals(MemoryEstimateSource.HEURISTIC, usage.source)
         assertEquals(3, usage.messageCount)
-        assertEquals("prompt two", store.saveStates[1].messages[1].content)
+        assertEquals("prompt two", store.saveStates[1].messages[0].content)
     }
 
     @Test
@@ -353,11 +353,7 @@ class ConsoleChatControllerSessionMemoryTest {
         assertContains(secondRequest[0].content, "Stop sequence: DONE")
         assertEquals("prompt two", secondRequest[1].content)
         assertEquals(3, store.saveStates.size)
-        assertEquals(
-            listOf(MessageRole.SYSTEM),
-            store.saveStates[1].messages.map { it.role },
-        )
-        assertEquals(secondRequest[0].content, store.saveStates[1].messages[0].content)
+        assertEquals(emptyList(), store.saveStates[1].messages)
         val usage = assertNotNull(store.saveStates[1].usage)
         assertEquals(MemoryEstimateSource.HEURISTIC, usage.source)
         assertEquals(1, usage.messageCount)
@@ -373,7 +369,6 @@ class ConsoleChatControllerSessionMemoryTest {
         val store = RecordingSessionMemoryStore(
             loadedState = SessionMemoryState(
                 messages = listOf(
-                    ConversationMessage.system("persisted system"),
                     ConversationMessage.user("old question"),
                     ConversationMessage.assistant("old answer"),
                 ),
@@ -406,7 +401,6 @@ class ConsoleChatControllerSessionMemoryTest {
         val store = RecordingSessionMemoryStore(
             loadedState = SessionMemoryState(
                 messages = listOf(
-                    ConversationMessage.system("persisted system"),
                     ConversationMessage.user("old question"),
                     ConversationMessage.assistant("old answer"),
                 ),
@@ -437,7 +431,6 @@ class ConsoleChatControllerSessionMemoryTest {
         val store = RecordingSessionMemoryStore(
             loadedState = SessionMemoryState(
                 messages = listOf(
-                    ConversationMessage.system("persisted system"),
                     ConversationMessage.user("old question"),
                     ConversationMessage.assistant("old answer"),
                 ),
@@ -457,6 +450,37 @@ class ConsoleChatControllerSessionMemoryTest {
         controller.runInteractive()
 
         assertContains(io.outputText(), "memory> Estimate: heuristic (text-length)")
+    }
+
+    @Test
+    fun invalidLegacySystemSnapshotIsClearedOnStartup() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val io = FakeCliIO(inputs = listOf("/exit"))
+        val store = RecordingSessionMemoryStore(
+            loadedState = SessionMemoryState(
+                messages = listOf(
+                    ConversationMessage.system("persisted system"),
+                    ConversationMessage.user("old question"),
+                    ConversationMessage.assistant("old answer"),
+                ),
+                usage = MemoryUsageSnapshot(
+                    estimatedTokens = 321,
+                    source = MemoryEstimateSource.HYBRID,
+                    messageCount = 3,
+                ),
+            ),
+        )
+        val controller = createController(
+            repository = repository,
+            io = io,
+            sessionMemoryStore = store,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(1, store.loadCalls)
+        assertEquals(1, store.clearCalls)
+        assertEquals(0, store.saveStates.size)
     }
 
     @Test
@@ -512,7 +536,7 @@ class ConsoleChatControllerSessionMemoryTest {
         )
         assertEquals("summary one", savedWithSummary.compactedSummary?.content)
         assertEquals(
-            listOf(MessageRole.SYSTEM, MessageRole.USER, MessageRole.ASSISTANT),
+            listOf(MessageRole.USER, MessageRole.ASSISTANT),
             savedWithSummary.messages.map { it.role },
         )
         assertContains(io.outputText(), "system> session memory compacted")
@@ -573,7 +597,6 @@ class ConsoleChatControllerSessionMemoryTest {
         val store = RecordingSessionMemoryStore(
             loadedState = SessionMemoryState(
                 messages = listOf(
-                    ConversationMessage.system("persisted system"),
                     ConversationMessage.user("old question"),
                     ConversationMessage.assistant("old answer"),
                 ),
@@ -655,7 +678,7 @@ class ConsoleChatControllerSessionMemoryTest {
         assertFalse(output.contains("line one\nline two"))
 
         assertEquals(1, store.saveStates.size)
-        assertContains(store.saveStates.single().messages[1].content, "line one\nline two")
+        assertContains(store.saveStates.single().messages[0].content, "line one\nline two")
     }
 
     @Test
@@ -790,7 +813,6 @@ class ConsoleChatControllerSessionMemoryTest {
         val store = RecordingSessionMemoryStore(
             loadedState = SessionMemoryState(
                 messages = listOf(
-                    ConversationMessage.system("persisted system"),
                     ConversationMessage.user("old question"),
                     ConversationMessage.assistant("old answer"),
                 ),
@@ -829,7 +851,6 @@ class ConsoleChatControllerSessionMemoryTest {
         val store = RecordingSessionMemoryStore(
             loadedState = SessionMemoryState(
                 messages = listOf(
-                    ConversationMessage.system("persisted system"),
                     ConversationMessage.user("old question"),
                     ConversationMessage.assistant("old answer"),
                 ),
@@ -894,9 +915,8 @@ class ConsoleChatControllerSessionMemoryTest {
         assertEquals("prompt 7", requestAfterCompaction.last().content)
 
         val finalSaved = store.saveStates.last()
-        assertEquals(11, finalSaved.messages.size)
-        assertEquals(10, finalSaved.messages.drop(1).size)
-        assertEquals("prompt 3", finalSaved.messages[1].content)
+        assertEquals(10, finalSaved.messages.size)
+        assertEquals("prompt 3", finalSaved.messages[0].content)
         assertEquals(null, finalSaved.compactedSummary)
         assertEquals("sliding-window", finalSaved.activeCompactionModeId)
     }
@@ -982,9 +1002,8 @@ class ConsoleChatControllerSessionMemoryTest {
         assertEquals("prompt 7", requestAfterCompaction.last().content)
 
         val finalSaved = store.saveStates.last()
-        assertEquals(11, finalSaved.messages.size)
-        assertEquals(10, finalSaved.messages.drop(1).size)
-        assertEquals("prompt 3", finalSaved.messages[1].content)
+        assertEquals(10, finalSaved.messages.size)
+        assertEquals("prompt 3", finalSaved.messages[0].content)
         assertEquals("fact-map-v1", finalSaved.compactedSummary?.strategyId)
         assertContains(finalSaved.compactedSummary?.content.orEmpty(), "\"goal\": \"implement fact map\"")
         assertEquals("fact-map", finalSaved.activeCompactionModeId)
@@ -1022,7 +1041,6 @@ class ConsoleChatControllerSessionMemoryTest {
         val store = RecordingSessionMemoryStore(
             loadedState = SessionMemoryState(
                 messages = listOf(
-                    ConversationMessage.system("persisted system"),
                     ConversationMessage.user("old question"),
                     ConversationMessage.assistant("old answer"),
                 ),
@@ -1051,9 +1069,7 @@ class ConsoleChatControllerSessionMemoryTest {
         controller.runInteractive()
 
         val saved = store.saveStates.single()
-        assertEquals(1, saved.messages.size)
-        assertEquals(MessageRole.SYSTEM, saved.messages.single().role)
-        assertContains(saved.messages.single().content, "Base system prompt")
+        assertEquals(emptyList(), saved.messages)
         assertEquals(null, saved.compactedSummary)
         assertEquals("branching", saved.activeCompactionModeId)
         val branchingState = assertNotNull(saved.branchingState)
@@ -1068,7 +1084,8 @@ class ConsoleChatControllerSessionMemoryTest {
         val store = RecordingSessionMemoryStore(
             loadedState = SessionMemoryState(
                 messages = listOf(
-                    ConversationMessage.system("persisted system"),
+                    ConversationMessage.user("legacy question"),
+                    ConversationMessage.assistant("legacy answer"),
                 ),
                 compactedSummary = null,
                 usage = null,
@@ -1114,9 +1131,7 @@ class ConsoleChatControllerSessionMemoryTest {
         controller.runInteractive()
 
         val saved = store.saveStates.single()
-        assertEquals(1, saved.messages.size)
-        assertEquals(MessageRole.SYSTEM, saved.messages.single().role)
-        assertContains(saved.messages.single().content, "Base system prompt")
+        assertEquals(emptyList(), saved.messages)
         assertEquals("rolling-summary", saved.activeCompactionModeId)
         assertEquals(null, saved.branchingState)
     }
@@ -1567,11 +1582,11 @@ private class RecordingAgentRepository(
     val conversations = mutableListOf<List<ConversationMessage>>()
 
     override suspend fun complete(
-        conversation: List<ConversationMessage>,
+        prompt: PromptRequestData,
         temperature: Double?,
         model: String?,
     ): AgentResponse {
-        conversations += conversation
+        conversations += prompt.toConversation()
         val response = queuedResponses.removeFirstOrNull()
             ?: error("No prepared response for conversation #${conversations.size}")
         return response.getOrThrow()

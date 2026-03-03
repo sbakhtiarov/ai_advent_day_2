@@ -1,5 +1,7 @@
 package com.aichallenge.day2.agent.domain.model
 
+import com.aichallenge.day2.agent.domain.usecase.BuildPromptRequest
+import com.aichallenge.day2.agent.domain.usecase.BuildPromptUseCase
 import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
@@ -118,27 +120,41 @@ class BranchingSessionMemoryTest {
     }
 
     @Test
-    fun conversationForTruncatesOldestTurnsWithoutMutatingStoredSubtopicHistory() {
+    fun promptDataForRequestTruncatesOldestTurnsWithoutMutatingStoredSubtopicHistory() {
         val memory = BranchingSessionMemory()
+        val buildPromptUseCase = BuildPromptUseCase()
         memory.resolveAndActivate(topicName = "Building new application", subtopicName = "Architecture")
         memory.recordSuccessfulTurn(prompt = "q1", response = "a1")
         memory.recordSuccessfulTurn(prompt = "q2", response = "a2")
         memory.recordSuccessfulTurn(prompt = "q3", response = "a3")
 
-        val conversation = memory.conversationFor(
-            prompt = "next",
-            systemPrompt = "system",
+        val promptData = memory.promptDataForRequest(
             maxEstimatedTokens = 1,
-            estimateTokens = { messages -> messages.size * 100 },
+            estimateTokens = { sessionPromptData ->
+                val promptRequest = buildPromptUseCase.execute(
+                    request = BuildPromptRequest(
+                        systemPrompt = "system",
+                        session = sessionPromptData,
+                        userPrompt = "next",
+                    ),
+                )
+                promptRequest.toConversation().size * 100
+            },
         )
 
-        assertEquals(3, conversation.truncatedTurns)
+        assertEquals(3, promptData.truncatedTurns)
         assertEquals(
             listOf(
                 ConversationMessage.system("system"),
                 ConversationMessage.user("next"),
             ),
-            conversation.conversation,
+            buildPromptUseCase.execute(
+                request = BuildPromptRequest(
+                    systemPrompt = "system",
+                    session = promptData.session,
+                    userPrompt = "next",
+                ),
+            ).toConversation(),
         )
 
         val snapshot = memory.snapshot()
@@ -148,14 +164,18 @@ class BranchingSessionMemoryTest {
     }
 
     @Test
-    fun conversationForWithoutActiveBranchBuildsSystemAndUserOnly() {
+    fun promptDataForRequestWithoutActiveBranchBuildsSystemAndUserOnly() {
         val memory = BranchingSessionMemory()
+        val buildPromptUseCase = BuildPromptUseCase()
 
-        val conversation = memory.conversationFor(
-            prompt = "next",
-            systemPrompt = "system",
+        val promptData = memory.promptDataForRequest(
             maxEstimatedTokens = 1,
-            estimateTokens = { messages -> messages.size * 10 },
+            estimateTokens = { sessionPromptData ->
+                buildPromptUseCase.buildContext(
+                    systemPrompt = "system",
+                    session = sessionPromptData,
+                ).toConversation().size * 10
+            },
         )
 
         assertEquals(
@@ -163,9 +183,15 @@ class BranchingSessionMemoryTest {
                 ConversationMessage.system("system"),
                 ConversationMessage.user("next"),
             ),
-            conversation.conversation,
+            buildPromptUseCase.execute(
+                request = BuildPromptRequest(
+                    systemPrompt = "system",
+                    session = promptData.session,
+                    userPrompt = "next",
+                ),
+            ).toConversation(),
         )
-        assertEquals(0, conversation.truncatedTurns)
+        assertEquals(0, promptData.truncatedTurns)
     }
 
     @Test

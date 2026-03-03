@@ -1,6 +1,7 @@
 package com.aichallenge.day2.agent.domain.usecase
 
 import com.aichallenge.day2.agent.domain.model.ConversationMessage
+import com.aichallenge.day2.agent.domain.model.PromptRequestData
 import com.aichallenge.day2.agent.domain.model.SessionCompactionSummaryMode
 import com.aichallenge.day2.agent.domain.model.SessionCompactionStrategy
 
@@ -22,18 +23,21 @@ class RollingSummaryCompactionStrategy(
             "model must not be blank."
         }
 
-        val conversation = listOf(
-            ConversationMessage.system(SUMMARY_SYSTEM_PROMPT),
-            ConversationMessage.user(
-                buildSummaryPrompt(
-                    previousSummary = previousSummary,
-                    messagesToCompact = messagesToCompact,
+        val prompt = PromptRequestData(
+            systemPrompt = SUMMARY_SYSTEM_PROMPT,
+            contextSystemMessages = emptyList(),
+            messages = listOf(
+                ConversationMessage.user(
+                    buildSummaryPrompt(
+                        previousSummary = previousSummary,
+                        messagesToCompact = messagesToCompact,
+                    ),
                 ),
             ),
         )
 
         return sendPromptUseCase.execute(
-            conversation = conversation,
+            prompt = prompt,
             temperature = 0.0,
             model = model,
         ).content.trim()

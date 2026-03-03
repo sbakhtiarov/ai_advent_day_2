@@ -1,6 +1,7 @@
 package com.aichallenge.day2.agent.domain.usecase
 
 import com.aichallenge.day2.agent.domain.model.ConversationMessage
+import com.aichallenge.day2.agent.domain.model.PromptRequestData
 import com.aichallenge.day2.agent.domain.model.WorkingTaskState
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -48,9 +49,12 @@ class WorkingMemoryDistillationUseCase(
         }.trim()
 
         val response = sendPromptUseCase.execute(
-            conversation = listOf(
-                ConversationMessage.system(WORKING_MEMORY_SYSTEM_PROMPT),
-                ConversationMessage.user(prompt),
+            prompt = PromptRequestData(
+                systemPrompt = WORKING_MEMORY_SYSTEM_PROMPT,
+                contextSystemMessages = emptyList(),
+                messages = listOf(
+                    ConversationMessage.user(prompt),
+                ),
             ),
             temperature = 0.0,
             model = model,

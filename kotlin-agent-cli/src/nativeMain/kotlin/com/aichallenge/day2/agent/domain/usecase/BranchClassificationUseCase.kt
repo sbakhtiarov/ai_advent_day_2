@@ -2,6 +2,7 @@ package com.aichallenge.day2.agent.domain.usecase
 
 import com.aichallenge.day2.agent.domain.model.BranchTopicCatalogEntry
 import com.aichallenge.day2.agent.domain.model.ConversationMessage
+import com.aichallenge.day2.agent.domain.model.PromptRequestData
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -110,13 +111,16 @@ class BranchClassificationUseCase(
         model: String,
     ): PrimaryClassificationDecision {
         val response = sendPromptUseCase.execute(
-            conversation = listOf(
-                ConversationMessage.system(PRIMARY_CLASSIFICATION_SYSTEM_PROMPT),
-                ConversationMessage.user(
-                    buildPrimaryClassificationPrompt(
-                        catalog = catalog,
-                        userPrompt = userPrompt,
-                        assistantResponse = assistantResponse,
+            prompt = PromptRequestData(
+                systemPrompt = PRIMARY_CLASSIFICATION_SYSTEM_PROMPT,
+                contextSystemMessages = emptyList(),
+                messages = listOf(
+                    ConversationMessage.user(
+                        buildPrimaryClassificationPrompt(
+                            catalog = catalog,
+                            userPrompt = userPrompt,
+                            assistantResponse = assistantResponse,
+                        ),
                     ),
                 ),
             ),
@@ -135,14 +139,17 @@ class BranchClassificationUseCase(
         model: String,
     ): ParsedNoveltyValidation {
         val response = sendPromptUseCase.execute(
-            conversation = listOf(
-                ConversationMessage.system(NOVELTY_VALIDATION_SYSTEM_PROMPT),
-                ConversationMessage.user(
-                    buildNoveltyValidationPrompt(
-                        catalog = catalog,
-                        primaryDecision = primaryDecision,
-                        userPrompt = userPrompt,
-                        assistantResponse = assistantResponse,
+            prompt = PromptRequestData(
+                systemPrompt = NOVELTY_VALIDATION_SYSTEM_PROMPT,
+                contextSystemMessages = emptyList(),
+                messages = listOf(
+                    ConversationMessage.user(
+                        buildNoveltyValidationPrompt(
+                            catalog = catalog,
+                            primaryDecision = primaryDecision,
+                            userPrompt = userPrompt,
+                            assistantResponse = assistantResponse,
+                        ),
                     ),
                 ),
             ),
@@ -160,13 +167,16 @@ class BranchClassificationUseCase(
         model: String,
     ): ParsedTopicShiftDecision {
         val response = sendPromptUseCase.execute(
-            conversation = listOf(
-                ConversationMessage.system(TOPIC_SHIFT_SYSTEM_PROMPT),
-                ConversationMessage.user(
-                    buildTopicShiftPrompt(
-                        catalog = catalog,
-                        userPrompt = userPrompt,
-                        assistantResponse = assistantResponse,
+            prompt = PromptRequestData(
+                systemPrompt = TOPIC_SHIFT_SYSTEM_PROMPT,
+                contextSystemMessages = emptyList(),
+                messages = listOf(
+                    ConversationMessage.user(
+                        buildTopicShiftPrompt(
+                            catalog = catalog,
+                            userPrompt = userPrompt,
+                            assistantResponse = assistantResponse,
+                        ),
                     ),
                 ),
             ),

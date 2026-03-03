@@ -14,7 +14,7 @@ import kotlin.test.assertTrue
 class SessionMemoryCompactionCoordinatorTest {
     @Test
     fun generateSummaryModeCompactsAndStoresReturnedSummary() = runBlocking {
-        val memory = SessionMemory(initialSystemPrompt = "system")
+        val memory = SessionMemory()
         memory.recordSuccessfulTurn("q1", "a1")
         memory.recordSuccessfulTurn("q2", "a2")
         memory.recordSuccessfulTurn("q3", "a3")
@@ -37,7 +37,6 @@ class SessionMemoryCompactionCoordinatorTest {
         assertEquals(1, strategy.calls)
         assertEquals(
             listOf(
-                ConversationMessage.system("system"),
                 ConversationMessage.user("q2"),
                 ConversationMessage.assistant("a2"),
                 ConversationMessage.user("q3"),
@@ -51,7 +50,7 @@ class SessionMemoryCompactionCoordinatorTest {
 
     @Test
     fun clearSummaryModeCompactsAndRemovesExistingSummary() = runBlocking {
-        val memory = SessionMemory(initialSystemPrompt = "system")
+        val memory = SessionMemory()
         memory.recordSuccessfulTurn("q1", "a1")
         memory.recordSuccessfulTurn("q2", "a2")
         memory.recordSuccessfulTurn("q3", "a3")
@@ -82,7 +81,6 @@ class SessionMemoryCompactionCoordinatorTest {
         assertEquals(0, strategy.calls)
         assertEquals(
             listOf(
-                ConversationMessage.system("system"),
                 ConversationMessage.user("q3"),
                 ConversationMessage.assistant("a3"),
                 ConversationMessage.user("q4"),

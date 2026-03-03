@@ -1,5 +1,7 @@
 package com.aichallenge.day2.agent.domain.model
 
+import com.aichallenge.day2.agent.domain.usecase.SessionPromptData
+
 class BranchingSessionMemory {
     private val topicsByKey = linkedMapOf<String, TopicMemory>()
     private var activeTopicKey: String = ""
@@ -147,42 +149,47 @@ class BranchingSessionMemory {
     }
 
     fun activeContextSnapshot(systemPrompt: String): List<ConversationMessage> {
-        val topic = activeTopicOrNull()
-        val subtopic = topic?.let { activeSubtopicOrNull(it) }
-        val summary = topic?.rollingSummary?.trim().orEmpty()
-
         return buildList {
             add(ConversationMessage.system(systemPrompt))
-            if (summary.isNotEmpty()) {
-                val topicDisplayName = topic?.displayName ?: "Unknown Topic"
-                add(
-                    ConversationMessage.system(
-                        buildTopicSummarySystemMessage(
-                            topicDisplayName = topicDisplayName,
-                            summary = summary,
-                        ),
-                    ),
-                )
+            val promptData = activePromptDataSnapshot()
+            promptData.summarySystemMessage?.takeIf { summary -> summary.isNotBlank() }?.let { summary ->
+                add(ConversationMessage.system(summary))
             }
-            if (subtopic != null) {
-                addAll(subtopic.messages.map { message -> message.copy() })
-            }
+            addAll(promptData.messages.map { message -> message.copy() })
         }
     }
 
-    fun conversationFor(
-        prompt: String,
-        systemPrompt: String,
+    fun activePromptDataSnapshot(): SessionPromptData {
+        val topic = activeTopicOrNull()
+        val subtopic = topic?.let { activeSubtopicOrNull(it) }
+        val summary = topic?.rollingSummary?.trim().orEmpty()
+        val summarySystemMessage = if (summary.isNotEmpty()) {
+            val topicDisplayName = topic?.displayName ?: "Unknown Topic"
+            buildTopicSummarySystemMessage(
+                topicDisplayName = topicDisplayName,
+                summary = summary,
+            )
+        } else {
+            null
+        }
+
+        return SessionPromptData(
+            messages = subtopic?.messages?.map { message -> message.copy() }.orEmpty(),
+            summarySystemMessage = summarySystemMessage,
+        )
+    }
+
+    fun promptDataForRequest(
         maxEstimatedTokens: Int?,
-        estimateTokens: (List<ConversationMessage>) -> Int,
-    ): BranchingConversation {
+        estimateTokens: (SessionPromptData) -> Int,
+    ): BranchingPromptData {
         val topic = activeTopicOrNull()
         val subtopic = topic?.let { activeSubtopicOrNull(it) }
         if (topic == null || subtopic == null) {
-            return BranchingConversation(
-                conversation = listOf(
-                    ConversationMessage.system(systemPrompt),
-                    ConversationMessage.user(prompt),
+            return BranchingPromptData(
+                session = SessionPromptData(
+                    messages = emptyList(),
+                    summarySystemMessage = null,
                 ),
                 truncatedTurns = 0,
             )
@@ -192,20 +199,24 @@ class BranchingSessionMemory {
         var truncatedTurns = 0
 
         while (true) {
-            val conversation = buildConversation(
-                systemPrompt = systemPrompt,
+            val promptData = buildPromptData(
                 topicDisplayName = topic.displayName,
                 topicSummary = topic.rollingSummary,
                 subtopicMessages = visibleSubtopicMessages,
-                prompt = prompt,
             )
 
             if (maxEstimatedTokens == null || maxEstimatedTokens <= 0) {
-                return BranchingConversation(conversation = conversation, truncatedTurns = truncatedTurns)
+                return BranchingPromptData(
+                    session = promptData,
+                    truncatedTurns = truncatedTurns,
+                )
             }
 
-            if (estimateTokens(conversation) <= maxEstimatedTokens || visibleSubtopicMessages.size < 2) {
-                return BranchingConversation(conversation = conversation, truncatedTurns = truncatedTurns)
+            if (estimateTokens(promptData) <= maxEstimatedTokens || visibleSubtopicMessages.size < 2) {
+                return BranchingPromptData(
+                    session = promptData,
+                    truncatedTurns = truncatedTurns,
+                )
             }
 
             visibleSubtopicMessages = visibleSubtopicMessages.drop(2)
@@ -310,29 +321,24 @@ class BranchingSessionMemory {
         return topic.subtopicsByKey[activeSubtopicKey]
     }
 
-    private fun buildConversation(
-        systemPrompt: String,
+    private fun buildPromptData(
         topicDisplayName: String,
         topicSummary: String,
         subtopicMessages: List<ConversationMessage>,
-        prompt: String,
-    ): List<ConversationMessage> {
+    ): SessionPromptData {
         val trimmedSummary = topicSummary.trim()
-        return buildList {
-            add(ConversationMessage.system(systemPrompt))
-            if (trimmedSummary.isNotEmpty()) {
-                add(
-                    ConversationMessage.system(
-                        buildTopicSummarySystemMessage(
-                            topicDisplayName = topicDisplayName,
-                            summary = trimmedSummary,
-                        ),
-                    ),
-                )
-            }
-            addAll(subtopicMessages)
-            add(ConversationMessage.user(prompt))
+        val summarySystemMessage = if (trimmedSummary.isEmpty()) {
+            null
+        } else {
+            buildTopicSummarySystemMessage(
+                topicDisplayName = topicDisplayName,
+                summary = trimmedSummary,
+            )
         }
+        return SessionPromptData(
+            messages = subtopicMessages.map { message -> message.copy() },
+            summarySystemMessage = summarySystemMessage,
+        )
     }
 
     private fun isValidSubtopicMessages(messages: List<ConversationMessage>): Boolean {
@@ -417,8 +423,8 @@ data class BranchSubtopicCatalogEntry(
     val isActive: Boolean,
 )
 
-data class BranchingConversation(
-    val conversation: List<ConversationMessage>,
+data class BranchingPromptData(
+    val session: SessionPromptData,
     val truncatedTurns: Int,
 )
 

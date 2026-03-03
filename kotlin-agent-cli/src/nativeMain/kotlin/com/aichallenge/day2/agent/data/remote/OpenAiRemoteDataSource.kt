@@ -1,8 +1,8 @@
 package com.aichallenge.day2.agent.data.remote
 
 import com.aichallenge.day2.agent.core.config.AppConfig
-import com.aichallenge.day2.agent.domain.model.ConversationMessage
 import com.aichallenge.day2.agent.domain.model.MessageRole
+import com.aichallenge.day2.agent.domain.model.PromptRequestData
 import com.aichallenge.day2.agent.domain.model.TokenUsage
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
@@ -23,7 +23,7 @@ class OpenAiRemoteDataSource(
     )
 
     suspend fun fetchAssistantReply(
-        conversation: List<ConversationMessage>,
+        prompt: PromptRequestData,
         temperature: Double? = null,
         model: String? = null,
     ): AssistantReply {
@@ -31,14 +31,12 @@ class OpenAiRemoteDataSource(
             "Temperature must be in range 0..2."
         }
 
-        val instructions = conversation
-            .asSequence()
-            .filter { it.role == MessageRole.SYSTEM }
-            .map { it.content.trim() }
+        val instructions = sequenceOf(prompt.systemPrompt.trim())
+            .plus(prompt.contextSystemMessages.asSequence().map { context -> context.trim() })
             .filter { it.isNotEmpty() }
             .joinToString(separator = "\n\n")
             .ifBlank { null }
-        val inputMessages = conversation.filter { it.role != MessageRole.SYSTEM }
+        val inputMessages = prompt.messages
 
         val response = httpClient.post("${config.baseUrl}/responses") {
             header(HttpHeaders.Authorization, "Bearer ${config.apiKey}")
@@ -110,13 +108,13 @@ class OpenAiRemoteDataSource(
 }
 
 private fun MessageRole.toApiRole(): String = when (this) {
-    MessageRole.SYSTEM -> "system"
     MessageRole.USER -> "user"
     MessageRole.ASSISTANT -> "assistant"
+    MessageRole.SYSTEM -> "system"
 }
 
 private fun MessageRole.toApiContentType(): String = when (this) {
-    MessageRole.SYSTEM -> "input_text"
     MessageRole.USER -> "input_text"
     MessageRole.ASSISTANT -> "output_text"
+    MessageRole.SYSTEM -> "input_text"
 }

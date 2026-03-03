@@ -13,6 +13,8 @@ import com.aichallenge.day2.agent.domain.model.TokenUsage
 import com.aichallenge.day2.agent.domain.repository.SessionMemoryStore
 import com.aichallenge.day2.agent.domain.repository.WorkingMemoryStore
 import com.aichallenge.day2.agent.domain.usecase.BranchClassificationUseCase
+import com.aichallenge.day2.agent.domain.usecase.BuildPromptRequest
+import com.aichallenge.day2.agent.domain.usecase.BuildPromptUseCase
 import com.aichallenge.day2.agent.domain.usecase.SessionMemoryCompactionCoordinator
 import com.aichallenge.day2.agent.domain.usecase.RollingSummaryCompactionStrategy
 import com.aichallenge.day2.agent.domain.usecase.SendPromptUseCase
@@ -41,6 +43,8 @@ class ConsoleChatController(
     private val workingMemoryDistillationUseCase: WorkingMemoryDistillationUseCase? = null,
     private val workingMemoryEnabled: Boolean = true,
     private val fileReferenceReader: FileReferenceReader = PosixFileReferenceReader,
+    private val buildPromptUseCase: BuildPromptUseCase = BuildPromptUseCase(),
+    private val systemPromptBuilder: SystemPromptBuilder = SystemPromptBuilder(),
     private val compactionCoordinators: Map<SessionCompactionMode, SessionMemoryCompactionCoordinator> = mapOf(
         SessionCompactionMode.ROLLING_SUMMARY to SessionMemoryCompactionCoordinator.disabled(),
     ),
@@ -54,16 +58,21 @@ class ConsoleChatController(
     )
     private var baseSystemPrompt = initialSystemPrompt
     private var configSelection = ConfigMenuSelection.default()
-    private var systemPrompt = buildSystemPrompt(baseSystemPrompt, configSelection)
+    private var systemPrompt = systemPromptBuilder.build(baseSystemPrompt, configSelection)
     private val availableModelIds = models.map { it.id }.distinct().ifEmpty { listOf(initialModel) }
     private val modelById = models.associateBy { it.id }
     private var currentModel = initialModel
     private var temperature: Double? = null
-    private val sessionMemory = SessionMemory(systemPrompt)
+    private val sessionMemory = SessionMemory()
     private val branchingSessionMemory = BranchingSessionMemory()
     private val branchClassificationUseCase = BranchClassificationUseCase(sendPromptUseCase)
     private val branchingTopicSummaryStrategy = RollingSummaryCompactionStrategy(sendPromptUseCase)
-    private var memoryUsageSnapshot = estimateHeuristicUsage(sessionMemory.contextSnapshot())
+    private var memoryUsageSnapshot = estimateHeuristicUsage(
+        buildPromptUseCase.buildContext(
+            systemPrompt = systemPrompt,
+            session = sessionMemory.promptDataSnapshot(),
+        ).toConversation(),
+    )
     private val dialogBlocks = mutableListOf<String>()
     private val pendingFileReferences = mutableListOf<String>()
     private val inputDivider = "─".repeat(80)
@@ -137,8 +146,15 @@ class ConsoleChatController(
 
         return runCatching {
             val startedAt = TimeSource.Monotonic.markNow()
+            val promptRequest = buildPromptUseCase.execute(
+                request = BuildPromptRequest(
+                    systemPrompt = systemPrompt,
+                    session = sessionMemory.promptDataSnapshot(),
+                    userPrompt = prompt,
+                ),
+            )
             val response = sendPromptUseCase.execute(
-                conversation = sessionMemory.conversationFor(prompt),
+                prompt = promptRequest,
                 temperature = temperature,
                 model = currentModel,
             )
@@ -218,8 +234,15 @@ class ConsoleChatController(
     }
 
     private suspend fun executeLinearTurn(requestPrompt: String): TurnExecutionResult {
+        val promptRequest = buildPromptUseCase.execute(
+            request = BuildPromptRequest(
+                systemPrompt = systemPrompt,
+                session = sessionMemory.promptDataSnapshot(),
+                userPrompt = requestPrompt,
+            ),
+        )
         val response = sendPromptUseCase.execute(
-            conversation = sessionMemory.conversationFor(requestPrompt),
+            prompt = promptRequest,
             temperature = temperature,
             model = currentModel,
         )
@@ -233,7 +256,10 @@ class ConsoleChatController(
         memoryUsageSnapshot = buildUsageSnapshotAfterSuccessfulTurn(
             responseContent = response.content,
             usage = response.usage,
-            messages = sessionMemory.contextSnapshot(),
+            messages = buildPromptUseCase.buildContext(
+                systemPrompt = systemPrompt,
+                session = sessionMemory.promptDataSnapshot(),
+            ).toConversation(),
         )
 
         return TurnExecutionResult(
@@ -245,14 +271,28 @@ class ConsoleChatController(
 
     private suspend fun executeBranchingTurn(requestPrompt: String): TurnExecutionResult {
         val contextWindow = modelById[currentModel]?.contextWindowTokens
-        val branchingConversation = branchingSessionMemory.conversationFor(
-            prompt = requestPrompt,
-            systemPrompt = systemPrompt,
+        val branchingPromptData = branchingSessionMemory.promptDataForRequest(
             maxEstimatedTokens = contextWindow,
-            estimateTokens = { messages -> estimateSessionTokensHeuristically(messages) },
+            estimateTokens = { sessionPromptData ->
+                val promptRequest = buildPromptUseCase.execute(
+                    request = BuildPromptRequest(
+                        systemPrompt = systemPrompt,
+                        session = sessionPromptData,
+                        userPrompt = requestPrompt,
+                    ),
+                )
+                estimateSessionTokensHeuristically(promptRequest.toConversation())
+            },
+        )
+        val promptRequest = buildPromptUseCase.execute(
+            request = BuildPromptRequest(
+                systemPrompt = systemPrompt,
+                session = branchingPromptData.session,
+                userPrompt = requestPrompt,
+            ),
         )
         val response = sendPromptUseCase.execute(
-            conversation = branchingConversation.conversation,
+            prompt = promptRequest,
             temperature = temperature,
             model = currentModel,
         )
@@ -263,7 +303,10 @@ class ConsoleChatController(
         memoryUsageSnapshot = buildUsageSnapshotAfterSuccessfulTurn(
             responseContent = response.content,
             usage = response.usage,
-            messages = branchingSessionMemory.activeContextSnapshot(systemPrompt),
+            messages = buildPromptUseCase.buildContext(
+                systemPrompt = systemPrompt,
+                session = branchingSessionMemory.activePromptDataSnapshot(),
+            ).toConversation(),
         )
 
         return TurnExecutionResult(
@@ -601,7 +644,7 @@ class ConsoleChatController(
                     descriptions = configDescriptions,
                     currentSelection = configSelection,
                 )
-                systemPrompt = buildSystemPrompt(baseSystemPrompt, configSelection)
+                systemPrompt = systemPromptBuilder.build(baseSystemPrompt, configSelection)
                 resetConversation()
                 persistMemorySnapshot()
                 dialogBlocks += "system> configuration applied"
@@ -631,7 +674,7 @@ class ConsoleChatController(
     }
 
     private fun resetConversation() {
-        sessionMemory.reset(systemPrompt)
+        sessionMemory.reset()
         branchingSessionMemory.reset()
         memoryUsageSnapshot = estimateHeuristicUsage(activeContextMessages())
         pendingFileReferences.clear()
@@ -649,6 +692,7 @@ class ConsoleChatController(
             persistedCompactedSummary = persistedState.compactedSummary,
         )
         val restoredBranching = branchingSessionMemory.restore(persistedState.branchingState)
+        val hasInvalidPersistedState = !restoredLinear || (persistedState.branchingState != null && !restoredBranching)
         val persistedMode = SessionCompactionMode.fromIdOrNull(persistedState.activeCompactionModeId)
             ?.takeIf { mode -> mode in availableCompactionModes }
         activeCompactionMode = when {
@@ -658,15 +702,18 @@ class ConsoleChatController(
         }
 
         if (activeCompactionMode == SessionCompactionMode.BRANCHING) {
-            sessionMemory.reset(systemPrompt)
+            sessionMemory.reset()
             if (!restoredBranching) {
                 branchingSessionMemory.reset()
             }
         } else {
             branchingSessionMemory.reset()
             if (!restoredLinear) {
-                sessionMemory.reset(systemPrompt)
+                sessionMemory.reset()
             }
+        }
+        if (hasInvalidPersistedState) {
+            clearPersistedMemorySnapshot()
         }
 
         val activeContext = activeContextMessages()
@@ -872,9 +919,15 @@ class ConsoleChatController(
 
     private fun activeContextMessages(): List<ConversationMessage> {
         return if (activeCompactionMode == SessionCompactionMode.BRANCHING) {
-            branchingSessionMemory.activeContextSnapshot(systemPrompt)
+            buildPromptUseCase.buildContext(
+                systemPrompt = systemPrompt,
+                session = branchingSessionMemory.activePromptDataSnapshot(),
+            ).toConversation()
         } else {
-            sessionMemory.contextSnapshot()
+            buildPromptUseCase.buildContext(
+                systemPrompt = systemPrompt,
+                session = sessionMemory.promptDataSnapshot(),
+            ).toConversation()
         }
     }
 
@@ -1120,33 +1173,6 @@ class ConsoleChatController(
         val seconds = scaled / TIME_DECIMAL_SCALE
         val fraction = (scaled % TIME_DECIMAL_SCALE).toString().padStart(TIME_DECIMAL_DIGITS, '0')
         return "time> $seconds.$fraction s"
-    }
-
-    private fun buildSystemPrompt(
-        basePrompt: String,
-        selection: ConfigMenuSelection,
-    ): String {
-        val stopInstruction = selection.stopSequence.takeIf { it.isNotBlank() }?.let { stopText ->
-            """When user sends "$stopText" stop generating questions and provide short summary"""
-        } ?: "No explicit stop sequence behavior."
-
-        return """
-            $basePrompt
-            
-            Output rules:
-            - Format: ${selection.format.readableName()}
-            - Max output tokens: ${selection.maxOutputTokens?.toString() ?: "(none)"}
-            - Stop sequence: ${selection.stopSequence.ifBlank { "(none)" }}
-            - Stop behavior: $stopInstruction
-            - Follow output rules exactly.
-        """.trimIndent()
-    }
-
-    private fun OutputFormatOption.readableName(): String = when (this) {
-        OutputFormatOption.PLAIN_TEXT -> "Plain text"
-        OutputFormatOption.MARKDOWN -> "Markdown"
-        OutputFormatOption.JSON -> "JSON"
-        OutputFormatOption.TABLE -> "Table"
     }
 
     private data class ResolvedFileReference(

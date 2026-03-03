@@ -3,6 +3,7 @@ package com.aichallenge.day2.agent.domain.usecase
 import com.aichallenge.day2.agent.domain.model.AgentResponse
 import com.aichallenge.day2.agent.domain.model.ConversationMessage
 import com.aichallenge.day2.agent.domain.model.MessageRole
+import com.aichallenge.day2.agent.domain.model.PromptRequestData
 import com.aichallenge.day2.agent.domain.repository.AgentRepository
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
@@ -136,11 +137,11 @@ private class FactMapRecordingAgentRepository(
     val models = mutableListOf<String?>()
 
     override suspend fun complete(
-        conversation: List<ConversationMessage>,
+        prompt: PromptRequestData,
         temperature: Double?,
         model: String?,
     ): AgentResponse {
-        conversations += conversation
+        conversations += prompt.toConversation()
         temperatures += temperature
         models += model
         return response

@@ -1,27 +1,17 @@
 package com.aichallenge.day2.agent.domain.usecase
 
 import com.aichallenge.day2.agent.domain.model.AgentResponse
-import com.aichallenge.day2.agent.domain.model.ConversationMessage
+import com.aichallenge.day2.agent.domain.model.PromptRequestData
 import com.aichallenge.day2.agent.domain.repository.AgentRepository
 
 class SendPromptUseCase(
     private val agentRepository: AgentRepository,
 ) {
     suspend fun execute(
-        conversation: List<ConversationMessage>,
+        prompt: PromptRequestData,
         temperature: Double? = null,
         model: String? = null,
     ): AgentResponse {
-        return agentRepository.complete(conversation, temperature, model)
-    }
-
-    suspend fun execute(
-        history: List<ConversationMessage>,
-        prompt: String,
-        temperature: Double? = null,
-        model: String? = null,
-    ): AgentResponse {
-        val conversation = history + ConversationMessage.user(prompt)
-        return execute(conversation, temperature, model)
+        return agentRepository.complete(prompt, temperature, model)
     }
 }

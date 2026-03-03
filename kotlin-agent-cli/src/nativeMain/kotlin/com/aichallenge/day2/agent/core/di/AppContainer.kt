@@ -3,6 +3,7 @@ package com.aichallenge.day2.agent.core.di
 import com.aichallenge.day2.agent.core.config.AppConfig
 import com.aichallenge.day2.agent.data.remote.OpenAiRemoteDataSource
 import com.aichallenge.day2.agent.data.repository.OpenAiAgentRepository
+import com.aichallenge.day2.agent.domain.usecase.BuildPromptUseCase
 import com.aichallenge.day2.agent.domain.usecase.SendPromptUseCase
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.curl.Curl
@@ -36,6 +37,7 @@ class AppContainer(
 
     private val repository = OpenAiAgentRepository(remoteDataSource)
 
+    val buildPromptUseCase = BuildPromptUseCase()
     val sendPromptUseCase = SendPromptUseCase(repository)
 
     fun close() {

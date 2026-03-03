@@ -34,7 +34,6 @@ class JsonFileSessionMemoryStoreTest {
         val filePath = uniqueSessionMemoryPath()
         val store = JsonFileSessionMemoryStore(filePath)
         val messages = listOf(
-            ConversationMessage.system("system"),
             ConversationMessage.user("question"),
             ConversationMessage.assistant("answer"),
             ConversationMessage.user("question 2"),
@@ -65,12 +64,13 @@ class JsonFileSessionMemoryStoreTest {
         val store = JsonFileSessionMemoryStore(filePath)
         val state = SessionMemoryState(
             messages = listOf(
-                ConversationMessage.system("system"),
+                ConversationMessage.user("question"),
+                ConversationMessage.assistant("answer"),
             ),
             usage = MemoryUsageSnapshot(
                 estimatedTokens = 456,
                 source = MemoryEstimateSource.HEURISTIC,
-                messageCount = 1,
+                messageCount = 3,
             ),
             compactedSummary = null,
             activeCompactionModeId = "branching",
@@ -109,7 +109,6 @@ class JsonFileSessionMemoryStoreTest {
         val store = JsonFileSessionMemoryStore(filePath)
         val state = SessionMemoryState(
             messages = listOf(
-                ConversationMessage.system("system"),
                 ConversationMessage.user("question"),
                 ConversationMessage.assistant("answer"),
             ),
@@ -135,7 +134,6 @@ class JsonFileSessionMemoryStoreTest {
         val store = JsonFileSessionMemoryStore(filePath)
         val stateWithSummary = SessionMemoryState(
             messages = listOf(
-                ConversationMessage.system("system"),
                 ConversationMessage.user("question"),
                 ConversationMessage.assistant("answer"),
             ),
@@ -179,7 +177,6 @@ class JsonFileSessionMemoryStoreTest {
         val summaryFilePath = summaryFilePath(filePath)
         val store = JsonFileSessionMemoryStore(filePath)
         val messages = listOf(
-            ConversationMessage.system("system"),
             ConversationMessage.user("question"),
             ConversationMessage.assistant("answer"),
         )
@@ -242,7 +239,6 @@ class JsonFileSessionMemoryStoreTest {
         val store = JsonFileSessionMemoryStore(filePath)
         val mainState = SessionMemoryState(
             messages = listOf(
-                ConversationMessage.system("system"),
                 ConversationMessage.user("question"),
                 ConversationMessage.assistant("answer"),
             ),
