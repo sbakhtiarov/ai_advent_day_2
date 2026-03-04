@@ -69,6 +69,10 @@ time> <seconds> s
 - Optional user-defined profile overrides are discovered from `~/.kotlin-agent-cli/user-profile-<name>.json`.
 - Profile files must match `user-profile-<name>.json`; each file can include optional `display_name` (used only in `/profile` menu labels).
 - Active user profile file selection is persisted in `~/.kotlin-agent-cli/active-user-profile.json` as `{ "active_file_name": "<file-name>" }`.
+- Optional user-defined workflows are discovered from `~/.kotlin-agent-cli/workflow-<name>.json`.
+- Workflow files must match `workflow-<name>.json` and include non-blank top-level keys: `name`, `planning`, `execution`, `validation`.
+- Workflow files can optionally include `basePrompt` as an additional static system prompt for that workflow.
+- Active workflow file selection is persisted in `~/.kotlin-agent-cli/active-workflow.json` as `{ "active_file_name": "<file-name>" }`.
 - Working memory is a distilled structured task state updated incrementally after each successful turn from previous working state + latest user/assistant messages.
 - Working memory lifecycle is independent from session memory compaction strategy and session-memory snapshot files.
 - Working memory is injected into interactive prompt context as a dedicated system-context block with normalized JSON task state.
@@ -79,8 +83,10 @@ time> <seconds> s
 - Profile memory distillation captures only explicit user-provided facts (no inferred assumptions), and the assistant asks 1–2 concise relevant preference questions when needed to fill missing preferences.
 - Session snapshot persistence includes both conversation messages and a context-usage estimate.
 - On interactive startup, the app restores persisted memory exactly as previously saved.
-- Workflow mode state is persisted in the same session snapshot and restored on startup.
-- When workflow mode is enabled via `/workflow`, the footer shows a red `Workflow` label below the bottom divider.
+- Workflow mode state is persisted in the session snapshot and restored on startup.
+- `/workflow` enables workflow mode by opening workflow selection when disabled, and disables workflow mode immediately when already enabled.
+- Changing active workflow via `/workflow` resets current in-memory conversation context.
+- When workflow mode is enabled, the footer shows a red `Workflow` label below the bottom divider.
 - Each successful prompt turn is persisted immediately.
 - Rolling compactization triggers when 12 non-system messages are accumulated, compacts first 10, keeps last 2, and carries previous summary forward.
 - Sliding-window compactization keeps only the last 10 non-system messages and does not inject summary context.
@@ -110,7 +116,7 @@ time> <seconds> s
 - `/memory` - show estimated session-memory context usage
 - `/compact` - choose compaction strategy (`Rolling summary`, `Sliding window`, `Fact map`, or `Branching`)
 - `/profile` - choose active user profile (`user-profile-<name>.json`)
-- `/workflow` - toggle workflow mode (footer indicator only for now)
+- `/workflow` - enable workflow mode with workflow selection (toggle off when already enabled)
 - `/reset` - clear conversation memory and transcript, then persist an empty session snapshot while preserving current mode flags (working/profile remain intact)
 - `/exit` - close app
 - `@<path>` - attach file path as dialog reference; file text is read only when the next prompt is submitted

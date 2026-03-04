@@ -14,10 +14,13 @@ import com.aichallenge.day2.agent.domain.model.SessionMemory
 import com.aichallenge.day2.agent.domain.model.SessionMemoryState
 import com.aichallenge.day2.agent.domain.model.TokenUsage
 import com.aichallenge.day2.agent.domain.model.UserProfileOption
+import com.aichallenge.day2.agent.domain.model.UserWorkflowDefinition
+import com.aichallenge.day2.agent.domain.model.UserWorkflowOption
 import com.aichallenge.day2.agent.domain.model.WorkingMemoryState
 import com.aichallenge.day2.agent.domain.repository.ProfileMemoryStore
 import com.aichallenge.day2.agent.domain.repository.SessionMemoryStore
 import com.aichallenge.day2.agent.domain.repository.UserDefinedProfileStore
+import com.aichallenge.day2.agent.domain.repository.UserDefinedWorkflowStore
 import com.aichallenge.day2.agent.domain.repository.WorkingMemoryStore
 import com.aichallenge.day2.agent.domain.usecase.BranchClassificationUseCase
 import com.aichallenge.day2.agent.domain.usecase.BuildPromptRequest
@@ -49,6 +52,7 @@ class ConsoleChatController(
     private val workingMemoryStore: WorkingMemoryStore? = null,
     private val profileMemoryStore: ProfileMemoryStore? = null,
     private val userDefinedProfileStore: UserDefinedProfileStore? = null,
+    private val userDefinedWorkflowStore: UserDefinedWorkflowStore? = null,
     private val persistentMemoryEnabled: Boolean = true,
     private val workingMemoryDistillationUseCase: WorkingMemoryDistillationUseCase? = null,
     private val workingMemoryEnabled: Boolean = true,
@@ -93,7 +97,9 @@ class ConsoleChatController(
     private var workingMemoryInitialized = false
     private var profileMemoryInitialized = false
     private var userDefinedProfileInitialized = false
+    private var userDefinedWorkflowInitialized = false
     private var workflowModeEnabled = false
+    private var activeWorkflow: UserWorkflowDefinition? = null
     private val availableCompactionModes = SessionCompactionMode.entries.filter { mode ->
         compactionCoordinators.containsKey(mode)
     }
@@ -113,6 +119,7 @@ class ConsoleChatController(
 
     suspend fun runInteractive() {
         initializeUserDefinedProfile()
+        initializeUserDefinedWorkflow()
         initializePersistentMemory()
         initializeWorkingMemory()
         initializeProfileMemory()
@@ -161,6 +168,7 @@ class ConsoleChatController(
             return 1
         }
         initializeUserDefinedProfile()
+        initializeUserDefinedWorkflow()
 
         return runCatching {
             val startedAt = TimeSource.Monotonic.markNow()
@@ -697,12 +705,27 @@ class ConsoleChatController(
         reloadUserDefinedProfile()
     }
 
+    private fun initializeUserDefinedWorkflow() {
+        if (userDefinedWorkflowInitialized) {
+            return
+        }
+
+        userDefinedWorkflowInitialized = true
+        reloadActiveWorkflow()
+    }
+
     private fun reloadUserDefinedProfile() {
         userDefinedProfilePreferences = runCatching {
             userDefinedProfileStore?.load()
         }.getOrNull()
         rebuildSystemPrompt()
         memoryUsageSnapshot = estimateHeuristicUsage(activeContextMessages())
+    }
+
+    private fun reloadActiveWorkflow() {
+        activeWorkflow = runCatching {
+            userDefinedWorkflowStore?.loadActiveWorkflow()
+        }.getOrNull()
     }
 
     private fun rebuildSystemPrompt() {
@@ -919,14 +942,59 @@ class ConsoleChatController(
         /memory              show session-memory context usage
         /compact             choose memory compaction strategy
         /profile             choose active user profile
-        /workflow            toggle workflow mode
+        /workflow            enable workflow mode with workflow selection (toggle off when enabled)
         /reset               clear conversation and keep current system prompt
         /exit                close the application
         @<path>              attach file for the next prompt
     """.trimIndent()
 
     private fun handleWorkflowCommand() {
-        workflowModeEnabled = !workflowModeEnabled
+        if (workflowModeEnabled) {
+            workflowModeEnabled = false
+            persistMemorySnapshot()
+            return
+        }
+
+        val store = userDefinedWorkflowStore
+        if (store == null) {
+            dialogBlocks += "system> workflow store is unavailable"
+            return
+        }
+
+        val workflows = runCatching { store.listWorkflows() }.getOrNull().orEmpty()
+        if (workflows.isEmpty()) {
+            dialogBlocks += "system> no valid workflows found (expected: workflow-<name>.json)"
+            return
+        }
+
+        val persistedActiveFileName = runCatching { store.activeWorkflowFileName() }.getOrNull()
+        val effectiveCurrentFileName = persistedActiveFileName ?: activeWorkflow?.fileName
+        val currentSelection = workflows.indexOfFirst { workflow -> workflow.fileName == effectiveCurrentFileName }
+            .takeIf { index -> index >= 0 }
+            ?: 0
+        val selectedIndex = io.openWorkflowMenu(
+            options = workflows.map(::formatWorkflowMenuOption),
+            currentSelection = currentSelection,
+        ) ?: return
+        val selectedWorkflow = workflows.getOrNull(selectedIndex) ?: return
+
+        val shouldPersistSelection = selectedWorkflow.fileName != persistedActiveFileName
+        val selectedFileChanged = selectedWorkflow.fileName != effectiveCurrentFileName
+        if (shouldPersistSelection) {
+            val switched = runCatching {
+                store.setActiveWorkflow(selectedWorkflow.fileName)
+            }.getOrDefault(false)
+            if (!switched) {
+                dialogBlocks += "system> failed to switch workflow '${selectedWorkflow.displayName}'"
+                return
+            }
+        }
+
+        reloadActiveWorkflow()
+        if (selectedFileChanged) {
+            resetConversation()
+        }
+        workflowModeEnabled = true
         persistMemorySnapshot()
     }
 
@@ -1052,6 +1120,10 @@ class ConsoleChatController(
 
     private fun formatProfileMenuOption(profile: UserProfileOption): String {
         return "${profile.displayName} [${profile.fileName}]"
+    }
+
+    private fun formatWorkflowMenuOption(workflow: UserWorkflowOption): String {
+        return "${workflow.displayName} [${workflow.fileName}]"
     }
 
     private fun activeCompactionCoordinator(): SessionMemoryCompactionCoordinator? {

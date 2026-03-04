@@ -21,9 +21,12 @@ import com.aichallenge.day2.agent.domain.model.SubtopicBranchState
 import com.aichallenge.day2.agent.domain.model.TokenUsage
 import com.aichallenge.day2.agent.domain.model.TopicBranchState
 import com.aichallenge.day2.agent.domain.model.UserProfileOption
+import com.aichallenge.day2.agent.domain.model.UserWorkflowDefinition
+import com.aichallenge.day2.agent.domain.model.UserWorkflowOption
 import com.aichallenge.day2.agent.domain.repository.AgentRepository
 import com.aichallenge.day2.agent.domain.repository.SessionMemoryStore
 import com.aichallenge.day2.agent.domain.repository.UserDefinedProfileStore
+import com.aichallenge.day2.agent.domain.repository.UserDefinedWorkflowStore
 import com.aichallenge.day2.agent.domain.usecase.SessionMemoryCompactionCoordinator
 import com.aichallenge.day2.agent.domain.usecase.SendPromptUseCase
 import com.aichallenge.day2.agent.domain.usecase.SlidingWindowCompactionStrategy
@@ -314,31 +317,260 @@ class ConsoleChatControllerSessionMemoryTest {
     }
 
     @Test
-    fun workflowCommandTogglesStateAndPersistsSnapshot() = runBlocking {
+    fun workflowCommandWhenDisabledSelectsWorkflowEnablesAndPersistsSnapshot() = runBlocking {
         val repository = RecordingAgentRepository(responses = emptyList())
         val store = RecordingSessionMemoryStore()
-        val io = FakeCliIO(inputs = listOf("/workflow", "/exit"))
+        val workflowStore = RecordingSelectableUserDefinedWorkflowStore(
+            workflows = listOf(
+                UserWorkflowOption("workflow-default.json", "Default"),
+                UserWorkflowOption("workflow-review.json", "Review"),
+            ),
+            workflowsByFileName = mapOf(
+                "workflow-default.json" to UserWorkflowDefinition(
+                    fileName = "workflow-default.json",
+                    name = "Default",
+                    planning = "Plan",
+                    execution = "Execute",
+                    validation = "Validate",
+                ),
+                "workflow-review.json" to UserWorkflowDefinition(
+                    fileName = "workflow-review.json",
+                    name = "Review",
+                    planning = "Plan review",
+                    execution = "Run review",
+                    validation = "Confirm review",
+                ),
+            ),
+            activeFileName = "workflow-default.json",
+        )
+        val io = FakeCliIO(
+            inputs = listOf("/workflow", "/exit"),
+            workflowSelections = listOf(1),
+        )
         val controller = createController(
             repository = repository,
             io = io,
             sessionMemoryStore = store,
+            userDefinedWorkflowStore = workflowStore,
         )
 
         controller.runInteractive()
 
         assertEquals(1, store.saveStates.size)
         assertTrue(store.saveStates.single().workflowModeEnabled)
-        assertFalse(io.outputText().contains("system> workflow"))
+        assertEquals(listOf("workflow-review.json"), workflowStore.setActiveCalls)
     }
 
     @Test
-    fun workflowCommandCanDisableAlreadyEnabledMode() = runBlocking {
-        val repository = RecordingAgentRepository(responses = emptyList())
-        val store = RecordingSessionMemoryStore()
+    fun workflowCommandSelectingDifferentWorkflowResetsConversationAndPersistsSnapshot() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "answer one")),
+            ),
+        )
+        val sessionStore = RecordingSessionMemoryStore(
+            loadedState = SessionMemoryState(
+                messages = listOf(
+                    ConversationMessage.user("old question"),
+                    ConversationMessage.assistant("old answer"),
+                ),
+                usage = MemoryUsageSnapshot(
+                    estimatedTokens = 200,
+                    source = MemoryEstimateSource.HYBRID,
+                    messageCount = 3,
+                ),
+            ),
+        )
+        val workflowStore = RecordingSelectableUserDefinedWorkflowStore(
+            workflows = listOf(
+                UserWorkflowOption("workflow-default.json", "Default"),
+                UserWorkflowOption("workflow-review.json", "Review"),
+            ),
+            workflowsByFileName = mapOf(
+                "workflow-default.json" to UserWorkflowDefinition(
+                    fileName = "workflow-default.json",
+                    name = "Default",
+                    planning = "Plan",
+                    execution = "Execute",
+                    validation = "Validate",
+                ),
+                "workflow-review.json" to UserWorkflowDefinition(
+                    fileName = "workflow-review.json",
+                    name = "Review",
+                    planning = "Plan review",
+                    execution = "Run review",
+                    validation = "Confirm review",
+                ),
+            ),
+            activeFileName = "workflow-default.json",
+        )
+        val io = FakeCliIO(
+            inputs = listOf("/workflow", "new question", "/exit"),
+            workflowSelections = listOf(1),
+        )
         val controller = createController(
             repository = repository,
-            io = FakeCliIO(inputs = listOf("/workflow", "/workflow", "/exit")),
+            io = io,
+            sessionMemoryStore = sessionStore,
+            userDefinedWorkflowStore = workflowStore,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(listOf("workflow-review.json"), workflowStore.setActiveCalls)
+        assertEquals(2, sessionStore.saveStates.size)
+        assertTrue(sessionStore.saveStates[0].workflowModeEnabled)
+        assertEquals(emptyList(), sessionStore.saveStates[0].messages)
+        assertEquals(
+            listOf(MessageRole.SYSTEM, MessageRole.USER),
+            repository.conversations.single().map { it.role },
+        )
+        assertEquals("new question", repository.conversations.single()[1].content)
+    }
+
+    @Test
+    fun workflowCommandPersistsSelectionWithoutResetWhenPersistedActiveWorkflowIsMissing() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "answer one")),
+            ),
+        )
+        val sessionStore = RecordingSessionMemoryStore(
+            loadedState = SessionMemoryState(
+                messages = listOf(
+                    ConversationMessage.user("old question"),
+                    ConversationMessage.assistant("old answer"),
+                ),
+                usage = MemoryUsageSnapshot(
+                    estimatedTokens = 200,
+                    source = MemoryEstimateSource.HYBRID,
+                    messageCount = 3,
+                ),
+            ),
+        )
+        val workflowStore = RecordingSelectableUserDefinedWorkflowStore(
+            workflows = listOf(
+                UserWorkflowOption("workflow-default.json", "Default"),
+                UserWorkflowOption("workflow-review.json", "Review"),
+            ),
+            workflowsByFileName = mapOf(
+                "workflow-default.json" to UserWorkflowDefinition(
+                    fileName = "workflow-default.json",
+                    name = "Default",
+                    planning = "Plan",
+                    execution = "Execute",
+                    validation = "Validate",
+                ),
+                "workflow-review.json" to UserWorkflowDefinition(
+                    fileName = "workflow-review.json",
+                    name = "Review",
+                    planning = "Plan review",
+                    execution = "Run review",
+                    validation = "Confirm review",
+                ),
+            ),
+            activeFileName = null,
+        )
+        val io = FakeCliIO(
+            inputs = listOf("/workflow", "new question", "/exit"),
+            workflowSelections = listOf(0),
+        )
+        val controller = createController(
+            repository = repository,
+            io = io,
+            sessionMemoryStore = sessionStore,
+            userDefinedWorkflowStore = workflowStore,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(listOf("workflow-default.json"), workflowStore.setActiveCalls)
+        val request = repository.conversations.single()
+        assertEquals(
+            listOf(MessageRole.SYSTEM, MessageRole.USER, MessageRole.ASSISTANT, MessageRole.USER),
+            request.map { it.role },
+        )
+        assertEquals("old question", request[1].content)
+        assertEquals("old answer", request[2].content)
+        assertEquals("new question", request[3].content)
+    }
+
+    @Test
+    fun workflowCommandCancelKeepsDisabledAndDoesNotPersistSnapshot() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val store = RecordingSessionMemoryStore()
+        val workflowStore = RecordingSelectableUserDefinedWorkflowStore(
+            workflows = listOf(
+                UserWorkflowOption("workflow-default.json", "Default"),
+            ),
+            workflowsByFileName = mapOf(
+                "workflow-default.json" to UserWorkflowDefinition(
+                    fileName = "workflow-default.json",
+                    name = "Default",
+                    planning = "Plan",
+                    execution = "Execute",
+                    validation = "Validate",
+                ),
+            ),
+            activeFileName = "workflow-default.json",
+        )
+        val controller = createController(
+            repository = repository,
+            io = FakeCliIO(inputs = listOf("/workflow", "/exit"), workflowSelections = listOf(null)),
             sessionMemoryStore = store,
+            userDefinedWorkflowStore = workflowStore,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(emptyList(), workflowStore.setActiveCalls)
+        assertEquals(0, store.saveStates.size)
+    }
+
+    @Test
+    fun workflowCommandShowsMessageWhenNoValidWorkflowsFound() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val io = FakeCliIO(inputs = listOf("/workflow", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            userDefinedWorkflowStore = RecordingSelectableUserDefinedWorkflowStore(
+                workflows = emptyList(),
+            ),
+        )
+
+        controller.runInteractive()
+
+        assertContains(io.outputText(), "system> no valid workflows found")
+    }
+
+    @Test
+    fun workflowCommandWhenEnabledDisablesAndPersistsSnapshot() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val store = RecordingSessionMemoryStore()
+        val workflowStore = RecordingSelectableUserDefinedWorkflowStore(
+            workflows = listOf(
+                UserWorkflowOption("workflow-default.json", "Default"),
+            ),
+            workflowsByFileName = mapOf(
+                "workflow-default.json" to UserWorkflowDefinition(
+                    fileName = "workflow-default.json",
+                    name = "Default",
+                    planning = "Plan",
+                    execution = "Execute",
+                    validation = "Validate",
+                ),
+            ),
+            activeFileName = "workflow-default.json",
+        )
+        val controller = createController(
+            repository = repository,
+            io = FakeCliIO(
+                inputs = listOf("/workflow", "/workflow", "/exit"),
+                workflowSelections = listOf(0),
+            ),
+            sessionMemoryStore = store,
+            userDefinedWorkflowStore = workflowStore,
         )
 
         controller.runInteractive()
@@ -373,10 +605,26 @@ class ConsoleChatControllerSessionMemoryTest {
     fun resetCommandPreservesWorkflowModeInPersistedSnapshot() = runBlocking {
         val repository = RecordingAgentRepository(responses = emptyList())
         val store = RecordingSessionMemoryStore()
+        val workflowStore = RecordingSelectableUserDefinedWorkflowStore(
+            workflows = listOf(
+                UserWorkflowOption("workflow-default.json", "Default"),
+            ),
+            workflowsByFileName = mapOf(
+                "workflow-default.json" to UserWorkflowDefinition(
+                    fileName = "workflow-default.json",
+                    name = "Default",
+                    planning = "Plan",
+                    execution = "Execute",
+                    validation = "Validate",
+                ),
+            ),
+            activeFileName = "workflow-default.json",
+        )
         val controller = createController(
             repository = repository,
-            io = FakeCliIO(inputs = listOf("/workflow", "/reset", "/exit")),
+            io = FakeCliIO(inputs = listOf("/workflow", "/reset", "/exit"), workflowSelections = listOf(0)),
             sessionMemoryStore = store,
+            userDefinedWorkflowStore = workflowStore,
         )
 
         controller.runInteractive()
@@ -869,7 +1117,7 @@ class ConsoleChatControllerSessionMemoryTest {
         assertContains(output, "/memory              show session-memory context usage")
         assertContains(output, "/compact             choose memory compaction strategy")
         assertContains(output, "/profile             choose active user profile")
-        assertContains(output, "/workflow            toggle workflow mode")
+        assertContains(output, "/workflow            enable workflow mode with workflow selection (toggle off when enabled)")
         assertContains(output, "@<path>              attach file for the next prompt")
     }
 
@@ -1781,6 +2029,7 @@ class ConsoleChatControllerSessionMemoryTest {
         io: CliIO,
         sessionMemoryStore: SessionMemoryStore? = null,
         userDefinedProfileStore: UserDefinedProfileStore? = null,
+        userDefinedWorkflowStore: UserDefinedWorkflowStore? = null,
         persistentMemoryEnabled: Boolean = true,
         fileReferenceReader: FileReferenceReader = RecordingFileReferenceReader(emptyMap()),
         compactionCoordinators: Map<SessionCompactionMode, SessionMemoryCompactionCoordinator> = mapOf(
@@ -1805,6 +2054,7 @@ class ConsoleChatControllerSessionMemoryTest {
             io = io,
             sessionMemoryStore = sessionMemoryStore,
             userDefinedProfileStore = userDefinedProfileStore,
+            userDefinedWorkflowStore = userDefinedWorkflowStore,
             persistentMemoryEnabled = persistentMemoryEnabled,
             fileReferenceReader = fileReferenceReader,
             compactionCoordinators = compactionCoordinators,
@@ -1835,10 +2085,12 @@ private class FakeCliIO(
     inputs: List<String>,
     private val compactionSelections: List<Int?> = emptyList(),
     private val profileSelections: List<Int?> = emptyList(),
+    private val workflowSelections: List<Int?> = emptyList(),
 ) : CliIO {
     private val queuedInputs = ArrayDeque<String?>(inputs)
     private var nextCompactionSelectionIndex = 0
     private var nextProfileSelectionIndex = 0
+    private var nextWorkflowSelectionIndex = 0
     private val lines = mutableListOf<String>()
     var showThinkingIndicatorCalls: Int = 0
         private set
@@ -1898,9 +2150,44 @@ private class FakeCliIO(
         return currentSelection
     }
 
+    override fun openWorkflowMenu(options: List<String>, currentSelection: Int): Int? {
+        val selection = workflowSelections.getOrNull(nextWorkflowSelectionIndex)
+        if (nextWorkflowSelectionIndex < workflowSelections.size) {
+            nextWorkflowSelectionIndex += 1
+            return selection
+        }
+        return currentSelection
+    }
+
     private fun nextInput(): String? = queuedInputs.removeFirstOrNull()
 
     fun outputText(): String = lines.joinToString(separator = "\n")
+}
+
+private class RecordingSelectableUserDefinedWorkflowStore(
+    private val workflows: List<UserWorkflowOption>,
+    private val workflowsByFileName: Map<String, UserWorkflowDefinition> = emptyMap(),
+    private var activeFileName: String? = null,
+) : UserDefinedWorkflowStore {
+    val setActiveCalls = mutableListOf<String>()
+
+    override fun listWorkflows(): List<UserWorkflowOption> = workflows.toList()
+
+    override fun loadActiveWorkflow(): UserWorkflowDefinition? {
+        val fileName = activeFileName ?: workflows.firstOrNull()?.fileName ?: return null
+        return workflowsByFileName[fileName]
+    }
+
+    override fun activeWorkflowFileName(): String? = activeFileName
+
+    override fun setActiveWorkflow(fileName: String): Boolean {
+        if (workflows.none { workflow -> workflow.fileName == fileName }) {
+            return false
+        }
+        setActiveCalls += fileName
+        activeFileName = fileName
+        return true
+    }
 }
 
 private class RecordingSelectableUserDefinedProfileStore(
