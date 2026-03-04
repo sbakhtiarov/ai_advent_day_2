@@ -19,6 +19,7 @@ data class SessionMemorySnapshotDto(
     val memoryUsage: PersistedMemoryUsageSnapshotDto? = null,
     val activeCompactionModeId: String? = null,
     val branchingState: PersistedBranchingMemoryStateDto? = null,
+    val workflowModeEnabled: Boolean = false,
 )
 
 @Serializable
@@ -88,6 +89,7 @@ fun SessionMemoryState.toPersistedDto(version: Int): SessionMemorySnapshotDto = 
     memoryUsage = usage?.toPersistedDto(),
     activeCompactionModeId = activeCompactionModeId,
     branchingState = branchingState?.toPersistedDto(),
+    workflowModeEnabled = workflowModeEnabled,
 )
 
 fun SessionMemorySnapshotDto.toDomainModel(): SessionMemoryState = SessionMemoryState(
@@ -96,6 +98,7 @@ fun SessionMemorySnapshotDto.toDomainModel(): SessionMemoryState = SessionMemory
     usage = memoryUsage?.toDomainModel(),
     activeCompactionModeId = activeCompactionModeId,
     branchingState = branchingState?.toDomainModel(),
+    workflowModeEnabled = workflowModeEnabled,
 )
 
 fun ConversationMessage.toPersistedDto(): PersistedConversationMessageDto = PersistedConversationMessageDto(

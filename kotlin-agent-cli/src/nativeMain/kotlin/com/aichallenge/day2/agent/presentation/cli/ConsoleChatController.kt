@@ -93,6 +93,7 @@ class ConsoleChatController(
     private var workingMemoryInitialized = false
     private var profileMemoryInitialized = false
     private var userDefinedProfileInitialized = false
+    private var workflowModeEnabled = false
     private val availableCompactionModes = SessionCompactionMode.entries.filter { mode ->
         compactionCoordinators.containsKey(mode)
     }
@@ -123,6 +124,7 @@ class ConsoleChatController(
                 val input = io.readLineInFooter(
                     prompt = "> ",
                     divider = inputDivider,
+                    footerLabel = if (workflowModeEnabled) WORKFLOW_FOOTER_LABEL else null,
                 ) ?: break
                 if (input.isBlank()) {
                     continue
@@ -651,6 +653,11 @@ class ConsoleChatController(
                 true
             }
 
+            input == "/workflow" -> {
+                handleWorkflowCommand()
+                true
+            }
+
             isModelCommand(input) -> {
                 handleModelCommand(input)
                 true
@@ -659,6 +666,7 @@ class ConsoleChatController(
             input == "/reset" -> {
                 resetConversation()
                 clearPersistedMemorySnapshot()
+                persistMemorySnapshot()
                 dialogBlocks.clear()
                 dialogBlocks += "system> conversation has been reset"
                 true
@@ -711,6 +719,7 @@ class ConsoleChatController(
 
         persistentMemoryInitialized = true
         val persistedState = runCatching { sessionMemoryStore?.load() }.getOrNull() ?: return
+        workflowModeEnabled = persistedState.workflowModeEnabled
         val restoredLinear = sessionMemory.restore(
             persistedMessages = persistedState.messages,
             persistedCompactedSummary = persistedState.compactedSummary,
@@ -853,6 +862,7 @@ class ConsoleChatController(
             } else {
                 null
             },
+            workflowModeEnabled = workflowModeEnabled,
         )
         runCatching {
             sessionMemoryStore?.save(state)
@@ -877,7 +887,7 @@ class ConsoleChatController(
         io.writeLine(logoBanner())
         io.writeLine()
         io.writeLine("    type your prompt and press Enter")
-        io.writeLine("    commands: /help, /models, /model <id|number>, /memory, /compact, /profile, /reset, /exit, @<path>")
+        io.writeLine("    commands: /help, /models, /model <id|number>, /memory, /compact, /profile, /workflow, /reset, /exit, @<path>")
         io.writeLine()
 
         dialogBlocks.forEachIndexed { index, block ->
@@ -909,10 +919,16 @@ class ConsoleChatController(
         /memory              show session-memory context usage
         /compact             choose memory compaction strategy
         /profile             choose active user profile
+        /workflow            toggle workflow mode
         /reset               clear conversation and keep current system prompt
         /exit                close the application
         @<path>              attach file for the next prompt
     """.trimIndent()
+
+    private fun handleWorkflowCommand() {
+        workflowModeEnabled = !workflowModeEnabled
+        persistMemorySnapshot()
+    }
 
     private fun modelsText(): String = buildString {
         appendLine("Available models:")
@@ -1311,6 +1327,7 @@ class ConsoleChatController(
     )
 
     companion object {
+        private const val WORKFLOW_FOOTER_LABEL = "Workflow"
         private const val TOKENS_PER_MILLION = 1_000_000.0
         private const val PRICE_DECIMAL_SCALE = 1_000_000L
         private const val PRICE_DECIMAL_DIGITS = 6

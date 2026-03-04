@@ -6,6 +6,7 @@ data class SessionMemoryState(
     val usage: MemoryUsageSnapshot? = null,
     val activeCompactionModeId: String? = null,
     val branchingState: BranchingMemoryState? = null,
+    val workflowModeEnabled: Boolean = false,
 )
 
 data class CompactedSessionSummary(

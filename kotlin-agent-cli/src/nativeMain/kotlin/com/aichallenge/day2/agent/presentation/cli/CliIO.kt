@@ -30,7 +30,7 @@ interface CliIO {
     fun showCursor()
     fun writeLine(text: String = "")
     fun readLine(prompt: String): String?
-    fun readLineInFooter(prompt: String, divider: String): String?
+    fun readLineInFooter(prompt: String, divider: String, footerLabel: String? = null): String?
     fun showThinkingIndicator() {}
     fun updateThinkingIndicator(progressText: String) {}
     fun hideThinkingIndicator() {}
@@ -101,13 +101,19 @@ object StdCliIO : CliIO {
         thinkingIndicatorVisible = false
     }
 
-    override fun readLineInFooter(prompt: String, divider: String): String? {
+    override fun readLineInFooter(
+        prompt: String,
+        divider: String,
+        footerLabel: String?,
+    ): String? {
         val input = StringBuilder()
         val pendingKeys = ArrayDeque<Int>()
         val terminalWidth = detectTerminalWidth().coerceAtLeast(prompt.length + 1)
         val dividerChar = divider.firstOrNull() ?: '─'
         val dividerLine = dividerChar.toString().repeat(terminalWidth)
         val coloredDividerLine = colorizeDivider(dividerLine)
+        val normalizedFooterLabel = sanitizeSingleLineInput(footerLabel).takeIf { it.isNotBlank() }
+        val coloredFooterLabel = normalizedFooterLabel?.let(::colorizeFooterLabel)
 
         // Initial footer render:
         // divider
@@ -115,13 +121,15 @@ object StdCliIO : CliIO {
         // divider
         print(coloredDividerLine)
         print('\n')
-        val reservedFooterLines = FOOTER_RESERVED_INPUT_LINES
+        val reservedFooterLines = FOOTER_RESERVED_INPUT_LINES +
+            if (normalizedFooterLabel == null) 0 else FOOTER_RESERVED_LABEL_LINES
         ensureMenuFits(requiredMenuLines = reservedFooterLines)
         print("\u001B7")
         redrawFooterFromPromptAnchor(
             prompt = prompt,
             input = input,
             divider = coloredDividerLine,
+            footerLabel = coloredFooterLabel,
             width = terminalWidth,
         )
 
@@ -150,6 +158,10 @@ object StdCliIO : CliIO {
                                     print(input.toString())
                                     print('\n')
                                     print(coloredDividerLine)
+                                    if (coloredFooterLabel != null) {
+                                        print('\n')
+                                        print(coloredFooterLabel)
+                                    }
                                     result = input.toString()
                                     break@loop
                                 }
@@ -163,6 +175,7 @@ object StdCliIO : CliIO {
                                 prompt = prompt,
                                 input = input,
                                 divider = coloredDividerLine,
+                                footerLabel = coloredFooterLabel,
                                 width = terminalWidth,
                             )
                             continue@loop
@@ -175,6 +188,10 @@ object StdCliIO : CliIO {
                         print(input.toString())
                         print('\n')
                         print(coloredDividerLine)
+                        if (coloredFooterLabel != null) {
+                            print('\n')
+                            print(coloredFooterLabel)
+                        }
                         result = input.toString()
                         break@loop
                     }
@@ -186,6 +203,7 @@ object StdCliIO : CliIO {
                                 prompt = prompt,
                                 input = input,
                                 divider = coloredDividerLine,
+                                footerLabel = coloredFooterLabel,
                                 width = terminalWidth,
                             )
                         }
@@ -202,6 +220,7 @@ object StdCliIO : CliIO {
                                     prompt = prompt,
                                     input = input,
                                     divider = coloredDividerLine,
+                                    footerLabel = coloredFooterLabel,
                                     width = terminalWidth,
                                 )
                             }
@@ -225,6 +244,7 @@ object StdCliIO : CliIO {
                                 prompt = prompt,
                                 input = input,
                                 divider = coloredDividerLine,
+                                footerLabel = coloredFooterLabel,
                                 width = terminalWidth,
                             )
                         }
@@ -237,6 +257,7 @@ object StdCliIO : CliIO {
                                 prompt = prompt,
                                 input = input,
                                 divider = coloredDividerLine,
+                                footerLabel = coloredFooterLabel,
                                 width = terminalWidth,
                             )
                         }
@@ -440,6 +461,7 @@ object StdCliIO : CliIO {
         prompt: String,
         input: StringBuilder,
         divider: String,
+        footerLabel: String?,
         width: Int,
     ) {
         val inputPreview = buildInputPreview(input.toString())
@@ -460,6 +482,10 @@ object StdCliIO : CliIO {
         }
         print('\n')
         print(divider)
+        if (footerLabel != null) {
+            print('\n')
+            print(footerLabel)
+        }
         print("\u001B8")
         moveCursorToPreviewEnd(
             prompt = prompt,
@@ -495,6 +521,7 @@ object StdCliIO : CliIO {
     }
 
     private fun colorizeDivider(divider: String): String = "$DIVIDER_COLOR$divider$ANSI_RESET"
+    private fun colorizeFooterLabel(label: String): String = "$FOOTER_LABEL_COLOR$label$ANSI_RESET"
 
     @OptIn(ExperimentalForeignApi::class)
     private fun readClipboardText(): String? = memScoped {
@@ -730,10 +757,12 @@ object StdCliIO : CliIO {
     private const val ARROW_LEFT = 68
     private const val ARROW_RIGHT = 67
     private const val DIVIDER_COLOR = "\u001B[38;5;240m"
+    private const val FOOTER_LABEL_COLOR = "\u001B[38;5;196m"
     private const val THINKING_LABEL_COLOR = "\u001B[38;5;45m"
     private const val OPTION_SELECTED_COLOR = "\u001B[38;5;39m"
     private const val ANSI_RESET = "\u001B[0m"
     private const val FOOTER_RESERVED_INPUT_LINES = 3
+    private const val FOOTER_RESERVED_LABEL_LINES = 1
     private const val BRACKETED_PASTE_START_MARKER = "200~"
     private const val BRACKETED_PASTE_END_SEQUENCE = "\u001B[201~"
     private const val BRACKETED_PASTE_MAX_LENGTH = 8192

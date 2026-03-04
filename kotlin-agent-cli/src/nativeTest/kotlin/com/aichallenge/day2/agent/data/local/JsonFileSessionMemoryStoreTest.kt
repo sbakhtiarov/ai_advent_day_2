@@ -51,6 +51,7 @@ class JsonFileSessionMemoryStoreTest {
                 content = "summary one",
             ),
             activeCompactionModeId = "sliding-window",
+            workflowModeEnabled = true,
         )
 
         store.save(state)
@@ -100,6 +101,20 @@ class JsonFileSessionMemoryStoreTest {
         store.save(state)
 
         assertEquals(state, store.load())
+    }
+
+    @Test
+    fun saveAndLoadRoundTripPreservesWorkflowModeFlag() {
+        val filePath = uniqueSessionMemoryPath()
+        val store = JsonFileSessionMemoryStore(filePath)
+        val state = SessionMemoryState(
+            messages = emptyList(),
+            workflowModeEnabled = true,
+        )
+
+        store.save(state)
+
+        assertEquals(true, store.load()?.workflowModeEnabled)
     }
 
     @Test
@@ -227,6 +242,7 @@ class JsonFileSessionMemoryStoreTest {
                 compactedSummary = null,
                 usage = null,
                 activeCompactionModeId = null,
+                workflowModeEnabled = false,
             ),
             store.load(),
         )

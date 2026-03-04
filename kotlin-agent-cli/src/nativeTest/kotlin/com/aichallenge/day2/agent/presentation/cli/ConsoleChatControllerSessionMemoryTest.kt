@@ -300,15 +300,92 @@ class ConsoleChatControllerSessionMemoryTest {
         assertEquals(firstRequest[0].content, secondRequest[0].content)
         assertEquals("prompt two", secondRequest[1].content)
         assertEquals(1, store.clearCalls)
-        assertEquals(2, store.saveStates.size)
+        assertEquals(3, store.saveStates.size)
+        assertEquals(emptyList(), store.saveStates[1].messages)
+        assertFalse(store.saveStates[1].workflowModeEnabled)
         assertEquals(
             listOf(MessageRole.USER, MessageRole.ASSISTANT),
-            store.saveStates[1].messages.map { it.role },
+            store.saveStates[2].messages.map { it.role },
         )
-        val usage = assertNotNull(store.saveStates[1].usage)
+        val usage = assertNotNull(store.saveStates[2].usage)
         assertEquals(MemoryEstimateSource.HEURISTIC, usage.source)
         assertEquals(3, usage.messageCount)
-        assertEquals("prompt two", store.saveStates[1].messages[0].content)
+        assertEquals("prompt two", store.saveStates[2].messages[0].content)
+    }
+
+    @Test
+    fun workflowCommandTogglesStateAndPersistsSnapshot() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val store = RecordingSessionMemoryStore()
+        val io = FakeCliIO(inputs = listOf("/workflow", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            sessionMemoryStore = store,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(1, store.saveStates.size)
+        assertTrue(store.saveStates.single().workflowModeEnabled)
+        assertFalse(io.outputText().contains("system> workflow"))
+    }
+
+    @Test
+    fun workflowCommandCanDisableAlreadyEnabledMode() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val store = RecordingSessionMemoryStore()
+        val controller = createController(
+            repository = repository,
+            io = FakeCliIO(inputs = listOf("/workflow", "/workflow", "/exit")),
+            sessionMemoryStore = store,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(2, store.saveStates.size)
+        assertFalse(store.saveStates.last().workflowModeEnabled)
+    }
+
+    @Test
+    fun interactiveModeRestoresWorkflowModeAndPassesFooterLabel() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val io = FakeCliIO(inputs = listOf("/exit"))
+        val store = RecordingSessionMemoryStore(
+            loadedState = SessionMemoryState(
+                messages = emptyList(),
+                workflowModeEnabled = true,
+            ),
+        )
+        val controller = createController(
+            repository = repository,
+            io = io,
+            sessionMemoryStore = store,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(1, store.loadCalls)
+        assertEquals(listOf<String?>("Workflow"), io.footerLabels)
+    }
+
+    @Test
+    fun resetCommandPreservesWorkflowModeInPersistedSnapshot() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val store = RecordingSessionMemoryStore()
+        val controller = createController(
+            repository = repository,
+            io = FakeCliIO(inputs = listOf("/workflow", "/reset", "/exit")),
+            sessionMemoryStore = store,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(1, store.clearCalls)
+        assertEquals(2, store.saveStates.size)
+        assertTrue(store.saveStates[0].workflowModeEnabled)
+        assertTrue(store.saveStates[1].workflowModeEnabled)
+        assertEquals(emptyList(), store.saveStates[1].messages)
     }
 
     @Test
@@ -788,10 +865,11 @@ class ConsoleChatControllerSessionMemoryTest {
         controller.runInteractive()
 
         val output = io.outputText()
-        assertContains(output, "commands: /help, /models, /model <id|number>, /memory, /compact, /profile, /reset, /exit, @<path>")
+        assertContains(output, "commands: /help, /models, /model <id|number>, /memory, /compact, /profile, /workflow, /reset, /exit, @<path>")
         assertContains(output, "/memory              show session-memory context usage")
         assertContains(output, "/compact             choose memory compaction strategy")
         assertContains(output, "/profile             choose active user profile")
+        assertContains(output, "/workflow            toggle workflow mode")
         assertContains(output, "@<path>              attach file for the next prompt")
     }
 
@@ -1770,6 +1848,7 @@ private class FakeCliIO(
         private set
     var hideThinkingIndicatorCalls: Int = 0
         private set
+    val footerLabels = mutableListOf<String?>()
 
     override fun clearScreen() = Unit
 
@@ -1783,7 +1862,10 @@ private class FakeCliIO(
 
     override fun readLine(prompt: String): String? = nextInput()
 
-    override fun readLineInFooter(prompt: String, divider: String): String? = nextInput()
+    override fun readLineInFooter(prompt: String, divider: String, footerLabel: String?): String? {
+        footerLabels += footerLabel
+        return nextInput()
+    }
 
     override fun showThinkingIndicator() {
         showThinkingIndicatorCalls += 1
@@ -1864,6 +1946,7 @@ private class RecordingSessionMemoryStore(
             usage = loadedState.usage?.copy(),
             activeCompactionModeId = loadedState.activeCompactionModeId,
             branchingState = copyBranchingState(loadedState.branchingState),
+            workflowModeEnabled = loadedState.workflowModeEnabled,
         )
     }
 
@@ -1874,6 +1957,7 @@ private class RecordingSessionMemoryStore(
             usage = state.usage?.copy(),
             activeCompactionModeId = state.activeCompactionModeId,
             branchingState = copyBranchingState(state.branchingState),
+            workflowModeEnabled = state.workflowModeEnabled,
         )
     }
 

@@ -79,6 +79,8 @@ time> <seconds> s
 - Profile memory distillation captures only explicit user-provided facts (no inferred assumptions), and the assistant asks 1–2 concise relevant preference questions when needed to fill missing preferences.
 - Session snapshot persistence includes both conversation messages and a context-usage estimate.
 - On interactive startup, the app restores persisted memory exactly as previously saved.
+- Workflow mode state is persisted in the same session snapshot and restored on startup.
+- When workflow mode is enabled via `/workflow`, the footer shows a red `Workflow` label below the bottom divider.
 - Each successful prompt turn is persisted immediately.
 - Rolling compactization triggers when 12 non-system messages are accumulated, compacts first 10, keeps last 2, and carries previous summary forward.
 - Sliding-window compactization keeps only the last 10 non-system messages and does not inject summary context.
@@ -96,7 +98,7 @@ time> <seconds> s
 - Prompt context order is: system prompt (includes optional user-defined profile defaults), compacted summary (as system context when present), working-memory block (as system context when present), profile-memory block (as system context when present), remaining conversation, current user prompt.
 - If you attach files with `@<path>`, their text content is injected into the next submitted prompt and persisted in session memory.
 - `/profile` opens profile selection menu, switches active user-defined profile, resets in-memory session context, and persists reset snapshot.
-- `/reset` clears in-memory session memory, clears the visible transcript, and deletes persisted session memory on disk (working/profile memory are not cleared).
+- `/reset` clears in-memory session memory, clears the visible transcript, resets persisted conversation to an empty snapshot, and preserves current mode flags (working/profile memory are not cleared).
 - One-shot mode (`--prompt`) still does not read/write session/working/profile persisted memory, but it does load the active `user-profile-<name>.json` and inject those defaults into the system prompt.
 - If persistence read/write fails, the app continues with in-memory session behavior.
 
@@ -108,7 +110,8 @@ time> <seconds> s
 - `/memory` - show estimated session-memory context usage
 - `/compact` - choose compaction strategy (`Rolling summary`, `Sliding window`, `Fact map`, or `Branching`)
 - `/profile` - choose active user profile (`user-profile-<name>.json`)
-- `/reset` - clear conversation memory and transcript, then delete persisted session memory on disk (working/profile remain intact)
+- `/workflow` - toggle workflow mode (footer indicator only for now)
+- `/reset` - clear conversation memory and transcript, then persist an empty session snapshot while preserving current mode flags (working/profile remain intact)
 - `/exit` - close app
 - `@<path>` - attach file path as dialog reference; file text is read only when the next prompt is submitted
 - Inline refs are also supported in prompts (example: `Review @/abs/path/File.kt` or `Review @"~/path with spaces/File.kt"`).

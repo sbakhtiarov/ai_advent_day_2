@@ -347,7 +347,7 @@ private class WorkingMemoryControllerTestCliIO(
 
     override fun readLine(prompt: String): String? = queuedInputs.removeFirstOrNull()
 
-    override fun readLineInFooter(prompt: String, divider: String): String? =
+    override fun readLineInFooter(prompt: String, divider: String, footerLabel: String?): String? =
         queuedInputs.removeFirstOrNull()
 
     override fun openCompactionMenu(options: List<String>, currentSelection: Int): Int? {
