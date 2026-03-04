@@ -1,3 +1,2 @@
 OPENAI_API_KEY=sk-...
 OPENAI_BASE_URL=https://api.openai.com/v1
-AGENT_SYSTEM_PROMPT=You are a concise and pragmatic assistant.

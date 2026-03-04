@@ -124,6 +124,23 @@ class AppConfigTest {
         }
     }
 
+    @Test
+    fun agentSystemPromptEnvKeyDoesNotAffectConfiguration() {
+        withEnvironment(
+            mapOf(
+                "OPENAI_API_KEY" to "test-api-key",
+                "AGENT_SYSTEM_PROMPT" to "unexpected override",
+            ),
+        ) {
+            val config = AppConfig.fromEnvironment()
+
+            assertEquals(
+                "You are a concise and pragmatic assistant. Ask for clarification only when needed.",
+                config.systemPrompt,
+            )
+        }
+    }
+
     @OptIn(ExperimentalForeignApi::class)
     private fun withEnvironment(
         overrides: Map<String, String>,

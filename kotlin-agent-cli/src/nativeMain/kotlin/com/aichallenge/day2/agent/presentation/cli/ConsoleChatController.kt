@@ -63,24 +63,15 @@ class ConsoleChatController(
     ),
     private val defaultCompactionMode: SessionCompactionMode = SessionCompactionMode.ROLLING_SUMMARY,
 ) {
-    private val configTabs = listOf("Format", "Size", "Stop")
-    private val configDescriptions = listOf(
-        "Select output format",
-        "Set max output tokens",
-        "Define stop sequence instructions",
-    )
     private var baseSystemPrompt = initialSystemPrompt
-    private var configSelection = ConfigMenuSelection.default()
     private var userDefinedProfilePreferences: ProfilePreferenceState? = null
     private var systemPrompt = systemPromptBuilder.build(
         basePrompt = baseSystemPrompt,
-        selection = configSelection,
         userDefinedProfile = userDefinedProfilePreferences,
     )
     private val availableModelIds = models.map { it.id }.distinct().ifEmpty { listOf(initialModel) }
     private val modelById = models.associateBy { it.id }
     private var currentModel = initialModel
-    private var temperature: Double? = null
     private val sessionMemory = SessionMemory()
     private val branchingSessionMemory = BranchingSessionMemory()
     private val branchClassificationUseCase = BranchClassificationUseCase(sendPromptUseCase)
@@ -182,7 +173,6 @@ class ConsoleChatController(
             )
             val response = sendPromptUseCase.execute(
                 prompt = promptRequest,
-                temperature = temperature,
                 model = currentModel,
             )
             val elapsedSeconds = startedAt.elapsedNow().inWholeMilliseconds / 1000.0
@@ -280,7 +270,6 @@ class ConsoleChatController(
         )
         val response = sendPromptUseCase.execute(
             prompt = promptRequest,
-            temperature = temperature,
             model = currentModel,
         )
         sessionMemory.recordSuccessfulTurn(requestPrompt, response.content)
@@ -326,7 +315,6 @@ class ConsoleChatController(
         )
         val response = sendPromptUseCase.execute(
             prompt = promptRequest,
-            temperature = temperature,
             model = currentModel,
         )
         val systemMessages = handleBranchingPostResponse(
@@ -668,29 +656,11 @@ class ConsoleChatController(
                 true
             }
 
-            input == "/config" -> {
-                configSelection = io.openConfigMenu(
-                    tabs = configTabs,
-                    descriptions = configDescriptions,
-                    currentSelection = configSelection,
-                )
-                rebuildSystemPrompt()
-                resetConversation()
-                persistMemorySnapshot()
-                dialogBlocks += "system> configuration applied"
-                true
-            }
-
             input == "/reset" -> {
                 resetConversation()
                 clearPersistedMemorySnapshot()
                 dialogBlocks.clear()
                 dialogBlocks += "system> conversation has been reset"
-                true
-            }
-
-            input.startsWith("/temp") -> {
-                handleTemperatureCommand(input)
                 true
             }
 
@@ -730,7 +700,6 @@ class ConsoleChatController(
     private fun rebuildSystemPrompt() {
         systemPrompt = systemPromptBuilder.build(
             basePrompt = baseSystemPrompt,
-            selection = configSelection,
             userDefinedProfile = userDefinedProfilePreferences,
         )
     }
@@ -908,7 +877,7 @@ class ConsoleChatController(
         io.writeLine(logoBanner())
         io.writeLine()
         io.writeLine("    type your prompt and press Enter")
-        io.writeLine("    commands: /help, /models, /model <id|number>, /memory, /compact, /profile, /config, /temp <0..2>, /reset, /exit, @<path>")
+        io.writeLine("    commands: /help, /models, /model <id|number>, /memory, /compact, /profile, /reset, /exit, @<path>")
         io.writeLine()
 
         dialogBlocks.forEachIndexed { index, block ->
@@ -940,8 +909,6 @@ class ConsoleChatController(
         /memory              show session-memory context usage
         /compact             choose memory compaction strategy
         /profile             choose active user profile
-        /config              open config menu (ESC to close)
-        /temp <temperature>  set response temperature (0..2)
         /reset               clear conversation and keep current system prompt
         /exit                close the application
         @<path>              attach file for the next prompt
@@ -1159,36 +1126,6 @@ class ConsoleChatController(
             return availableModelIds[index - 1]
         }
         return availableModelIds.firstOrNull { it == argument }
-    }
-
-    private fun handleTemperatureCommand(input: String) {
-        val parts = input.trim().split(Regex("\\s+"), limit = 2)
-        if (parts.size != 2 || parts[1].isBlank()) {
-            dialogBlocks += "system> usage: /temp <temperature>, where temperature is between 0 and 2"
-            return
-        }
-
-        val parsedTemperature = parts[1].toDoubleOrNull()
-        if (parsedTemperature == null) {
-            dialogBlocks += "system> invalid temperature. Please enter a numeric value between 0 and 2"
-            return
-        }
-
-        if (parsedTemperature !in 0.0..2.0) {
-            dialogBlocks += "system> invalid temperature. Allowed range is 0..2"
-            return
-        }
-
-        temperature = parsedTemperature
-        dialogBlocks += "system> temperature set to ${formatTemperature(parsedTemperature)}"
-    }
-
-    private fun formatTemperature(value: Double): String {
-        return if (value % 1.0 == 0.0) {
-            value.toInt().toString()
-        } else {
-            value.toString()
-        }
     }
 
     private fun formatUserPrompt(text: String): String {

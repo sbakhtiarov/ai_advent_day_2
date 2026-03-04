@@ -32,7 +32,6 @@ import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
-import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -313,7 +312,7 @@ class ConsoleChatControllerSessionMemoryTest {
     }
 
     @Test
-    fun configCommandResetsMemoryAndUsesUpdatedSystemPrompt() = runBlocking {
+    fun removedConfigCommandIsHandledAsUnknownAndDoesNotResetMemory() = runBlocking {
         val repository = RecordingAgentRepository(
             responses = listOf(
                 Result.success(AgentResponse(content = "answer one")),
@@ -321,17 +320,10 @@ class ConsoleChatControllerSessionMemoryTest {
             ),
         )
         val store = RecordingSessionMemoryStore()
-        val updatedConfig = ConfigMenuSelection(
-            format = OutputFormatOption.MARKDOWN,
-            maxOutputTokens = 256,
-            stopSequence = "DONE",
-        )
+        val io = FakeCliIO(inputs = listOf("prompt one", "/config", "prompt two", "/exit"))
         val controller = createController(
             repository = repository,
-            io = FakeCliIO(
-                inputs = listOf("prompt one", "/config", "prompt two", "/exit"),
-                configSelections = listOf(updatedConfig),
-            ),
+            io = io,
             sessionMemoryStore = store,
         )
 
@@ -347,19 +339,60 @@ class ConsoleChatControllerSessionMemoryTest {
             firstRequest.map { it.role },
         )
         assertEquals(
-            listOf(MessageRole.SYSTEM, MessageRole.USER),
+            listOf(MessageRole.SYSTEM, MessageRole.USER, MessageRole.ASSISTANT, MessageRole.USER),
             secondRequest.map { it.role },
         )
-        assertNotEquals(firstRequest[0].content, secondRequest[0].content)
-        assertContains(secondRequest[0].content, "Format: Markdown")
-        assertContains(secondRequest[0].content, "Max output tokens: 256")
-        assertContains(secondRequest[0].content, "Stop sequence: DONE")
-        assertEquals("prompt two", secondRequest[1].content)
-        assertEquals(3, store.saveStates.size)
-        assertEquals(emptyList(), store.saveStates[1].messages)
-        val usage = assertNotNull(store.saveStates[1].usage)
-        assertEquals(MemoryEstimateSource.HEURISTIC, usage.source)
-        assertEquals(1, usage.messageCount)
+        assertEquals(firstRequest[0].content, secondRequest[0].content)
+        assertEquals("prompt two", secondRequest[3].content)
+        assertEquals(0, store.clearCalls)
+        assertEquals(2, store.saveStates.size)
+        assertEquals(
+            listOf(MessageRole.USER, MessageRole.ASSISTANT, MessageRole.USER, MessageRole.ASSISTANT),
+            store.saveStates[1].messages.map { it.role },
+        )
+        assertContains(io.outputText(), "system> unknown command. Type /help for available commands.")
+    }
+
+    @Test
+    fun removedTempCommandIsHandledAsUnknownAndDoesNotResetMemory() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "answer one")),
+                Result.success(AgentResponse(content = "answer two")),
+            ),
+        )
+        val store = RecordingSessionMemoryStore()
+        val io = FakeCliIO(inputs = listOf("prompt one", "/temp 0.7", "prompt two", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            sessionMemoryStore = store,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(2, repository.conversations.size)
+
+        val firstRequest = repository.conversations[0]
+        val secondRequest = repository.conversations[1]
+
+        assertEquals(
+            listOf(MessageRole.SYSTEM, MessageRole.USER),
+            firstRequest.map { it.role },
+        )
+        assertEquals(
+            listOf(MessageRole.SYSTEM, MessageRole.USER, MessageRole.ASSISTANT, MessageRole.USER),
+            secondRequest.map { it.role },
+        )
+        assertEquals(firstRequest[0].content, secondRequest[0].content)
+        assertEquals("prompt two", secondRequest[3].content)
+        assertEquals(0, store.clearCalls)
+        assertEquals(2, store.saveStates.size)
+        assertEquals(
+            listOf(MessageRole.USER, MessageRole.ASSISTANT, MessageRole.USER, MessageRole.ASSISTANT),
+            store.saveStates[1].messages.map { it.role },
+        )
+        assertContains(io.outputText(), "system> unknown command. Type /help for available commands.")
     }
 
     @Test
@@ -755,7 +788,7 @@ class ConsoleChatControllerSessionMemoryTest {
         controller.runInteractive()
 
         val output = io.outputText()
-        assertContains(output, "commands: /help, /models, /model <id|number>, /memory, /compact, /profile, /config, /temp <0..2>, /reset, /exit, @<path>")
+        assertContains(output, "commands: /help, /models, /model <id|number>, /memory, /compact, /profile, /reset, /exit, @<path>")
         assertContains(output, "/memory              show session-memory context usage")
         assertContains(output, "/compact             choose memory compaction strategy")
         assertContains(output, "/profile             choose active user profile")
@@ -1722,12 +1755,10 @@ private class RecordingAgentRepository(
 
 private class FakeCliIO(
     inputs: List<String>,
-    configSelections: List<ConfigMenuSelection> = emptyList(),
     private val compactionSelections: List<Int?> = emptyList(),
     private val profileSelections: List<Int?> = emptyList(),
 ) : CliIO {
     private val queuedInputs = ArrayDeque<String?>(inputs)
-    private val queuedConfigSelections = ArrayDeque(configSelections)
     private var nextCompactionSelectionIndex = 0
     private var nextProfileSelectionIndex = 0
     private val lines = mutableListOf<String>()
@@ -1765,14 +1796,6 @@ private class FakeCliIO(
 
     override fun hideThinkingIndicator() {
         hideThinkingIndicatorCalls += 1
-    }
-
-    override fun openConfigMenu(
-        tabs: List<String>,
-        descriptions: List<String>,
-        currentSelection: ConfigMenuSelection,
-    ): ConfigMenuSelection {
-        return queuedConfigSelections.removeFirstOrNull() ?: currentSelection
     }
 
     override fun openCompactionMenu(options: List<String>, currentSelection: Int): Int? {

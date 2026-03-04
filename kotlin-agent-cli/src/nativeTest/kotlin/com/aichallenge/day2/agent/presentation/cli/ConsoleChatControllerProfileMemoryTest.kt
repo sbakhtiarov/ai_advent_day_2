@@ -579,12 +579,6 @@ private class ProfileMemoryControllerTestCliIO(
     override fun readLineInFooter(prompt: String, divider: String): String? =
         queuedInputs.removeFirstOrNull()
 
-    override fun openConfigMenu(
-        tabs: List<String>,
-        descriptions: List<String>,
-        currentSelection: ConfigMenuSelection,
-    ): ConfigMenuSelection = currentSelection
-
     override fun openCompactionMenu(options: List<String>, currentSelection: Int): Int? {
         val selection = compactionSelections.getOrNull(nextCompactionSelectionIndex)
         if (nextCompactionSelectionIndex < compactionSelections.size) {

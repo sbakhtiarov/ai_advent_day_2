@@ -164,7 +164,6 @@ private fun printEnvironmentHelp() {
         
         Optional configuration (environment variable or local.properties):
           OPENAI_BASE_URL      default: https://api.openai.com/v1
-          AGENT_SYSTEM_PROMPT  default: concise pragmatic assistant prompt
         """.trimIndent(),
     )
 }

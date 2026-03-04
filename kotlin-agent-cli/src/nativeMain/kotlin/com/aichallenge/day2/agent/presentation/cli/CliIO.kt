@@ -24,27 +24,6 @@ import platform.posix.stdout
 import platform.posix.system
 import platform.posix.winsize
 
-enum class OutputFormatOption {
-    PLAIN_TEXT,
-    MARKDOWN,
-    JSON,
-    TABLE,
-}
-
-data class ConfigMenuSelection(
-    val format: OutputFormatOption,
-    val maxOutputTokens: Int?,
-    val stopSequence: String,
-) {
-    companion object {
-        fun default(): ConfigMenuSelection = ConfigMenuSelection(
-            format = OutputFormatOption.PLAIN_TEXT,
-            maxOutputTokens = null,
-            stopSequence = "",
-        )
-    }
-}
-
 interface CliIO {
     fun clearScreen()
     fun hideCursor()
@@ -55,11 +34,6 @@ interface CliIO {
     fun showThinkingIndicator() {}
     fun updateThinkingIndicator(progressText: String) {}
     fun hideThinkingIndicator() {}
-    fun openConfigMenu(
-        tabs: List<String>,
-        descriptions: List<String>,
-        currentSelection: ConfigMenuSelection,
-    ): ConfigMenuSelection
     fun openCompactionMenu(options: List<String>, currentSelection: Int): Int?
     fun openProfileMenu(options: List<String>, currentSelection: Int): Int?
 }
@@ -272,208 +246,6 @@ object StdCliIO : CliIO {
 
             result
         }
-    }
-
-    override fun openConfigMenu(
-        tabs: List<String>,
-        descriptions: List<String>,
-        currentSelection: ConfigMenuSelection,
-    ): ConfigMenuSelection {
-        if (tabs.isEmpty()) {
-            return currentSelection
-        }
-
-        val formatTabIndex = tabs.indexOf("Format").takeIf { it >= 0 } ?: 0
-        val sizeTabIndex = tabs.indexOf("Size").takeIf { it >= 0 } ?: 1
-        val stopTabIndex = tabs.indexOf("Stop").takeIf { it >= 0 } ?: 2
-        val formatOptions = listOf(
-            OutputFormatOption.PLAIN_TEXT to "Plain text",
-            OutputFormatOption.MARKDOWN to "Markdown",
-            OutputFormatOption.JSON to "JSON",
-            OutputFormatOption.TABLE to "Table",
-        )
-        val safeDescriptions = tabs.mapIndexed { index, _ -> descriptions.getOrElse(index) { "" } }
-        var selectedIndex = 0
-        var selectedFormatOption = formatOptions.indexOfFirst { it.first == currentSelection.format }
-            .takeIf { it >= 0 } ?: 0
-        val maxTokensInput = StringBuilder(currentSelection.maxOutputTokens?.toString().orEmpty())
-        val stopInput = StringBuilder(currentSelection.stopSequence)
-
-        fun buildSelection(): ConfigMenuSelection = ConfigMenuSelection(
-            format = formatOptions[selectedFormatOption].first,
-            maxOutputTokens = maxTokensInput.toString().toIntOrNull()?.takeIf { it > 0 },
-            stopSequence = stopInput.toString(),
-        )
-
-        fun buildMenuLines(): List<String> {
-            val tabsLine = tabs.mapIndexed { index, tab ->
-                if (index == selectedIndex) "[ $tab ]" else "  $tab  "
-            }.joinToString(separator = "  ")
-
-            val lines = mutableListOf<String>()
-            lines += "   Config: $tabsLine"
-            lines += ""
-            lines += "   ${safeDescriptions[selectedIndex]}"
-            if (selectedIndex == formatTabIndex) {
-                lines += ""
-                formatOptions.forEachIndexed { index, (_, label) ->
-                    val optionText = "${index + 1}. $label"
-                    val decorated = if (index == selectedFormatOption) {
-                        "$OPTION_SELECTED_COLOR$optionText$ANSI_RESET"
-                    } else {
-                        optionText
-                    }
-                    lines += "   $decorated"
-                }
-                lines += ""
-                lines += ""
-            }
-            if (selectedIndex == sizeTabIndex) {
-                lines += ""
-                lines += "   > ${maxTokensInput}"
-                lines += ""
-                lines += ""
-            }
-            if (selectedIndex == stopTabIndex) {
-                lines += ""
-                lines += "   > ${stopInput}"
-                lines += ""
-            }
-            lines += "   Press ESC to close"
-            return lines
-        }
-
-        fun renderMenu() {
-            // Restore anchor below divider and redraw menu in-place.
-            print("\u001B8")
-            print('\r')
-
-            val terminalWidth = detectTerminalWidth().coerceAtLeast(1)
-            val menuLines = buildMenuLines()
-            val menuHeight = calculateWrappedLineCount(menuLines, terminalWidth)
-            ensureMenuFits(requiredMenuLines = menuHeight)
-
-            // Save the adjusted anchor so subsequent redraws stay fixed.
-            print("\u001B7")
-            print("\u001B[J")
-            menuLines.forEachIndexed { index, line ->
-                print(line)
-                if (index != menuLines.lastIndex) {
-                    print('\n')
-                }
-            }
-        }
-
-        // Menu anchor line: first line below the input divider.
-        print("\r\n")
-        print("\u001B7")
-        renderMenu()
-
-        var result = buildSelection()
-
-        withRawInput<Unit> {
-            while (true) {
-                when (val key = readByte()) {
-                    null -> {
-                        result = buildSelection()
-                        break
-                    }
-
-                    ENTER_CR, ENTER_LF -> {
-                        if (selectedIndex == stopTabIndex) {
-                            result = buildSelection()
-                            break
-                        } else {
-                            selectedIndex = (selectedIndex + 1) % tabs.size
-                            renderMenu()
-                        }
-                    }
-
-                    TAB -> {
-                        selectedIndex = (selectedIndex + 1) % tabs.size
-                        renderMenu()
-                    }
-
-                    BACKSPACE, DELETE -> {
-                        if (selectedIndex == sizeTabIndex && maxTokensInput.isNotEmpty()) {
-                            maxTokensInput.deleteAt(maxTokensInput.lastIndex)
-                            renderMenu()
-                        }
-                        if (selectedIndex == stopTabIndex && stopInput.isNotEmpty()) {
-                            stopInput.deleteAt(stopInput.lastIndex)
-                            renderMenu()
-                        }
-                    }
-
-                    ESCAPE -> {
-                        val escNext = readOptionalByte(timeoutDeciseconds = 1)
-                        if (escNext == null) {
-                            result = buildSelection()
-                            break
-                        }
-
-                        if (escNext == CSI) {
-                            when (readOptionalByte(timeoutDeciseconds = 1)) {
-                                ARROW_LEFT -> {
-                                    selectedIndex = (selectedIndex - 1 + tabs.size) % tabs.size
-                                    renderMenu()
-                                }
-
-                                ARROW_RIGHT -> {
-                                    selectedIndex = (selectedIndex + 1) % tabs.size
-                                    renderMenu()
-                                }
-
-                                ARROW_UP -> {
-                                    if (selectedIndex == formatTabIndex) {
-                                        selectedFormatOption = (selectedFormatOption - 1 + formatOptions.size) % formatOptions.size
-                                        renderMenu()
-                                    }
-                                }
-
-                                ARROW_DOWN -> {
-                                    if (selectedIndex == formatTabIndex) {
-                                        selectedFormatOption = (selectedFormatOption + 1) % formatOptions.size
-                                        renderMenu()
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    else -> {
-                        if (selectedIndex == sizeTabIndex && key == CTRL_V) {
-                            val clipboardDigits = sanitizeDigitsOnly(readClipboardText())
-                            if (clipboardDigits.isNotEmpty()) {
-                                maxTokensInput.append(clipboardDigits)
-                                renderMenu()
-                            }
-                        }
-                        if (selectedIndex == sizeTabIndex && key in '0'.code..'9'.code) {
-                            maxTokensInput.append(key.toChar())
-                            renderMenu()
-                        }
-                        if (selectedIndex == stopTabIndex && key == CTRL_V) {
-                            val clipboardText = sanitizeSingleLineInput(readClipboardText())
-                            if (clipboardText.isNotEmpty()) {
-                                stopInput.append(clipboardText)
-                                renderMenu()
-                            }
-                        }
-                        if (selectedIndex == stopTabIndex && isPrintableAscii(key)) {
-                            stopInput.append(key.toChar())
-                            renderMenu()
-                        }
-                    }
-                }
-            }
-        }
-
-        // Cleanup menu area after close.
-        print("\u001B8")
-        print('\r')
-        print("\u001B[J")
-        return result
     }
 
     override fun openCompactionMenu(options: List<String>, currentSelection: Int): Int? {
@@ -764,11 +536,6 @@ object StdCliIO : CliIO {
             .replace("\r\n", "\n")
             .replace('\r', '\n')
             .filter { it == '\n' || it.code in 32..126 }
-    }
-
-    private fun sanitizeDigitsOnly(text: String?): String {
-        if (text.isNullOrEmpty()) return ""
-        return text.filter { it in '0'..'9' }
     }
 
     private fun readBracketedPasteIfPresent(firstCsiByte: Int): String? {

@@ -21,7 +21,6 @@ Create `local.properties` in this folder (`kotlin-agent-cli/local.properties`):
 ```properties
 OPENAI_API_KEY=sk-...
 OPENAI_BASE_URL=https://api.openai.com/v1
-AGENT_SYSTEM_PROMPT=You are a concise and pragmatic assistant.
 ```
 
 Environment variables are still supported and take precedence over `local.properties`.
@@ -36,7 +35,6 @@ Optional:
 
 ```bash
 export OPENAI_BASE_URL="https://api.openai.com/v1"
-export AGENT_SYSTEM_PROMPT="You are a concise and pragmatic assistant."
 ```
 
 Model catalog is built into the app (including pricing and context-window metadata).
@@ -97,7 +95,6 @@ time> <seconds> s
 - Switching to or from Branching mode via `/compact` resets active memory immediately.
 - Prompt context order is: system prompt (includes optional user-defined profile defaults), compacted summary (as system context when present), working-memory block (as system context when present), profile-memory block (as system context when present), remaining conversation, current user prompt.
 - If you attach files with `@<path>`, their text content is injected into the next submitted prompt and persisted in session memory.
-- `/config` resets session memory after applying output configuration and persists the reset state.
 - `/profile` opens profile selection menu, switches active user-defined profile, resets in-memory session context, and persists reset snapshot.
 - `/reset` clears in-memory session memory, clears the visible transcript, and deletes persisted session memory on disk (working/profile memory are not cleared).
 - One-shot mode (`--prompt`) still does not read/write session/working/profile persisted memory, but it does load the active `user-profile-<name>.json` and inject those defaults into the system prompt.
@@ -111,8 +108,6 @@ time> <seconds> s
 - `/memory` - show estimated session-memory context usage
 - `/compact` - choose compaction strategy (`Rolling summary`, `Sliding window`, `Fact map`, or `Branching`)
 - `/profile` - choose active user profile (`user-profile-<name>.json`)
-- `/config` - open config menu (ESC to close)
-- `/temp <temperature>` - set OpenAI temperature (`0..2`)
 - `/reset` - clear conversation memory and transcript, then delete persisted session memory on disk (working/profile remain intact)
 - `/exit` - close app
 - `@<path>` - attach file path as dialog reference; file text is read only when the next prompt is submitted

@@ -130,17 +130,13 @@ data class AppConfig(
             val models = internalModelCatalog()
             validateModelCatalog(models)
             val baseUrl = readConfig("OPENAI_BASE_URL", localProperties).orEmpty().trim().ifEmpty { DEFAULT_BASE_URL }
-            val systemPrompt = readConfig("AGENT_SYSTEM_PROMPT", localProperties)
-                .orEmpty()
-                .trim()
-                .ifEmpty { DEFAULT_SYSTEM_PROMPT }
 
             return AppConfig(
                 apiKey = apiKey,
                 model = DEFAULT_MODEL,
                 models = models,
                 baseUrl = baseUrl.trimEnd('/'),
-                systemPrompt = systemPrompt,
+                systemPrompt = DEFAULT_SYSTEM_PROMPT,
             )
         }
 
