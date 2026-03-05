@@ -399,6 +399,7 @@ class ConsoleChatController(
         }
 
         while (true) {
+            resetWorkflowStepSessionContext()
             val planningPrompt = buildPlanningWorkflowPrompt(state)
             val turnResult = executeModelTurn(
                 requestPrompt = planningPrompt,
@@ -516,6 +517,7 @@ class ConsoleChatController(
         }
 
         while (true) {
+            resetWorkflowStepSessionContext()
             val executionPrompt = buildExecutionWorkflowPrompt(state)
             val executionResult = executeModelTurn(
                 requestPrompt = executionPrompt,
@@ -638,6 +640,7 @@ class ConsoleChatController(
             )
         }
 
+        resetWorkflowStepSessionContext()
         val validationPrompt = buildValidationWorkflowPrompt(state)
         val validationResult = executeModelTurn(
             requestPrompt = validationPrompt,
@@ -1605,6 +1608,10 @@ class ConsoleChatController(
         branchingSessionMemory.reset()
         memoryUsageSnapshot = estimateHeuristicUsage(activeContextMessages())
         pendingFileReferences.clear()
+    }
+
+    private fun resetWorkflowStepSessionContext() {
+        resetConversation()
     }
 
     private fun initializeUserDefinedProfile() {

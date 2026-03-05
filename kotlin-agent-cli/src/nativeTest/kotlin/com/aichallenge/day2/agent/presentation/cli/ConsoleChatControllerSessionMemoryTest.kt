@@ -502,12 +502,12 @@ class ConsoleChatControllerSessionMemoryTest {
         assertEquals(listOf("workflow-default.json"), workflowStore.setActiveCalls)
         val request = repository.conversations.first()
         assertEquals(
-            listOf(MessageRole.SYSTEM, MessageRole.USER, MessageRole.ASSISTANT, MessageRole.USER),
+            listOf(MessageRole.SYSTEM, MessageRole.USER),
             request.map { it.role },
         )
-        assertEquals("old question", request[1].content)
-        assertEquals("old answer", request[2].content)
-        assertContains(request[3].content, "new question")
+        assertContains(request[1].content, "new question")
+        assertFalse(request[1].content.contains("old question"))
+        assertFalse(request[1].content.contains("old answer"))
     }
 
     @Test
@@ -699,6 +699,18 @@ class ConsoleChatControllerSessionMemoryTest {
         val planningRequest = repository.conversations[0]
         val executionRequest = repository.conversations[1]
         val validationRequest = repository.conversations[2]
+        assertEquals(
+            listOf(MessageRole.SYSTEM, MessageRole.USER),
+            planningRequest.map { it.role },
+        )
+        assertEquals(
+            listOf(MessageRole.SYSTEM, MessageRole.USER),
+            executionRequest.map { it.role },
+        )
+        assertEquals(
+            listOf(MessageRole.SYSTEM, MessageRole.USER),
+            validationRequest.map { it.role },
+        )
 
         assertContains(planningRequest[0].content, "Base system prompt")
         assertContains(planningRequest[0].content, "Workflow base prompt")
@@ -761,6 +773,10 @@ class ConsoleChatControllerSessionMemoryTest {
 
         assertEquals(4, repository.conversations.size)
         val secondPlanningRequest = repository.conversations[1]
+        assertEquals(
+            listOf(MessageRole.SYSTEM, MessageRole.USER),
+            secondPlanningRequest.map { it.role },
+        )
         assertContains(secondPlanningRequest[0].content, "Planning step")
         assertContains(secondPlanningRequest.last().content, "add rollback section")
     }
@@ -840,6 +856,10 @@ class ConsoleChatControllerSessionMemoryTest {
 
         assertEquals(5, repository.conversations.size)
         val retriedExecutionRequest = repository.conversations[3]
+        assertEquals(
+            listOf(MessageRole.SYSTEM, MessageRole.USER),
+            retriedExecutionRequest.map { it.role },
+        )
         assertContains(retriedExecutionRequest[0].content, "Execution step")
         assertContains(retriedExecutionRequest.last().content, "Validation failed: missing test evidence")
     }
@@ -1014,6 +1034,10 @@ class ConsoleChatControllerSessionMemoryTest {
 
         assertEquals(4, repository.conversations.size)
         val secondPlanningRequest = repository.conversations[1]
+        assertEquals(
+            listOf(MessageRole.SYSTEM, MessageRole.USER),
+            secondPlanningRequest.map { it.role },
+        )
         assertContains(secondPlanningRequest.last().content, "Question: Who is the target audience?")
         assertContains(secondPlanningRequest.last().content, "Answer: Backend engineers")
         assertContains(secondPlanningRequest.last().content, "Question: What deadline should be used?")
@@ -1117,6 +1141,10 @@ class ConsoleChatControllerSessionMemoryTest {
 
         assertEquals(4, repository.conversations.size)
         val secondExecutionRequest = repository.conversations[2]
+        assertEquals(
+            listOf(MessageRole.SYSTEM, MessageRole.USER),
+            secondExecutionRequest.map { it.role },
+        )
         assertContains(secondExecutionRequest.last().content, "Question: Which API base URL should be used?")
         assertContains(secondExecutionRequest.last().content, "Answer: https://api.example.com")
         assertContains(secondExecutionRequest.last().content, "Question: Which auth method should be used?")
@@ -1189,6 +1217,68 @@ class ConsoleChatControllerSessionMemoryTest {
         assertContains(repository.conversations.first().last().content, "original task")
         assertContains(repository.conversations.first().last().content, "new detail")
         assertEquals(listOf<String?>("Workflow: planning"), io.footerLabels.take(1))
+    }
+
+    @Test
+    fun restoredPlanningApprovalStateIgnoresPersistedConversationHistoryInNextWorkflowStep() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "planning output updated")),
+                Result.success(AgentResponse(content = "execution output")),
+                Result.success(AgentResponse(content = """{"status":"PASS","summary":"ok","details":"ok"}""")),
+            ),
+        )
+        val sessionStore = RecordingSessionMemoryStore(
+            loadedState = SessionMemoryState(
+                messages = listOf(
+                    ConversationMessage.user("persisted old question"),
+                    ConversationMessage.assistant("persisted old answer"),
+                ),
+                workflowModeEnabled = true,
+                workflowRuntimeState = WorkflowRuntimeState(
+                    step = WorkflowStep.PLANNING_APPROVAL,
+                    originalUserPrompt = "original task",
+                    planningFeedback = emptyList(),
+                    executionFeedback = emptyList(),
+                    latestPlanningOutput = "old plan",
+                    approvedPlan = null,
+                    latestExecutionOutput = null,
+                ),
+            ),
+        )
+        val workflowStore = RecordingSelectableUserDefinedWorkflowStore(
+            workflows = listOf(UserWorkflowOption("workflow-default.json", "Default")),
+            workflowsByFileName = mapOf(
+                "workflow-default.json" to UserWorkflowDefinition(
+                    fileName = "workflow-default.json",
+                    name = "Default",
+                    planning = "Planning step",
+                    execution = "Execution step",
+                    validation = "Validation step",
+                ),
+            ),
+            activeFileName = "workflow-default.json",
+        )
+        val io = FakeCliIO(inputs = listOf("new detail", "1", "1", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            sessionMemoryStore = sessionStore,
+            userDefinedWorkflowStore = workflowStore,
+        )
+
+        controller.runInteractive()
+
+        val firstWorkflowRequest = repository.conversations.first()
+        assertEquals(
+            listOf(MessageRole.SYSTEM, MessageRole.USER),
+            firstWorkflowRequest.map { it.role },
+        )
+        val firstWorkflowPayload = firstWorkflowRequest.joinToString(separator = "\n") { message -> message.content }
+        assertFalse(firstWorkflowPayload.contains("persisted old question"))
+        assertFalse(firstWorkflowPayload.contains("persisted old answer"))
+        assertContains(firstWorkflowRequest.last().content, "original task")
+        assertContains(firstWorkflowRequest.last().content, "new detail")
     }
 
     @Test

@@ -85,6 +85,8 @@ time> <seconds> s
 - On interactive startup, the app restores persisted memory exactly as previously saved.
 - Workflow mode state and workflow runtime step state are persisted in the session snapshot and restored on startup.
 - Workflow mode runs a strict state machine: `User Input -> Planning -> Execution -> Validation`.
+- Workflow mode clears session conversation memory at the start of every planning/execution/validation attempt (including retries).
+- Workflow step continuity is carried by step prompt data (original request, approved plan, and accumulated feedback), not by prior step transcript carry-over.
 - Allowed extra transitions are `Execution -> Planning` (execution comment) and `Validation -> Execution` (validation fail/invalid JSON).
 - Planning and execution approvals use footer input: `1` approve, `2` cancel, any other non-blank input is treated as comment.
 - Planning and execution step responses use a JSON contract: `{"needs_user_input": boolean, "questions": string[], "answer": string}`.
