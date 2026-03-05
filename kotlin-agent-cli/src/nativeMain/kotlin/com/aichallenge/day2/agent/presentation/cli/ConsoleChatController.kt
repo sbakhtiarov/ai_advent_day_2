@@ -745,6 +745,11 @@ class ConsoleChatController(
 
         val answers = mutableListOf<WorkflowQuestionAnswer>()
         normalizedQuestions.forEachIndexed { index, question ->
+            dialogBlocks += formatWorkflowQuestion(
+                question = question,
+                index = index,
+                total = normalizedQuestions.size,
+            )
             while (true) {
                 renderScreen()
                 io.showCursor()
@@ -778,6 +783,23 @@ class ConsoleChatController(
         }
 
         return answers
+    }
+
+    private fun formatWorkflowQuestion(
+        question: WorkflowQuestion,
+        index: Int,
+        total: Int,
+    ): String {
+        return buildString {
+            appendLine("workflow> question ${index + 1}/$total")
+            appendLine("question> ${question.text}")
+            if (question.options.isNotEmpty()) {
+                appendLine("options:")
+                question.options.forEach { option ->
+                    appendLine("- $option")
+                }
+            }
+        }.trimEnd()
     }
 
     private fun readWorkflowApprovalDecision(prompt: String): WorkflowApprovalDecision {
@@ -1091,18 +1113,7 @@ class ConsoleChatController(
             return ""
         }
 
-        return buildString {
-            appendLine("$stepLabel needs additional user input.")
-            if (response.questions.isNotEmpty()) {
-                appendLine("Questions:")
-                response.questions.forEachIndexed { index, question ->
-                    appendLine("${index + 1}. ${question.text}")
-                    question.options.forEach { option ->
-                        appendLine("- $option")
-                    }
-                }
-            }
-        }.trimEnd()
+        return "$stepLabel needs additional user input."
     }
 
     private fun renderWorkflowValidationResponse(

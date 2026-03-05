@@ -1021,12 +1021,18 @@ class ConsoleChatControllerSessionMemoryTest {
 
         val output = io.outputText()
         assertFalse(output.contains("\"needs_user_input\""))
-        assertContains(output, "Questions:")
-        assertContains(output, "1. Who is the target audience?")
+        assertFalse(output.contains("Questions:"))
+        assertContains(output, "Planning needs additional user input.")
+        assertContains(output, "workflow> question 1/2")
+        assertContains(output, "question> Who is the target audience?")
         assertContains(output, "- Backend engineers")
-        assertContains(output, "2. What deadline should be used?")
+        assertContains(output, "workflow> question 2/2")
+        assertContains(output, "question> What deadline should be used?")
         assertContains(output, "- Friday")
-        assertFalse(output.contains("workflow> planning question"))
+        val answerPromptOneIndex = io.footerPrompts.indexOf("answer 1/2> ")
+        val answerPromptTwoIndex = io.footerPrompts.indexOf("answer 2/2> ")
+        assertTrue(answerPromptOneIndex >= 0)
+        assertTrue(answerPromptTwoIndex > answerPromptOneIndex)
     }
 
     @Test
@@ -1118,12 +1124,18 @@ class ConsoleChatControllerSessionMemoryTest {
 
         val output = io.outputText()
         assertFalse(output.contains("\"needs_user_input\""))
-        assertContains(output, "Questions:")
-        assertContains(output, "1. Which API base URL should be used?")
+        assertFalse(output.contains("Questions:"))
+        assertContains(output, "Execution needs additional user input.")
+        assertContains(output, "workflow> question 1/2")
+        assertContains(output, "question> Which API base URL should be used?")
         assertContains(output, "- https://api.example.com")
-        assertContains(output, "2. Which auth method should be used?")
+        assertContains(output, "workflow> question 2/2")
+        assertContains(output, "question> Which auth method should be used?")
         assertContains(output, "- OAuth2")
-        assertFalse(output.contains("workflow> execution question"))
+        val answerPromptOneIndex = io.footerPrompts.indexOf("answer 1/2> ")
+        val answerPromptTwoIndex = io.footerPrompts.indexOf("answer 2/2> ")
+        assertTrue(answerPromptOneIndex >= 0)
+        assertTrue(answerPromptTwoIndex > answerPromptOneIndex)
     }
 
     @Test
@@ -2644,6 +2656,7 @@ private class FakeCliIO(
     var hideThinkingIndicatorCalls: Int = 0
         private set
     val footerLabels = mutableListOf<String?>()
+    val footerPrompts = mutableListOf<String>()
 
     override fun clearScreen() = Unit
 
@@ -2658,6 +2671,7 @@ private class FakeCliIO(
     override fun readLine(prompt: String): String? = nextInput()
 
     override fun readLineInFooter(prompt: String, divider: String, footerLabel: String?): String? {
+        footerPrompts += prompt
         footerLabels += footerLabel
         return nextInput()
     }
