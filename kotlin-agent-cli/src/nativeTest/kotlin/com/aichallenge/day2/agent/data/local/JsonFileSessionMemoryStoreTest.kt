@@ -8,6 +8,8 @@ import com.aichallenge.day2.agent.domain.model.MemoryUsageSnapshot
 import com.aichallenge.day2.agent.domain.model.SessionMemoryState
 import com.aichallenge.day2.agent.domain.model.SubtopicBranchState
 import com.aichallenge.day2.agent.domain.model.TopicBranchState
+import com.aichallenge.day2.agent.domain.model.WorkflowRuntimeState
+import com.aichallenge.day2.agent.domain.model.WorkflowStep
 import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertContains
@@ -115,6 +117,29 @@ class JsonFileSessionMemoryStoreTest {
         store.save(state)
 
         assertEquals(true, store.load()?.workflowModeEnabled)
+    }
+
+    @Test
+    fun saveAndLoadRoundTripPreservesWorkflowRuntimeState() {
+        val filePath = uniqueSessionMemoryPath()
+        val store = JsonFileSessionMemoryStore(filePath)
+        val state = SessionMemoryState(
+            messages = emptyList(),
+            workflowModeEnabled = true,
+            workflowRuntimeState = WorkflowRuntimeState(
+                step = WorkflowStep.EXECUTION_APPROVAL,
+                originalUserPrompt = "Build feature",
+                planningFeedback = listOf("include rollback plan"),
+                executionFeedback = listOf("add test evidence"),
+                latestPlanningOutput = "Plan output",
+                approvedPlan = "Approved plan",
+                latestExecutionOutput = "Execution output",
+            ),
+        )
+
+        store.save(state)
+
+        assertEquals(state, store.load())
     }
 
     @Test

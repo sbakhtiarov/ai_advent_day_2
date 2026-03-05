@@ -9,6 +9,8 @@ import com.aichallenge.day2.agent.domain.model.MemoryEstimateSource
 import com.aichallenge.day2.agent.domain.model.MemoryUsageSnapshot
 import com.aichallenge.day2.agent.domain.model.MessageRole
 import com.aichallenge.day2.agent.domain.model.SessionMemoryState
+import com.aichallenge.day2.agent.domain.model.WorkflowRuntimeState
+import com.aichallenge.day2.agent.domain.model.WorkflowStep
 import kotlinx.serialization.Serializable
 
 @Serializable
@@ -20,6 +22,7 @@ data class SessionMemorySnapshotDto(
     val activeCompactionModeId: String? = null,
     val branchingState: PersistedBranchingMemoryStateDto? = null,
     val workflowModeEnabled: Boolean = false,
+    val workflowRuntimeState: PersistedWorkflowRuntimeStateDto? = null,
 )
 
 @Serializable
@@ -56,6 +59,17 @@ data class PersistedBranchingMemoryStateDto(
 )
 
 @Serializable
+data class PersistedWorkflowRuntimeStateDto(
+    val step: PersistedWorkflowStep,
+    val originalUserPrompt: String = "",
+    val planningFeedback: List<String> = emptyList(),
+    val executionFeedback: List<String> = emptyList(),
+    val latestPlanningOutput: String? = null,
+    val approvedPlan: String? = null,
+    val latestExecutionOutput: String? = null,
+)
+
+@Serializable
 data class PersistedTopicBranchStateDto(
     val key: String,
     val displayName: String,
@@ -77,6 +91,13 @@ enum class PersistedMemoryEstimateSource {
 }
 
 @Serializable
+enum class PersistedWorkflowStep {
+    USER_INPUT,
+    PLANNING_APPROVAL,
+    EXECUTION_APPROVAL,
+}
+
+@Serializable
 data class SessionSummarySnapshotDto(
     val version: Int,
     val compactedSummary: PersistedCompactedSessionSummaryDto,
@@ -90,6 +111,7 @@ fun SessionMemoryState.toPersistedDto(version: Int): SessionMemorySnapshotDto = 
     activeCompactionModeId = activeCompactionModeId,
     branchingState = branchingState?.toPersistedDto(),
     workflowModeEnabled = workflowModeEnabled,
+    workflowRuntimeState = workflowRuntimeState?.toPersistedDto(),
 )
 
 fun SessionMemorySnapshotDto.toDomainModel(): SessionMemoryState = SessionMemoryState(
@@ -99,6 +121,7 @@ fun SessionMemorySnapshotDto.toDomainModel(): SessionMemoryState = SessionMemory
     activeCompactionModeId = activeCompactionModeId,
     branchingState = branchingState?.toDomainModel(),
     workflowModeEnabled = workflowModeEnabled,
+    workflowRuntimeState = workflowRuntimeState?.toDomainModel(),
 )
 
 fun ConversationMessage.toPersistedDto(): PersistedConversationMessageDto = PersistedConversationMessageDto(
@@ -192,3 +215,35 @@ private fun PersistedSubtopicBranchStateDto.toDomainModel(): SubtopicBranchState
     displayName = displayName,
     messages = messages.map { message -> message.toDomainModel() },
 )
+
+private fun WorkflowRuntimeState.toPersistedDto(): PersistedWorkflowRuntimeStateDto = PersistedWorkflowRuntimeStateDto(
+    step = step.toPersistedStep(),
+    originalUserPrompt = originalUserPrompt,
+    planningFeedback = planningFeedback.toList(),
+    executionFeedback = executionFeedback.toList(),
+    latestPlanningOutput = latestPlanningOutput,
+    approvedPlan = approvedPlan,
+    latestExecutionOutput = latestExecutionOutput,
+)
+
+private fun PersistedWorkflowRuntimeStateDto.toDomainModel(): WorkflowRuntimeState = WorkflowRuntimeState(
+    step = step.toDomainStep(),
+    originalUserPrompt = originalUserPrompt,
+    planningFeedback = planningFeedback.toList(),
+    executionFeedback = executionFeedback.toList(),
+    latestPlanningOutput = latestPlanningOutput,
+    approvedPlan = approvedPlan,
+    latestExecutionOutput = latestExecutionOutput,
+)
+
+private fun WorkflowStep.toPersistedStep(): PersistedWorkflowStep = when (this) {
+    WorkflowStep.USER_INPUT -> PersistedWorkflowStep.USER_INPUT
+    WorkflowStep.PLANNING_APPROVAL -> PersistedWorkflowStep.PLANNING_APPROVAL
+    WorkflowStep.EXECUTION_APPROVAL -> PersistedWorkflowStep.EXECUTION_APPROVAL
+}
+
+private fun PersistedWorkflowStep.toDomainStep(): WorkflowStep = when (this) {
+    PersistedWorkflowStep.USER_INPUT -> WorkflowStep.USER_INPUT
+    PersistedWorkflowStep.PLANNING_APPROVAL -> WorkflowStep.PLANNING_APPROVAL
+    PersistedWorkflowStep.EXECUTION_APPROVAL -> WorkflowStep.EXECUTION_APPROVAL
+}

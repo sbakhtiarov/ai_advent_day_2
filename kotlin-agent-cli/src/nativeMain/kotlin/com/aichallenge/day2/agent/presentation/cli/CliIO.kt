@@ -34,6 +34,7 @@ interface CliIO {
     fun showThinkingIndicator() {}
     fun updateThinkingIndicator(progressText: String) {}
     fun hideThinkingIndicator() {}
+    fun updateFooterStatusLabel(label: String?) {}
     fun openCompactionMenu(options: List<String>, currentSelection: Int): Int?
     fun openProfileMenu(options: List<String>, currentSelection: Int): Int?
     fun openWorkflowMenu(options: List<String>, currentSelection: Int): Int?
@@ -84,7 +85,16 @@ object StdCliIO : CliIO {
         val suffix = progressText.trim().takeIf { it.isNotEmpty() }?.let { " $it" }.orEmpty()
         print('\r')
         print("\u001B[2K")
-        print("  ${THINKING_LABEL_COLOR}Thinking...$suffix${ANSI_RESET}")
+        print("$THINKING_LABEL_PADDING${THINKING_LABEL_COLOR}Thinking...$suffix${ANSI_RESET}")
+        fflush(stdout)
+    }
+
+    @OptIn(ExperimentalForeignApi::class)
+    override fun updateFooterStatusLabel(label: String?) {
+        val normalizedLabel = sanitizeSingleLineInput(label).takeIf { it.isNotBlank() } ?: return
+        print('\r')
+        print("\u001B[2K")
+        print(colorizeFooterLabel(normalizedLabel))
         fflush(stdout)
     }
 
@@ -616,7 +626,7 @@ object StdCliIO : CliIO {
     }
 
     private fun colorizeDivider(divider: String): String = "$DIVIDER_COLOR$divider$ANSI_RESET"
-    private fun colorizeFooterLabel(label: String): String = "$FOOTER_LABEL_COLOR$label$ANSI_RESET"
+    private fun colorizeFooterLabel(label: String): String = "$THINKING_LABEL_PADDING$FOOTER_LABEL_COLOR$label$ANSI_RESET"
 
     @OptIn(ExperimentalForeignApi::class)
     private fun readClipboardText(): String? = memScoped {
@@ -854,6 +864,7 @@ object StdCliIO : CliIO {
     private const val DIVIDER_COLOR = "\u001B[38;5;240m"
     private const val FOOTER_LABEL_COLOR = "\u001B[38;5;196m"
     private const val THINKING_LABEL_COLOR = "\u001B[38;5;45m"
+    private const val THINKING_LABEL_PADDING = "  "
     private const val OPTION_SELECTED_COLOR = "\u001B[38;5;39m"
     private const val ANSI_RESET = "\u001B[0m"
     private const val FOOTER_RESERVED_INPUT_LINES = 3

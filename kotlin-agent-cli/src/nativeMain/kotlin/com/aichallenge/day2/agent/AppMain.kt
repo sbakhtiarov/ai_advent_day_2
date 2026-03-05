@@ -52,8 +52,8 @@ private suspend fun runApp(args: Array<String>): Int {
     val sessionMemoryCompactionCoordinators = mapOf(
         SessionCompactionMode.ROLLING_SUMMARY to SessionMemoryCompactionCoordinator(
             startPolicy = RollingWindowCompactionStartPolicy(
-                threshold = 12,
-                compactCount = 10,
+                threshold = 20,
+                compactCount = 18,
                 keepCount = 2,
             ),
             strategy = RollingSummaryCompactionStrategy(

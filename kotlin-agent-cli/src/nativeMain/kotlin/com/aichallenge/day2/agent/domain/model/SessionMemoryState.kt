@@ -7,6 +7,23 @@ data class SessionMemoryState(
     val activeCompactionModeId: String? = null,
     val branchingState: BranchingMemoryState? = null,
     val workflowModeEnabled: Boolean = false,
+    val workflowRuntimeState: WorkflowRuntimeState? = null,
+)
+
+enum class WorkflowStep {
+    USER_INPUT,
+    PLANNING_APPROVAL,
+    EXECUTION_APPROVAL,
+}
+
+data class WorkflowRuntimeState(
+    val step: WorkflowStep = WorkflowStep.USER_INPUT,
+    val originalUserPrompt: String = "",
+    val planningFeedback: List<String> = emptyList(),
+    val executionFeedback: List<String> = emptyList(),
+    val latestPlanningOutput: String? = null,
+    val approvedPlan: String? = null,
+    val latestExecutionOutput: String? = null,
 )
 
 data class CompactedSessionSummary(

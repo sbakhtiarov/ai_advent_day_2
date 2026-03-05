@@ -83,7 +83,15 @@ time> <seconds> s
 - Profile memory distillation captures only explicit user-provided facts (no inferred assumptions), and the assistant asks 1–2 concise relevant preference questions when needed to fill missing preferences.
 - Session snapshot persistence includes both conversation messages and a context-usage estimate.
 - On interactive startup, the app restores persisted memory exactly as previously saved.
-- Workflow mode state is persisted in the session snapshot and restored on startup.
+- Workflow mode state and workflow runtime step state are persisted in the session snapshot and restored on startup.
+- Workflow mode runs a strict state machine: `User Input -> Planning -> Execution -> Validation`.
+- Allowed extra transitions are `Execution -> Planning` (execution comment) and `Validation -> Execution` (validation fail/invalid JSON).
+- Planning and execution approvals use footer input: `1` approve, `2` cancel, any other non-blank input is treated as comment.
+- Planning and execution step responses use a JSON contract: `{"needs_user_input": boolean, "questions": string[], "answer": string}`.
+- If `needs_user_input=true`, the CLI asks each item from `questions` one by one and reruns the same step with collected Q/A feedback.
+- Validation output is parsed as JSON contract: `{"status":"PASS|FAIL","summary":"...","details":"..."}`.
+- Validation `PASS` prints completion summary + execution result and disables workflow mode.
+- Validation `FAIL` or invalid JSON appends validation feedback and reruns execution.
 - `/workflow` enables workflow mode by opening workflow selection when disabled, and disables workflow mode immediately when already enabled.
 - Changing active workflow via `/workflow` resets current in-memory conversation context.
 - When workflow mode is enabled, the footer shows a red `Workflow` label below the bottom divider.
@@ -116,7 +124,7 @@ time> <seconds> s
 - `/memory` - show estimated session-memory context usage
 - `/compact` - choose compaction strategy (`Rolling summary`, `Sliding window`, `Fact map`, or `Branching`)
 - `/profile` - choose active user profile (`user-profile-<name>.json`)
-- `/workflow` - enable workflow mode with workflow selection (toggle off when already enabled)
+- `/workflow` - enable strict workflow mode with workflow selection (toggle off when already enabled)
 - `/reset` - clear conversation memory and transcript, then persist an empty session snapshot while preserving current mode flags (working/profile remain intact)
 - `/exit` - close app
 - `@<path>` - attach file path as dialog reference; file text is read only when the next prompt is submitted

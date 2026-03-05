@@ -16,6 +16,8 @@ import com.aichallenge.day2.agent.domain.model.TokenUsage
 import com.aichallenge.day2.agent.domain.model.UserProfileOption
 import com.aichallenge.day2.agent.domain.model.UserWorkflowDefinition
 import com.aichallenge.day2.agent.domain.model.UserWorkflowOption
+import com.aichallenge.day2.agent.domain.model.WorkflowRuntimeState
+import com.aichallenge.day2.agent.domain.model.WorkflowStep
 import com.aichallenge.day2.agent.domain.model.WorkingMemoryState
 import com.aichallenge.day2.agent.domain.repository.ProfileMemoryStore
 import com.aichallenge.day2.agent.domain.repository.SessionMemoryStore
@@ -36,6 +38,12 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.roundToLong
@@ -100,6 +108,8 @@ class ConsoleChatController(
     private var userDefinedWorkflowInitialized = false
     private var workflowModeEnabled = false
     private var activeWorkflow: UserWorkflowDefinition? = null
+    private var workflowRuntimeState: WorkflowRuntimeState? = null
+    private var workflowUiStep: WorkflowUiStep? = null
     private val availableCompactionModes = SessionCompactionMode.entries.filter { mode ->
         compactionCoordinators.containsKey(mode)
     }
@@ -131,7 +141,7 @@ class ConsoleChatController(
                 val input = io.readLineInFooter(
                     prompt = "> ",
                     divider = inputDivider,
-                    footerLabel = if (workflowModeEnabled) WORKFLOW_FOOTER_LABEL else null,
+                    footerLabel = workflowFooterLabel(),
                 ) ?: break
                 if (input.isBlank()) {
                     continue
@@ -201,6 +211,39 @@ class ConsoleChatController(
         }
         dialogBlocks += formatUserPrompt(preparedPrompt.displayPrompt)
 
+        val workflow = activeWorkflow
+        if (workflowModeEnabled && workflow != null) {
+            handleWorkflowInput(
+                workflow = workflow,
+                preparedPrompt = preparedPrompt,
+            )
+            return
+        }
+
+        if (workflowModeEnabled && workflow == null) {
+            workflowModeEnabled = false
+            workflowRuntimeState = null
+            workflowUiStep = null
+            persistMemorySnapshot()
+            dialogBlocks += "system> workflow mode disabled: no active workflow found"
+        }
+
+        executeModelTurn(
+            requestPrompt = preparedPrompt.requestPrompt,
+            userPromptForWorkingMemory = preparedPrompt.displayPrompt,
+            userPromptForProfileMemory = preparedPrompt.displayPrompt,
+            effectiveSystemPrompt = systemPrompt,
+        )
+    }
+
+    private suspend fun executeModelTurn(
+        requestPrompt: String,
+        userPromptForWorkingMemory: String,
+        userPromptForProfileMemory: String?,
+        effectiveSystemPrompt: String,
+        renderAssistantResponse: Boolean = true,
+    ): TurnExecutionResult? {
+        io.updateFooterStatusLabel(workflowFooterLabel())
         io.showThinkingIndicator()
         val startedAt = TimeSource.Monotonic.markNow()
         io.updateThinkingIndicator(
@@ -209,6 +252,8 @@ class ConsoleChatController(
                 elapsedMillis = 0L,
             ),
         )
+
+        var result: TurnExecutionResult? = null
         try {
             coroutineScope {
                 val progressJob = launch {
@@ -228,37 +273,54 @@ class ConsoleChatController(
                 }
 
                 try {
-                    runCatching {
+                    result = runCatching {
                         val turnResult = if (activeCompactionMode == SessionCompactionMode.BRANCHING) {
-                            executeBranchingTurn(preparedPrompt.requestPrompt)
+                            executeBranchingTurn(
+                                requestPrompt = requestPrompt,
+                                effectiveSystemPrompt = effectiveSystemPrompt,
+                            )
                         } else {
-                            executeLinearTurn(preparedPrompt.requestPrompt)
+                            executeLinearTurn(
+                                requestPrompt = requestPrompt,
+                                effectiveSystemPrompt = effectiveSystemPrompt,
+                            )
                         }
                         updateWorkingMemoryAfterSuccessfulTurn(
-                            userPrompt = preparedPrompt.displayPrompt,
+                            userPrompt = userPromptForWorkingMemory,
                             assistantResponse = turnResult.response.content,
                         )
-                        updateProfileMemoryAfterSuccessfulTurn(
-                            userPrompt = preparedPrompt.displayPrompt,
-                        )
+                        userPromptForProfileMemory
+                            ?.trim()
+                            ?.takeIf { value -> value.isNotEmpty() }
+                            ?.let { normalizedPrompt ->
+                                updateProfileMemoryAfterSuccessfulTurn(
+                                    userPrompt = normalizedPrompt,
+                                )
+                            }
                         memoryUsageSnapshot = buildUsageSnapshotAfterSuccessfulTurn(
                             responseContent = turnResult.response.content,
                             usage = turnResult.response.usage,
-                            messages = activeContextMessages(),
+                            messages = activeContextMessages(
+                                systemPromptOverride = effectiveSystemPrompt,
+                            ),
                         )
                         val elapsedSeconds = startedAt.elapsedNow().inWholeMilliseconds / 1000.0
+                        val finalizedTurnResult = turnResult.copy(elapsedSeconds = elapsedSeconds)
                         persistMemorySnapshot()
                         pendingFileReferences.clear()
-                        dialogBlocks += formatAssistantResponse(turnResult.response.content, turnResult.response.usage, elapsedSeconds)
+                        if (renderAssistantResponse) {
+                            dialogBlocks += formatAssistantResponse(turnResult.response.content, turnResult.response.usage, elapsedSeconds)
+                        }
                         if (turnResult.compacted) {
                             dialogBlocks += "system> session memory compacted"
                         }
                         turnResult.systemMessages.forEach { systemMessage ->
                             dialogBlocks += systemMessage
                         }
+                        finalizedTurnResult
                     }.onFailure { throwable ->
                         dialogBlocks += "error> ${throwable.message ?: "Unexpected error"}"
-                    }
+                    }.getOrNull()
                 } finally {
                     progressJob.cancelAndJoin()
                 }
@@ -266,12 +328,837 @@ class ConsoleChatController(
         } finally {
             io.hideThinkingIndicator()
         }
+
+        return result
     }
 
-    private suspend fun executeLinearTurn(requestPrompt: String): TurnExecutionResult {
+    private suspend fun handleWorkflowInput(
+        workflow: UserWorkflowDefinition,
+        preparedPrompt: PreparedPrompt,
+    ) {
+        val normalizedState = normalizedWorkflowRuntimeState(workflowRuntimeState)
+        val nextState = when (normalizedState.step) {
+            WorkflowStep.USER_INPUT -> {
+                WorkflowRuntimeState(
+                    step = WorkflowStep.PLANNING_APPROVAL,
+                    originalUserPrompt = preparedPrompt.requestPrompt,
+                )
+            }
+
+            WorkflowStep.PLANNING_APPROVAL -> {
+                normalizedState.copy(
+                    planningFeedback = normalizedState.planningFeedback + preparedPrompt.requestPrompt,
+                )
+            }
+
+            WorkflowStep.EXECUTION_APPROVAL -> {
+                normalizedState.copy(
+                    executionFeedback = normalizedState.executionFeedback + preparedPrompt.requestPrompt,
+                )
+            }
+        }
+
+        workflowRuntimeState = nextState
+        workflowUiStep = when (nextState.step) {
+            WorkflowStep.USER_INPUT -> WorkflowUiStep.USER_INPUT
+            WorkflowStep.PLANNING_APPROVAL -> WorkflowUiStep.PLANNING
+            WorkflowStep.EXECUTION_APPROVAL -> WorkflowUiStep.EXECUTION
+        }
+        persistMemorySnapshot()
+
+        when (nextState.step) {
+            WorkflowStep.PLANNING_APPROVAL -> {
+                runPlanningFlow(
+                    workflow = workflow,
+                    initialState = nextState,
+                    initialProfileInput = preparedPrompt.displayPrompt,
+                )
+            }
+
+            WorkflowStep.EXECUTION_APPROVAL -> {
+                runExecutionFlow(
+                    workflow = workflow,
+                    initialState = nextState,
+                    initialProfileInput = preparedPrompt.displayPrompt,
+                )
+            }
+
+            WorkflowStep.USER_INPUT -> Unit
+        }
+    }
+
+    private suspend fun runPlanningFlow(
+        workflow: UserWorkflowDefinition,
+        initialState: WorkflowRuntimeState,
+        initialProfileInput: String?,
+    ) {
+        workflowUiStep = WorkflowUiStep.PLANNING
+        var state = initialState
+        val pendingProfileInputs = mutableListOf<String>().apply {
+            initialProfileInput?.trim()?.takeIf { value -> value.isNotEmpty() }?.let(::add)
+        }
+
+        while (true) {
+            val planningPrompt = buildPlanningWorkflowPrompt(state)
+            val turnResult = executeModelTurn(
+                requestPrompt = planningPrompt,
+                userPromptForWorkingMemory = planningPrompt,
+                userPromptForProfileMemory = null,
+                effectiveSystemPrompt = composeWorkflowSystemPrompt(
+                    workflow = workflow,
+                    stepPrompt = workflow.planning,
+                    responseContract = WORKFLOW_STEP_RESPONSE_CONTRACT_PROMPT,
+                ),
+                renderAssistantResponse = false,
+            ) ?: return
+
+            pendingProfileInputs.forEach { profileInput ->
+                updateProfileMemoryAfterSuccessfulTurn(profileInput)
+            }
+            pendingProfileInputs.clear()
+
+            val structuredResponse = parseWorkflowStepResponse(turnResult.response.content)
+            renderWorkflowStepResponse(
+                stepLabel = "Planning",
+                response = structuredResponse,
+                usage = turnResult.response.usage,
+                elapsedSeconds = turnResult.elapsedSeconds,
+            )
+            if (structuredResponse.needsUserInput) {
+                if (structuredResponse.questions.isEmpty()) {
+                    dialogBlocks += "system> planning requested user input but no questions were provided"
+                } else {
+                    val questionAnswers = collectWorkflowQuestionAnswers(
+                        questions = structuredResponse.questions,
+                    ) ?: return
+                    val feedbackEntries = questionAnswers.map { questionAnswer ->
+                        "Question: ${questionAnswer.question}\nAnswer: ${questionAnswer.answer}"
+                    }
+                    state = state.copy(
+                        planningFeedback = state.planningFeedback + feedbackEntries,
+                    )
+                    workflowRuntimeState = state
+                    persistMemorySnapshot()
+                    pendingProfileInputs += questionAnswers.map { questionAnswer -> questionAnswer.answer }
+                    continue
+                }
+            }
+
+            val planningOutput = structuredResponse.answer
+                .trim()
+                .takeIf { value -> value.isNotEmpty() }
+                ?: turnResult.response.content.trim()
+
+            state = state.copy(
+                step = WorkflowStep.PLANNING_APPROVAL,
+                latestPlanningOutput = planningOutput,
+                approvedPlan = null,
+                latestExecutionOutput = null,
+                executionFeedback = emptyList(),
+            )
+            workflowRuntimeState = state
+            persistMemorySnapshot()
+
+            when (val decision = readWorkflowApprovalDecision(WORKFLOW_PLANNING_APPROVAL_PROMPT)) {
+                WorkflowApprovalDecision.APPROVE -> {
+                    val approvedPlan = state.latestPlanningOutput?.trim().orEmpty()
+                    if (approvedPlan.isBlank()) {
+                        dialogBlocks += "system> planning output is empty; add feedback to rerun planning"
+                        return
+                    }
+                    state = state.copy(
+                        step = WorkflowStep.EXECUTION_APPROVAL,
+                        approvedPlan = approvedPlan,
+                        executionFeedback = emptyList(),
+                        latestExecutionOutput = null,
+                    )
+                    workflowRuntimeState = state
+                    workflowUiStep = WorkflowUiStep.EXECUTION
+                    persistMemorySnapshot()
+                    runExecutionFlow(
+                        workflow = workflow,
+                        initialState = state,
+                        initialProfileInput = null,
+                    )
+                    return
+                }
+
+                WorkflowApprovalDecision.CANCEL -> {
+                    workflowUiStep = WorkflowUiStep.PLANNING
+                    persistMemorySnapshot()
+                    dialogBlocks += "system> planning paused; enter new input to rerun planning"
+                    return
+                }
+
+                is WorkflowApprovalDecision.COMMENT -> {
+                    dialogBlocks += formatUserPrompt(decision.text)
+                    state = state.copy(
+                        planningFeedback = state.planningFeedback + decision.text,
+                    )
+                    workflowRuntimeState = state
+                    workflowUiStep = WorkflowUiStep.PLANNING
+                    persistMemorySnapshot()
+                    pendingProfileInputs += decision.text
+                }
+            }
+        }
+    }
+
+    private suspend fun runExecutionFlow(
+        workflow: UserWorkflowDefinition,
+        initialState: WorkflowRuntimeState,
+        initialProfileInput: String?,
+    ) {
+        workflowUiStep = WorkflowUiStep.EXECUTION
+        var state = initialState
+        val pendingProfileInputs = mutableListOf<String>().apply {
+            initialProfileInput?.trim()?.takeIf { value -> value.isNotEmpty() }?.let(::add)
+        }
+
+        while (true) {
+            val executionPrompt = buildExecutionWorkflowPrompt(state)
+            val executionResult = executeModelTurn(
+                requestPrompt = executionPrompt,
+                userPromptForWorkingMemory = executionPrompt,
+                userPromptForProfileMemory = null,
+                effectiveSystemPrompt = composeWorkflowSystemPrompt(
+                    workflow = workflow,
+                    stepPrompt = workflow.execution,
+                    responseContract = WORKFLOW_STEP_RESPONSE_CONTRACT_PROMPT,
+                ),
+                renderAssistantResponse = false,
+            ) ?: return
+
+            pendingProfileInputs.forEach { profileInput ->
+                updateProfileMemoryAfterSuccessfulTurn(profileInput)
+            }
+            pendingProfileInputs.clear()
+
+            val structuredResponse = parseWorkflowStepResponse(executionResult.response.content)
+            renderWorkflowStepResponse(
+                stepLabel = "Execution",
+                response = structuredResponse,
+                usage = executionResult.response.usage,
+                elapsedSeconds = executionResult.elapsedSeconds,
+            )
+            if (structuredResponse.needsUserInput) {
+                if (structuredResponse.questions.isEmpty()) {
+                    dialogBlocks += "system> execution requested user input but no questions were provided"
+                } else {
+                    val questionAnswers = collectWorkflowQuestionAnswers(
+                        questions = structuredResponse.questions,
+                    ) ?: return
+                    val feedbackEntries = questionAnswers.map { questionAnswer ->
+                        "Question: ${questionAnswer.question}\nAnswer: ${questionAnswer.answer}"
+                    }
+                    state = state.copy(
+                        executionFeedback = state.executionFeedback + feedbackEntries,
+                    )
+                    workflowRuntimeState = state
+                    persistMemorySnapshot()
+                    pendingProfileInputs += questionAnswers.map { questionAnswer -> questionAnswer.answer }
+                    continue
+                }
+            }
+
+            val executionOutput = structuredResponse.answer
+                .trim()
+                .takeIf { value -> value.isNotEmpty() }
+                ?: executionResult.response.content.trim()
+
+            state = state.copy(
+                step = WorkflowStep.EXECUTION_APPROVAL,
+                latestExecutionOutput = executionOutput,
+            )
+            workflowRuntimeState = state
+            persistMemorySnapshot()
+
+            when (val decision = readWorkflowApprovalDecision(WORKFLOW_EXECUTION_APPROVAL_PROMPT)) {
+                WorkflowApprovalDecision.APPROVE -> {
+                    workflowUiStep = WorkflowUiStep.VALIDATION
+                    val validationOutcome = runValidationStep(
+                        workflow = workflow,
+                        state = state,
+                    ) ?: return
+                    if (validationOutcome.status == WorkflowValidationStatus.PASS) {
+                        completeWorkflowAfterValidation(
+                            outcome = validationOutcome,
+                            executionResult = state.latestExecutionOutput.orEmpty(),
+                        )
+                        return
+                    }
+
+                    state = state.copy(
+                        executionFeedback = state.executionFeedback + validationOutcome.feedback,
+                    )
+                    workflowRuntimeState = state
+                    workflowUiStep = WorkflowUiStep.EXECUTION
+                    persistMemorySnapshot()
+                }
+
+                WorkflowApprovalDecision.CANCEL -> {
+                    workflowUiStep = WorkflowUiStep.EXECUTION
+                    persistMemorySnapshot()
+                    dialogBlocks += "system> execution paused; enter new input to rerun execution"
+                    return
+                }
+
+                is WorkflowApprovalDecision.COMMENT -> {
+                    dialogBlocks += formatUserPrompt(decision.text)
+                    state = state.copy(
+                        step = WorkflowStep.PLANNING_APPROVAL,
+                        planningFeedback = state.planningFeedback + decision.text,
+                    )
+                    workflowRuntimeState = state
+                    workflowUiStep = WorkflowUiStep.PLANNING
+                    persistMemorySnapshot()
+                    runPlanningFlow(
+                        workflow = workflow,
+                        initialState = state,
+                        initialProfileInput = decision.text,
+                    )
+                    return
+                }
+            }
+        }
+    }
+
+    private suspend fun runValidationStep(
+        workflow: UserWorkflowDefinition,
+        state: WorkflowRuntimeState,
+    ): WorkflowValidationOutcome? {
+        workflowUiStep = WorkflowUiStep.VALIDATION
+        val executionOutput = state.latestExecutionOutput?.trim().orEmpty()
+        if (executionOutput.isEmpty()) {
+            return WorkflowValidationOutcome(
+                status = WorkflowValidationStatus.FAIL,
+                summary = "Validation failed because execution output is empty.",
+                details = null,
+                feedback = "Validation failed because execution output is empty.",
+            )
+        }
+
+        val validationPrompt = buildValidationWorkflowPrompt(state)
+        val validationResult = executeModelTurn(
+            requestPrompt = validationPrompt,
+            userPromptForWorkingMemory = validationPrompt,
+            userPromptForProfileMemory = null,
+            effectiveSystemPrompt = composeWorkflowSystemPrompt(
+                workflow = workflow,
+                stepPrompt = workflow.validation,
+                responseContract = WORKFLOW_VALIDATION_RESPONSE_CONTRACT_PROMPT,
+            ),
+            renderAssistantResponse = false,
+        ) ?: return null
+
+        val parsedOutcome = parseWorkflowValidationOutcome(validationResult.response.content)
+        renderWorkflowValidationResponse(
+            outcome = parsedOutcome,
+            usage = validationResult.response.usage,
+            elapsedSeconds = validationResult.elapsedSeconds,
+        )
+        return parsedOutcome
+    }
+
+    private fun completeWorkflowAfterValidation(
+        outcome: WorkflowValidationOutcome,
+        executionResult: String,
+    ) {
+        val summary = outcome.summary.trim().ifEmpty { "Validation passed." }
+        val details = outcome.details?.trim()?.takeIf { value -> value.isNotEmpty() }
+        val completionBlock = buildString {
+            appendLine("workflow> completed")
+            appendLine("summary> $summary")
+            if (details != null) {
+                appendLine("details> $details")
+            }
+            appendLine("execution result:")
+            append(executionResult)
+        }.trimEnd()
+        dialogBlocks += completionBlock
+        workflowModeEnabled = false
+        workflowRuntimeState = null
+        workflowUiStep = null
+        persistMemorySnapshot()
+    }
+
+    private fun composeWorkflowSystemPrompt(
+        workflow: UserWorkflowDefinition,
+        stepPrompt: String,
+        responseContract: String? = null,
+    ): String {
+        return listOfNotNull(
+            systemPrompt.trim().takeIf { value -> value.isNotEmpty() },
+            workflow.basePrompt?.trim()?.takeIf { value -> value.isNotEmpty() },
+            stepPrompt.trim().takeIf { value -> value.isNotEmpty() },
+            responseContract?.trim()?.takeIf { value -> value.isNotEmpty() },
+        ).joinToString(separator = "\n\n")
+    }
+
+    private fun buildPlanningWorkflowPrompt(state: WorkflowRuntimeState): String {
+        return buildString {
+            appendLine("User request:")
+            appendLine(state.originalUserPrompt)
+            if (state.planningFeedback.isNotEmpty()) {
+                appendLine()
+                appendLine("User feedback to incorporate into planning:")
+                state.planningFeedback.forEachIndexed { index, feedback ->
+                    appendLine("${index + 1}. $feedback")
+                }
+            }
+        }.trimEnd()
+    }
+
+    private fun buildExecutionWorkflowPrompt(state: WorkflowRuntimeState): String {
+        val approvedPlan = state.approvedPlan?.trim().takeIf { value -> !value.isNullOrEmpty() }
+            ?: state.latestPlanningOutput?.trim().takeIf { value -> !value.isNullOrEmpty() }
+            ?: ""
+        return buildString {
+            appendLine("Approved execution plan:")
+            appendLine(approvedPlan)
+            if (state.executionFeedback.isNotEmpty()) {
+                appendLine()
+                appendLine("User or validator feedback to incorporate into execution:")
+                state.executionFeedback.forEachIndexed { index, feedback ->
+                    appendLine("${index + 1}. $feedback")
+                }
+            }
+        }.trimEnd()
+    }
+
+    private fun buildValidationWorkflowPrompt(state: WorkflowRuntimeState): String {
+        return buildString {
+            appendLine("Execution result to validate:")
+            append(state.latestExecutionOutput.orEmpty())
+        }.trimEnd()
+    }
+
+    private fun collectWorkflowQuestionAnswers(
+        questions: List<WorkflowQuestion>,
+    ): List<WorkflowQuestionAnswer>? {
+        val normalizedQuestions = questions.mapNotNull { value ->
+            normalizeWorkflowQuestion(value)
+        }
+        if (normalizedQuestions.isEmpty()) {
+            return emptyList()
+        }
+
+        val answers = mutableListOf<WorkflowQuestionAnswer>()
+        normalizedQuestions.forEachIndexed { index, question ->
+            while (true) {
+                renderScreen()
+                io.showCursor()
+                val rawAnswer = try {
+                    io.readLineInFooter(
+                        prompt = "answer ${index + 1}/${normalizedQuestions.size}> ",
+                        divider = inputDivider,
+                        footerLabel = workflowFooterLabel(),
+                    )
+                } finally {
+                    io.hideCursor()
+                }
+
+                if (rawAnswer == null) {
+                    return null
+                }
+
+                val answer = rawAnswer.trim()
+                if (answer.isEmpty()) {
+                    dialogBlocks += "system> answer must not be empty"
+                    continue
+                }
+
+                dialogBlocks += formatUserPrompt(answer)
+                answers += WorkflowQuestionAnswer(
+                    question = question.text,
+                    answer = answer,
+                )
+                break
+            }
+        }
+
+        return answers
+    }
+
+    private fun readWorkflowApprovalDecision(prompt: String): WorkflowApprovalDecision {
+        dialogBlocks += prompt
+        renderScreen()
+        io.showCursor()
+        val input = try {
+            io.readLineInFooter(
+                prompt = WORKFLOW_APPROVAL_INPUT_PROMPT,
+                divider = inputDivider,
+                footerLabel = workflowFooterLabel(),
+            )
+        } finally {
+            io.hideCursor()
+        }
+        return parseWorkflowApprovalDecision(input)
+    }
+
+    private fun workflowFooterLabel(): String? {
+        if (!workflowModeEnabled) {
+            return null
+        }
+        val step = workflowUiStep ?: WorkflowUiStep.USER_INPUT
+        return "Workflow: ${step.label}"
+    }
+
+    private fun parseWorkflowApprovalDecision(input: String?): WorkflowApprovalDecision {
+        val normalized = input?.trim().orEmpty()
+        return when (normalized) {
+            "1" -> WorkflowApprovalDecision.APPROVE
+            "2" -> WorkflowApprovalDecision.CANCEL
+            else -> {
+                if (normalized.isEmpty()) {
+                    WorkflowApprovalDecision.CANCEL
+                } else {
+                    WorkflowApprovalDecision.COMMENT(normalized)
+                }
+            }
+        }
+    }
+
+    private fun parseWorkflowValidationOutcome(rawContent: String): WorkflowValidationOutcome {
+        val parsedObject = parseValidationJsonObject(rawContent)
+        if (parsedObject == null) {
+            return WorkflowValidationOutcome(
+                status = WorkflowValidationStatus.FAIL,
+                summary = "Validation output is not valid JSON.",
+                details = rawContent.trim().takeIf { value -> value.isNotEmpty() },
+                feedback = "Validation failed: output is not valid JSON.\n$rawContent",
+            )
+        }
+
+        val status = parsedObject["status"]?.jsonPrimitive?.contentOrNull
+            ?.trim()
+            ?.uppercase()
+        val summary = parsedObject["summary"]?.jsonPrimitive?.contentOrNull
+            ?.trim()
+            .orEmpty()
+        val details = parsedObject["details"]?.jsonPrimitive?.contentOrNull
+            ?.trim()
+            ?.takeIf { value -> value.isNotEmpty() }
+
+        return when (status) {
+            "PASS" -> WorkflowValidationOutcome(
+                status = WorkflowValidationStatus.PASS,
+                summary = summary.ifEmpty { "Validation passed." },
+                details = details,
+                feedback = "",
+            )
+
+            "FAIL" -> {
+                val resolvedSummary = summary.ifEmpty { "Validation failed." }
+                val feedback = buildString {
+                    append("Validation failed: ")
+                    append(resolvedSummary)
+                    if (details != null) {
+                        append("\nDetails: ")
+                        append(details)
+                    }
+                }
+                WorkflowValidationOutcome(
+                    status = WorkflowValidationStatus.FAIL,
+                    summary = resolvedSummary,
+                    details = details,
+                    feedback = feedback,
+                )
+            }
+
+            else -> WorkflowValidationOutcome(
+                status = WorkflowValidationStatus.FAIL,
+                summary = "Validation output has invalid or missing status.",
+                details = rawContent.trim().takeIf { value -> value.isNotEmpty() },
+                feedback = "Validation failed: output has invalid or missing status.\n$rawContent",
+            )
+        }
+    }
+
+    private fun parseValidationJsonObject(rawContent: String): JsonObject? {
+        val trimmedRaw = rawContent.trim()
+        if (trimmedRaw.isEmpty()) {
+            return null
+        }
+
+        val parseObject = { candidate: String ->
+            runCatching {
+                workflowValidationJson.parseToJsonElement(candidate).jsonObject
+            }.getOrNull()
+        }
+
+        parseObject(trimmedRaw)?.let { return it }
+
+        extractFencedCodeBlocks(trimmedRaw).forEach { fencedContent ->
+            val trimmedContent = fencedContent.trim()
+            parseObject(trimmedContent)?.let { return it }
+            extractFirstJsonObjectCandidate(trimmedContent)?.let { jsonObjectCandidate ->
+                parseObject(jsonObjectCandidate)?.let { return it }
+            }
+        }
+
+        extractFirstJsonObjectCandidate(trimmedRaw)?.let { jsonObjectCandidate ->
+            parseObject(jsonObjectCandidate)?.let { return it }
+        }
+
+        return null
+    }
+
+    private fun extractFencedCodeBlocks(text: String): List<String> {
+        return FENCED_CODE_BLOCK_REGEX.findAll(text)
+            .mapNotNull { match ->
+                match.groups[1]?.value
+            }
+            .toList()
+    }
+
+    private fun extractFirstJsonObjectCandidate(text: String): String? {
+        val startIndex = text.indexOf('{')
+        if (startIndex == -1) {
+            return null
+        }
+
+        var depth = 0
+        var inString = false
+        var escaped = false
+
+        for (index in startIndex until text.length) {
+            val current = text[index]
+            if (inString) {
+                if (escaped) {
+                    escaped = false
+                } else if (current == '\\') {
+                    escaped = true
+                } else if (current == '"') {
+                    inString = false
+                }
+                continue
+            }
+
+            when (current) {
+                '"' -> inString = true
+                '{' -> depth += 1
+                '}' -> {
+                    depth -= 1
+                    if (depth == 0) {
+                        return text.substring(startIndex, index + 1)
+                    }
+                }
+            }
+        }
+
+        return null
+    }
+
+    private fun parseWorkflowStepResponse(rawContent: String): WorkflowStepResponse {
+        val trimmedRaw = rawContent.trim()
+        val parsedObject = runCatching {
+            workflowStepResponseJson.parseToJsonElement(rawContent).jsonObject
+        }.getOrNull()
+            ?: return WorkflowStepResponse(
+                needsUserInput = false,
+                questions = emptyList(),
+                answer = trimmedRaw,
+            )
+
+        val needsUserInput = parseJsonBoolean(
+            primaryValue = runCatching { parsedObject["needs_user_input"]?.jsonPrimitive?.contentOrNull }.getOrNull(),
+            secondaryValue = runCatching { parsedObject["needsUserInput"]?.jsonPrimitive?.contentOrNull }.getOrNull(),
+        )
+        val questions = parseWorkflowQuestions(parsedObject)
+        val answer = (parsedObject["answer"] ?: parsedObject["result"])
+            ?.let { value ->
+                runCatching { value.jsonPrimitive.contentOrNull }.getOrNull()
+            }
+            ?.trim()
+            .orEmpty()
+            .ifEmpty {
+                if (!needsUserInput) {
+                    trimmedRaw
+                } else {
+                    ""
+                }
+            }
+
+        return WorkflowStepResponse(
+            needsUserInput = needsUserInput,
+            questions = questions,
+            answer = answer,
+        )
+    }
+
+    private fun parseWorkflowQuestions(parsedObject: JsonObject): List<WorkflowQuestion> {
+        val questionsArray = runCatching {
+            (parsedObject["questions"] ?: parsedObject["Questions"])?.jsonArray
+        }.getOrNull() ?: return emptyList()
+
+        return questionsArray.mapNotNull { element ->
+            runCatching { element.jsonPrimitive.contentOrNull }.getOrNull()
+                ?.trim()
+                ?.takeIf { value -> value.isNotEmpty() }
+                ?.let { questionText ->
+                    return@mapNotNull WorkflowQuestion(
+                        text = questionText,
+                        options = emptyList(),
+                    )
+                }
+
+            val questionObject = runCatching { element.jsonObject }.getOrNull() ?: return@mapNotNull null
+            val questionText = firstNonBlankJsonString(
+                jsonObject = questionObject,
+                keys = listOf("question", "prompt", "text", "title"),
+            ) ?: return@mapNotNull null
+            WorkflowQuestion(
+                text = questionText,
+                options = parseWorkflowQuestionOptions(questionObject),
+            )
+        }
+    }
+
+    private fun parseWorkflowQuestionOptions(questionObject: JsonObject): List<String> {
+        val optionsArray = runCatching {
+            (
+                questionObject["options"]
+                    ?: questionObject["choices"]
+                    ?: questionObject["answer_options"]
+                    ?: questionObject["answerOptions"]
+                )?.jsonArray
+        }.getOrNull() ?: return emptyList()
+
+        return optionsArray.mapNotNull { optionElement ->
+            runCatching { optionElement.jsonPrimitive.contentOrNull }.getOrNull()
+                ?.trim()
+                ?.takeIf { value -> value.isNotEmpty() }
+                ?: run {
+                    val optionObject = runCatching { optionElement.jsonObject }.getOrNull() ?: return@run null
+                    firstNonBlankJsonString(
+                        jsonObject = optionObject,
+                        keys = listOf("label", "text", "value", "title", "option"),
+                    )
+                }
+        }
+    }
+
+    private fun firstNonBlankJsonString(
+        jsonObject: JsonObject,
+        keys: List<String>,
+    ): String? {
+        keys.forEach { key ->
+            val value = runCatching { jsonObject[key]?.jsonPrimitive?.contentOrNull }.getOrNull()
+                ?.trim()
+                ?.takeIf { normalized -> normalized.isNotEmpty() }
+            if (value != null) {
+                return value
+            }
+        }
+        return null
+    }
+
+    private fun normalizeWorkflowQuestion(question: WorkflowQuestion): WorkflowQuestion? {
+        val normalizedQuestion = question.text.trim().takeIf { value -> value.isNotEmpty() } ?: return null
+        val normalizedOptions = question.options.mapNotNull { option ->
+            option.trim().takeIf { value -> value.isNotEmpty() }
+        }
+        return WorkflowQuestion(
+            text = normalizedQuestion,
+            options = normalizedOptions,
+        )
+    }
+
+    private fun renderWorkflowStepResponse(
+        stepLabel: String,
+        response: WorkflowStepResponse,
+        usage: TokenUsage?,
+        elapsedSeconds: Double,
+    ) {
+        val text = buildWorkflowStepResponseText(stepLabel, response)
+        if (text.isEmpty()) {
+            return
+        }
+        dialogBlocks += formatAssistantResponse(text, usage, elapsedSeconds)
+    }
+
+    private fun buildWorkflowStepResponseText(
+        stepLabel: String,
+        response: WorkflowStepResponse,
+    ): String {
+        val answer = response.answer.trim()
+        if (answer.isNotEmpty()) {
+            return answer
+        }
+
+        if (!response.needsUserInput) {
+            return ""
+        }
+
+        return buildString {
+            appendLine("$stepLabel needs additional user input.")
+            if (response.questions.isNotEmpty()) {
+                appendLine("Questions:")
+                response.questions.forEachIndexed { index, question ->
+                    appendLine("${index + 1}. ${question.text}")
+                    question.options.forEach { option ->
+                        appendLine("- $option")
+                    }
+                }
+            }
+        }.trimEnd()
+    }
+
+    private fun renderWorkflowValidationResponse(
+        outcome: WorkflowValidationOutcome,
+        usage: TokenUsage?,
+        elapsedSeconds: Double,
+    ) {
+        val text = buildString {
+            appendLine("Validation status: ${outcome.status.name}")
+            appendLine("Summary: ${outcome.summary}")
+            outcome.details?.let { details ->
+                appendLine("Details: $details")
+            }
+        }.trimEnd()
+        dialogBlocks += formatAssistantResponse(text, usage, elapsedSeconds)
+    }
+
+    private fun parseJsonBoolean(
+        primaryValue: String?,
+        secondaryValue: String?,
+    ): Boolean {
+        val candidate = (primaryValue ?: secondaryValue)
+            ?.trim()
+            ?.lowercase()
+            ?: return false
+        return candidate == "true"
+    }
+
+    private fun normalizedWorkflowRuntimeState(state: WorkflowRuntimeState?): WorkflowRuntimeState {
+        val runtimeState = state ?: WorkflowRuntimeState()
+        val normalizedPrompt = runtimeState.originalUserPrompt.trim()
+        if (runtimeState.step != WorkflowStep.USER_INPUT && normalizedPrompt.isEmpty()) {
+            return WorkflowRuntimeState()
+        }
+
+        return runtimeState.copy(
+            originalUserPrompt = normalizedPrompt,
+            planningFeedback = runtimeState.planningFeedback.mapNotNull { value ->
+                value.trim().takeIf { normalized -> normalized.isNotEmpty() }
+            },
+            executionFeedback = runtimeState.executionFeedback.mapNotNull { value ->
+                value.trim().takeIf { normalized -> normalized.isNotEmpty() }
+            },
+            latestPlanningOutput = runtimeState.latestPlanningOutput?.trim()?.takeIf { value -> value.isNotEmpty() },
+            approvedPlan = runtimeState.approvedPlan?.trim()?.takeIf { value -> value.isNotEmpty() },
+            latestExecutionOutput = runtimeState.latestExecutionOutput?.trim()?.takeIf { value -> value.isNotEmpty() },
+        )
+    }
+
+    private suspend fun executeLinearTurn(
+        requestPrompt: String,
+        effectiveSystemPrompt: String,
+    ): TurnExecutionResult {
         val promptRequest = buildPromptUseCase.execute(
             request = BuildPromptRequest(
-                systemPrompt = systemPrompt,
+                systemPrompt = effectiveSystemPrompt,
                 session = sessionMemory.promptDataSnapshot(),
                 userPrompt = requestPrompt,
                 workingTaskState = workingMemoryState?.taskState,
@@ -297,14 +1184,17 @@ class ConsoleChatController(
         )
     }
 
-    private suspend fun executeBranchingTurn(requestPrompt: String): TurnExecutionResult {
+    private suspend fun executeBranchingTurn(
+        requestPrompt: String,
+        effectiveSystemPrompt: String,
+    ): TurnExecutionResult {
         val contextWindow = modelById[currentModel]?.contextWindowTokens
         val branchingPromptData = branchingSessionMemory.promptDataForRequest(
             maxEstimatedTokens = contextWindow,
             estimateTokens = { sessionPromptData ->
                 val promptRequest = buildPromptUseCase.execute(
                     request = BuildPromptRequest(
-                        systemPrompt = systemPrompt,
+                        systemPrompt = effectiveSystemPrompt,
                         session = sessionPromptData,
                         userPrompt = requestPrompt,
                         workingTaskState = workingMemoryState?.taskState,
@@ -316,7 +1206,7 @@ class ConsoleChatController(
         )
         val promptRequest = buildPromptUseCase.execute(
             request = BuildPromptRequest(
-                systemPrompt = systemPrompt,
+                systemPrompt = effectiveSystemPrompt,
                 session = branchingPromptData.session,
                 userPrompt = requestPrompt,
                 workingTaskState = workingMemoryState?.taskState,
@@ -673,6 +1563,16 @@ class ConsoleChatController(
 
             input == "/reset" -> {
                 resetConversation()
+                workflowRuntimeState = if (workflowModeEnabled) {
+                    WorkflowRuntimeState(step = WorkflowStep.USER_INPUT)
+                } else {
+                    null
+                }
+                workflowUiStep = if (workflowModeEnabled) {
+                    WorkflowUiStep.USER_INPUT
+                } else {
+                    null
+                }
                 clearPersistedMemorySnapshot()
                 persistMemorySnapshot()
                 dialogBlocks.clear()
@@ -743,6 +1643,20 @@ class ConsoleChatController(
         persistentMemoryInitialized = true
         val persistedState = runCatching { sessionMemoryStore?.load() }.getOrNull() ?: return
         workflowModeEnabled = persistedState.workflowModeEnabled
+        workflowRuntimeState = if (workflowModeEnabled) {
+            normalizedWorkflowRuntimeState(persistedState.workflowRuntimeState)
+        } else {
+            null
+        }
+        workflowUiStep = if (workflowModeEnabled) {
+            when (workflowRuntimeState?.step ?: WorkflowStep.USER_INPUT) {
+                WorkflowStep.USER_INPUT -> WorkflowUiStep.USER_INPUT
+                WorkflowStep.PLANNING_APPROVAL -> WorkflowUiStep.PLANNING
+                WorkflowStep.EXECUTION_APPROVAL -> WorkflowUiStep.EXECUTION
+            }
+        } else {
+            null
+        }
         val restoredLinear = sessionMemory.restore(
             persistedMessages = persistedState.messages,
             persistedCompactedSummary = persistedState.compactedSummary,
@@ -886,6 +1800,11 @@ class ConsoleChatController(
                 null
             },
             workflowModeEnabled = workflowModeEnabled,
+            workflowRuntimeState = if (workflowModeEnabled) {
+                normalizedWorkflowRuntimeState(workflowRuntimeState)
+            } else {
+                null
+            },
         )
         runCatching {
             sessionMemoryStore?.save(state)
@@ -951,6 +1870,8 @@ class ConsoleChatController(
     private fun handleWorkflowCommand() {
         if (workflowModeEnabled) {
             workflowModeEnabled = false
+            workflowRuntimeState = null
+            workflowUiStep = null
             persistMemorySnapshot()
             return
         }
@@ -995,6 +1916,8 @@ class ConsoleChatController(
             resetConversation()
         }
         workflowModeEnabled = true
+        workflowRuntimeState = WorkflowRuntimeState(step = WorkflowStep.USER_INPUT)
+        workflowUiStep = WorkflowUiStep.USER_INPUT
         persistMemorySnapshot()
     }
 
@@ -1139,17 +2062,17 @@ class ConsoleChatController(
         return distilledState.copy(preferences = mergedPreferences)
     }
 
-    private fun activeContextMessages(): List<ConversationMessage> {
+    private fun activeContextMessages(systemPromptOverride: String = systemPrompt): List<ConversationMessage> {
         return if (activeCompactionMode == SessionCompactionMode.BRANCHING) {
             buildPromptUseCase.buildContext(
-                systemPrompt = systemPrompt,
+                systemPrompt = systemPromptOverride,
                 session = branchingSessionMemory.activePromptDataSnapshot(),
                 workingTaskState = workingMemoryState?.taskState,
                 profileMemoryState = effectiveProfileMemoryState(),
             ).toConversation()
         } else {
             buildPromptUseCase.buildContext(
-                systemPrompt = systemPrompt,
+                systemPrompt = systemPromptOverride,
                 session = sessionMemory.promptDataSnapshot(),
                 workingTaskState = workingMemoryState?.taskState,
                 profileMemoryState = effectiveProfileMemoryState(),
@@ -1396,10 +2319,64 @@ class ConsoleChatController(
         val response: AgentResponse,
         val compacted: Boolean,
         val systemMessages: List<String>,
+        val elapsedSeconds: Double = 0.0,
     )
 
+    private data class WorkflowQuestion(
+        val text: String,
+        val options: List<String>,
+    )
+
+    private data class WorkflowQuestionAnswer(
+        val question: String,
+        val answer: String,
+    )
+
+    private data class WorkflowStepResponse(
+        val needsUserInput: Boolean,
+        val questions: List<WorkflowQuestion>,
+        val answer: String,
+    )
+
+    private enum class WorkflowValidationStatus {
+        PASS,
+        FAIL,
+    }
+
+    private data class WorkflowValidationOutcome(
+        val status: WorkflowValidationStatus,
+        val summary: String,
+        val details: String?,
+        val feedback: String,
+    )
+
+    private sealed interface WorkflowApprovalDecision {
+        data object APPROVE : WorkflowApprovalDecision
+        data object CANCEL : WorkflowApprovalDecision
+        data class COMMENT(val text: String) : WorkflowApprovalDecision
+    }
+
+    private enum class WorkflowUiStep(val label: String) {
+        USER_INPUT(label = "user input"),
+        PLANNING(label = "planning"),
+        EXECUTION(label = "execution"),
+        VALIDATION(label = "validation"),
+    }
+
     companion object {
-        private const val WORKFLOW_FOOTER_LABEL = "Workflow"
+        private const val WORKFLOW_APPROVAL_INPUT_PROMPT = "choice/comment> "
+        private val WORKFLOW_PLANNING_APPROVAL_PROMPT = """
+            Planning result approval:
+            1. Approve
+            2. Cancel
+            Comment (type feedback)
+        """.trimIndent()
+        private val WORKFLOW_EXECUTION_APPROVAL_PROMPT = """
+            Execution result approval:
+            1. Approve
+            2. Cancel
+            Comment (type feedback to re-plan)
+        """.trimIndent()
         private const val TOKENS_PER_MILLION = 1_000_000.0
         private const val PRICE_DECIMAL_SCALE = 1_000_000L
         private const val PRICE_DECIMAL_DIGITS = 6
@@ -1417,6 +2394,7 @@ class ConsoleChatController(
         private const val THINKING_TENTHS_PER_SECOND = 10L
         private const val THINKING_TENTH_DIVISOR_MS = 100L
         private val THINKING_SPINNER_FRAMES = charArrayOf('|', '/', '-', '\\')
+        private val FENCED_CODE_BLOCK_REGEX = Regex("```(?:json)?\\s*([\\s\\S]*?)```", RegexOption.IGNORE_CASE)
         private val TRAILING_REFERENCE_DELIMITERS = setOf('.', ',', ';', ':', '!', '?', ')', ']', '}')
         private val KNOWN_FILE_EXTENSIONS = setOf(
             "kt",
@@ -1444,5 +2422,34 @@ class ConsoleChatController(
             "rs",
             "sh",
         )
+        private val workflowValidationJson: Json = Json {
+            ignoreUnknownKeys = true
+        }
+        private val workflowStepResponseJson: Json = Json {
+            ignoreUnknownKeys = true
+        }
+        private val WORKFLOW_STEP_RESPONSE_CONTRACT_PROMPT = """
+            Response format contract:
+            - Return only valid JSON object with keys:
+              {"needs_user_input": boolean, "questions": string[] | object[], "answer": string}
+            - If needs_user_input is true:
+              - Provide one or more concrete user questions in "questions".
+              - Questions may be strings or objects:
+                {"question":"...", "options":["...","..."]} (options are optional)
+              - Keep "answer" empty.
+            - If needs_user_input is false:
+              - Use empty "questions".
+              - Put the full step result in "answer".
+            - If multiple questions are needed, list them in order. The CLI will ask them one by one.
+        """.trimIndent()
+        private val WORKFLOW_VALIDATION_RESPONSE_CONTRACT_PROMPT = """
+            Response format contract:
+            - Return only a valid JSON object:
+              {"status":"PASS|FAIL","summary":"...","details":"..."}
+            - status must be exactly PASS or FAIL.
+            - summary must be concise and actionable.
+            - details may be empty string if there are no extra details.
+            - Do not include markdown, explanations, or code fences.
+        """.trimIndent()
     }
 }

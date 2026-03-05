@@ -23,6 +23,8 @@ import com.aichallenge.day2.agent.domain.model.TopicBranchState
 import com.aichallenge.day2.agent.domain.model.UserProfileOption
 import com.aichallenge.day2.agent.domain.model.UserWorkflowDefinition
 import com.aichallenge.day2.agent.domain.model.UserWorkflowOption
+import com.aichallenge.day2.agent.domain.model.WorkflowRuntimeState
+import com.aichallenge.day2.agent.domain.model.WorkflowStep
 import com.aichallenge.day2.agent.domain.repository.AgentRepository
 import com.aichallenge.day2.agent.domain.repository.SessionMemoryStore
 import com.aichallenge.day2.agent.domain.repository.UserDefinedProfileStore
@@ -36,6 +38,7 @@ import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class ConsoleChatControllerSessionMemoryTest {
@@ -365,7 +368,13 @@ class ConsoleChatControllerSessionMemoryTest {
     fun workflowCommandSelectingDifferentWorkflowResetsConversationAndPersistsSnapshot() = runBlocking {
         val repository = RecordingAgentRepository(
             responses = listOf(
-                Result.success(AgentResponse(content = "answer one")),
+                Result.success(AgentResponse(content = "plan one")),
+                Result.success(AgentResponse(content = "execution one")),
+                Result.success(
+                    AgentResponse(
+                        content = """{"status":"PASS","summary":"validated","details":"ok"}""",
+                    ),
+                ),
             ),
         )
         val sessionStore = RecordingSessionMemoryStore(
@@ -405,7 +414,7 @@ class ConsoleChatControllerSessionMemoryTest {
             activeFileName = "workflow-default.json",
         )
         val io = FakeCliIO(
-            inputs = listOf("/workflow", "new question", "/exit"),
+            inputs = listOf("/workflow", "new question", "1", "1", "/exit"),
             workflowSelections = listOf(1),
         )
         val controller = createController(
@@ -418,21 +427,27 @@ class ConsoleChatControllerSessionMemoryTest {
         controller.runInteractive()
 
         assertEquals(listOf("workflow-review.json"), workflowStore.setActiveCalls)
-        assertEquals(2, sessionStore.saveStates.size)
+        assertTrue(sessionStore.saveStates.size >= 2)
         assertTrue(sessionStore.saveStates[0].workflowModeEnabled)
         assertEquals(emptyList(), sessionStore.saveStates[0].messages)
         assertEquals(
             listOf(MessageRole.SYSTEM, MessageRole.USER),
-            repository.conversations.single().map { it.role },
+            repository.conversations.first().map { it.role },
         )
-        assertEquals("new question", repository.conversations.single()[1].content)
+        assertContains(repository.conversations.first()[1].content, "new question")
     }
 
     @Test
     fun workflowCommandPersistsSelectionWithoutResetWhenPersistedActiveWorkflowIsMissing() = runBlocking {
         val repository = RecordingAgentRepository(
             responses = listOf(
-                Result.success(AgentResponse(content = "answer one")),
+                Result.success(AgentResponse(content = "plan one")),
+                Result.success(AgentResponse(content = "execution one")),
+                Result.success(
+                    AgentResponse(
+                        content = """{"status":"PASS","summary":"validated","details":"ok"}""",
+                    ),
+                ),
             ),
         )
         val sessionStore = RecordingSessionMemoryStore(
@@ -472,7 +487,7 @@ class ConsoleChatControllerSessionMemoryTest {
             activeFileName = null,
         )
         val io = FakeCliIO(
-            inputs = listOf("/workflow", "new question", "/exit"),
+            inputs = listOf("/workflow", "new question", "1", "1", "/exit"),
             workflowSelections = listOf(0),
         )
         val controller = createController(
@@ -485,14 +500,14 @@ class ConsoleChatControllerSessionMemoryTest {
         controller.runInteractive()
 
         assertEquals(listOf("workflow-default.json"), workflowStore.setActiveCalls)
-        val request = repository.conversations.single()
+        val request = repository.conversations.first()
         assertEquals(
             listOf(MessageRole.SYSTEM, MessageRole.USER, MessageRole.ASSISTANT, MessageRole.USER),
             request.map { it.role },
         )
         assertEquals("old question", request[1].content)
         assertEquals("old answer", request[2].content)
-        assertEquals("new question", request[3].content)
+        assertContains(request[3].content, "new question")
     }
 
     @Test
@@ -598,7 +613,7 @@ class ConsoleChatControllerSessionMemoryTest {
         controller.runInteractive()
 
         assertEquals(1, store.loadCalls)
-        assertEquals(listOf<String?>("Workflow"), io.footerLabels)
+        assertEquals(listOf<String?>("Workflow: user input"), io.footerLabels)
     }
 
     @Test
@@ -634,6 +649,534 @@ class ConsoleChatControllerSessionMemoryTest {
         assertTrue(store.saveStates[0].workflowModeEnabled)
         assertTrue(store.saveStates[1].workflowModeEnabled)
         assertEquals(emptyList(), store.saveStates[1].messages)
+        val resetRuntime = assertNotNull(store.saveStates[1].workflowRuntimeState)
+        assertEquals(WorkflowStep.USER_INPUT, resetRuntime.step)
+        assertEquals("", resetRuntime.originalUserPrompt)
+        assertEquals(emptyList(), resetRuntime.planningFeedback)
+        assertEquals(emptyList(), resetRuntime.executionFeedback)
+        assertEquals(null, resetRuntime.latestPlanningOutput)
+        assertEquals(null, resetRuntime.approvedPlan)
+        assertEquals(null, resetRuntime.latestExecutionOutput)
+    }
+
+    @Test
+    fun workflowRunUsesStepSpecificPromptStackAndCompletesOnValidationPass() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "planning output")),
+                Result.success(AgentResponse(content = "execution output")),
+                Result.success(AgentResponse(content = """{"status":"PASS","summary":"all good","details":"validated"}""")),
+            ),
+        )
+        val store = RecordingSessionMemoryStore()
+        val workflowStore = RecordingSelectableUserDefinedWorkflowStore(
+            workflows = listOf(
+                UserWorkflowOption("workflow-default.json", "Default"),
+            ),
+            workflowsByFileName = mapOf(
+                "workflow-default.json" to UserWorkflowDefinition(
+                    fileName = "workflow-default.json",
+                    name = "Default",
+                    basePrompt = "Workflow base prompt",
+                    planning = "Planning step prompt",
+                    execution = "Execution step prompt",
+                    validation = "Validation step prompt",
+                ),
+            ),
+            activeFileName = "workflow-default.json",
+        )
+        val io = FakeCliIO(inputs = listOf("/workflow", "build feature", "1", "1", "/exit"), workflowSelections = listOf(0))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            sessionMemoryStore = store,
+            userDefinedWorkflowStore = workflowStore,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(3, repository.conversations.size)
+        val planningRequest = repository.conversations[0]
+        val executionRequest = repository.conversations[1]
+        val validationRequest = repository.conversations[2]
+
+        assertContains(planningRequest[0].content, "Base system prompt")
+        assertContains(planningRequest[0].content, "Workflow base prompt")
+        assertContains(planningRequest[0].content, "Planning step prompt")
+        assertContains(planningRequest.last().content, "build feature")
+
+        assertContains(executionRequest[0].content, "Execution step prompt")
+        assertContains(validationRequest[0].content, "Validation step prompt")
+        assertContains(validationRequest[0].content, "\"status\":\"PASS|FAIL\"")
+        val output = io.outputText()
+        assertContains(
+            output,
+            "Planning result approval:\n1. Approve\n2. Cancel\nComment (type feedback)",
+        )
+        assertContains(
+            output,
+            "Execution result approval:\n1. Approve\n2. Cancel\nComment (type feedback to re-plan)",
+        )
+        assertFalse(output.contains("workflow> planning:"))
+        assertFalse(output.contains("workflow> execution:"))
+
+        val finalState = store.saveStates.last()
+        assertFalse(finalState.workflowModeEnabled)
+        assertNull(finalState.workflowRuntimeState)
+    }
+
+    @Test
+    fun planningCommentRerunsPlanningWithCommentInPrompt() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "planning output one")),
+                Result.success(AgentResponse(content = "planning output two")),
+                Result.success(AgentResponse(content = "execution output")),
+                Result.success(AgentResponse(content = """{"status":"PASS","summary":"ok","details":"ok"}""")),
+            ),
+        )
+        val workflowStore = RecordingSelectableUserDefinedWorkflowStore(
+            workflows = listOf(UserWorkflowOption("workflow-default.json", "Default")),
+            workflowsByFileName = mapOf(
+                "workflow-default.json" to UserWorkflowDefinition(
+                    fileName = "workflow-default.json",
+                    name = "Default",
+                    planning = "Planning step",
+                    execution = "Execution step",
+                    validation = "Validation step",
+                ),
+            ),
+            activeFileName = "workflow-default.json",
+        )
+        val controller = createController(
+            repository = repository,
+            io = FakeCliIO(
+                inputs = listOf("/workflow", "implement thing", "add rollback section", "1", "1", "/exit"),
+                workflowSelections = listOf(0),
+            ),
+            userDefinedWorkflowStore = workflowStore,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(4, repository.conversations.size)
+        val secondPlanningRequest = repository.conversations[1]
+        assertContains(secondPlanningRequest[0].content, "Planning step")
+        assertContains(secondPlanningRequest.last().content, "add rollback section")
+    }
+
+    @Test
+    fun executionCommentRoutesBackToPlanningWithFeedback() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "planning output one")),
+                Result.success(AgentResponse(content = "execution output one")),
+                Result.success(AgentResponse(content = "planning output two")),
+                Result.success(AgentResponse(content = "execution output two")),
+                Result.success(AgentResponse(content = """{"status":"PASS","summary":"ok","details":"ok"}""")),
+            ),
+        )
+        val workflowStore = RecordingSelectableUserDefinedWorkflowStore(
+            workflows = listOf(UserWorkflowOption("workflow-default.json", "Default")),
+            workflowsByFileName = mapOf(
+                "workflow-default.json" to UserWorkflowDefinition(
+                    fileName = "workflow-default.json",
+                    name = "Default",
+                    planning = "Planning step",
+                    execution = "Execution step",
+                    validation = "Validation step",
+                ),
+            ),
+            activeFileName = "workflow-default.json",
+        )
+        val controller = createController(
+            repository = repository,
+            io = FakeCliIO(
+                inputs = listOf("/workflow", "task", "1", "please refine plan", "1", "1", "/exit"),
+                workflowSelections = listOf(0),
+            ),
+            userDefinedWorkflowStore = workflowStore,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(5, repository.conversations.size)
+        val replanningRequest = repository.conversations[2]
+        assertContains(replanningRequest[0].content, "Planning step")
+        assertContains(replanningRequest.last().content, "please refine plan")
+    }
+
+    @Test
+    fun validationFailRerunsExecutionWithValidationFeedback() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "planning output")),
+                Result.success(AgentResponse(content = "execution output one")),
+                Result.success(AgentResponse(content = """{"status":"FAIL","summary":"missing test evidence","details":"need screenshots"}""")),
+                Result.success(AgentResponse(content = "execution output two")),
+                Result.success(AgentResponse(content = """{"status":"PASS","summary":"ok","details":"ok"}""")),
+            ),
+        )
+        val workflowStore = RecordingSelectableUserDefinedWorkflowStore(
+            workflows = listOf(UserWorkflowOption("workflow-default.json", "Default")),
+            workflowsByFileName = mapOf(
+                "workflow-default.json" to UserWorkflowDefinition(
+                    fileName = "workflow-default.json",
+                    name = "Default",
+                    planning = "Planning step",
+                    execution = "Execution step",
+                    validation = "Validation step",
+                ),
+            ),
+            activeFileName = "workflow-default.json",
+        )
+        val controller = createController(
+            repository = repository,
+            io = FakeCliIO(inputs = listOf("/workflow", "task", "1", "1", "1", "/exit"), workflowSelections = listOf(0)),
+            userDefinedWorkflowStore = workflowStore,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(5, repository.conversations.size)
+        val retriedExecutionRequest = repository.conversations[3]
+        assertContains(retriedExecutionRequest[0].content, "Execution step")
+        assertContains(retriedExecutionRequest.last().content, "Validation failed: missing test evidence")
+    }
+
+    @Test
+    fun invalidValidationJsonIsTreatedAsFailAndRerunsExecution() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "planning output")),
+                Result.success(AgentResponse(content = "execution output one")),
+                Result.success(AgentResponse(content = "not-json-validation-output")),
+                Result.success(AgentResponse(content = "execution output two")),
+                Result.success(AgentResponse(content = """{"status":"PASS","summary":"ok","details":"ok"}""")),
+            ),
+        )
+        val workflowStore = RecordingSelectableUserDefinedWorkflowStore(
+            workflows = listOf(UserWorkflowOption("workflow-default.json", "Default")),
+            workflowsByFileName = mapOf(
+                "workflow-default.json" to UserWorkflowDefinition(
+                    fileName = "workflow-default.json",
+                    name = "Default",
+                    planning = "Planning step",
+                    execution = "Execution step",
+                    validation = "Validation step",
+                ),
+            ),
+            activeFileName = "workflow-default.json",
+        )
+        val controller = createController(
+            repository = repository,
+            io = FakeCliIO(inputs = listOf("/workflow", "task", "1", "1", "1", "/exit"), workflowSelections = listOf(0)),
+            userDefinedWorkflowStore = workflowStore,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(5, repository.conversations.size)
+        val retriedExecutionRequest = repository.conversations[3]
+        assertContains(retriedExecutionRequest.last().content, "not valid JSON")
+    }
+
+    @Test
+    fun validationJsonInsideCodeFenceIsParsedAsPass() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "planning output")),
+                Result.success(AgentResponse(content = "execution output")),
+                Result.success(
+                    AgentResponse(
+                        content = """
+                        ```json
+                        {"status":"PASS","summary":"all checks passed","details":"validator accepted output"}
+                        ```
+                        """.trimIndent(),
+                    ),
+                ),
+            ),
+        )
+        val store = RecordingSessionMemoryStore()
+        val io = FakeCliIO(inputs = listOf("/workflow", "task", "1", "1", "/exit"), workflowSelections = listOf(0))
+        val workflowStore = RecordingSelectableUserDefinedWorkflowStore(
+            workflows = listOf(UserWorkflowOption("workflow-default.json", "Default")),
+            workflowsByFileName = mapOf(
+                "workflow-default.json" to UserWorkflowDefinition(
+                    fileName = "workflow-default.json",
+                    name = "Default",
+                    planning = "Planning step",
+                    execution = "Execution step",
+                    validation = "Validation step",
+                ),
+            ),
+            activeFileName = "workflow-default.json",
+        )
+        val controller = createController(
+            repository = repository,
+            io = io,
+            sessionMemoryStore = store,
+            userDefinedWorkflowStore = workflowStore,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(3, repository.conversations.size)
+        val finalState = store.saveStates.last()
+        assertFalse(finalState.workflowModeEnabled)
+        assertNull(finalState.workflowRuntimeState)
+        val output = io.outputText()
+        assertContains(output, "Validation status: PASS")
+        assertContains(output, "workflow> completed")
+        assertFalse(output.contains("Validation output is not valid JSON"))
+    }
+
+    @Test
+    fun planningStructuredQuestionsAreAskedOneByOneAndFedBackIntoPlanning() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(
+                    AgentResponse(
+                        content = """
+                        {
+                          "needs_user_input": true,
+                          "questions": [
+                            {
+                              "question": "Who is the target audience?",
+                              "options": [
+                                "Backend engineers",
+                                "Product managers"
+                              ]
+                            },
+                            {
+                              "question": "What deadline should be used?",
+                              "options": [
+                                "Friday",
+                                "End of month"
+                              ]
+                            }
+                          ],
+                          "answer": ""
+                        }
+                        """.trimIndent(),
+                    ),
+                ),
+                Result.success(
+                    AgentResponse(
+                        content = """
+                        {
+                          "needs_user_input": false,
+                          "questions": [],
+                          "answer": "approved planning output"
+                        }
+                        """.trimIndent(),
+                    ),
+                ),
+                Result.success(
+                    AgentResponse(
+                        content = """
+                        {
+                          "needs_user_input": false,
+                          "questions": [],
+                          "answer": "execution output"
+                        }
+                        """.trimIndent(),
+                    ),
+                ),
+                Result.success(AgentResponse(content = """{"status":"PASS","summary":"ok","details":"ok"}""")),
+            ),
+        )
+        val workflowStore = RecordingSelectableUserDefinedWorkflowStore(
+            workflows = listOf(UserWorkflowOption("workflow-default.json", "Default")),
+            workflowsByFileName = mapOf(
+                "workflow-default.json" to UserWorkflowDefinition(
+                    fileName = "workflow-default.json",
+                    name = "Default",
+                    planning = "Planning step",
+                    execution = "Execution step",
+                    validation = "Validation step",
+                ),
+            ),
+            activeFileName = "workflow-default.json",
+        )
+        val io = FakeCliIO(
+            inputs = listOf("/workflow", "prepare release note", "Backend engineers", "Friday", "1", "1", "/exit"),
+            workflowSelections = listOf(0),
+        )
+        val controller = createController(
+            repository = repository,
+            io = io,
+            userDefinedWorkflowStore = workflowStore,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(4, repository.conversations.size)
+        val secondPlanningRequest = repository.conversations[1]
+        assertContains(secondPlanningRequest.last().content, "Question: Who is the target audience?")
+        assertContains(secondPlanningRequest.last().content, "Answer: Backend engineers")
+        assertContains(secondPlanningRequest.last().content, "Question: What deadline should be used?")
+        assertContains(secondPlanningRequest.last().content, "Answer: Friday")
+
+        val output = io.outputText()
+        assertFalse(output.contains("\"needs_user_input\""))
+        assertContains(output, "Questions:")
+        assertContains(output, "1. Who is the target audience?")
+        assertContains(output, "- Backend engineers")
+        assertContains(output, "2. What deadline should be used?")
+        assertContains(output, "- Friday")
+        assertFalse(output.contains("workflow> planning question"))
+    }
+
+    @Test
+    fun executionStructuredQuestionsAreAskedOneByOneAndFedBackIntoExecution() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(
+                    AgentResponse(
+                        content = """
+                        {
+                          "needs_user_input": false,
+                          "questions": [],
+                          "answer": "approved plan"
+                        }
+                        """.trimIndent(),
+                    ),
+                ),
+                Result.success(
+                    AgentResponse(
+                        content = """
+                        {
+                          "needs_user_input": true,
+                          "questions": [
+                            {
+                              "question": "Which API base URL should be used?",
+                              "options": [
+                                "https://api.example.com",
+                                "https://staging-api.example.com"
+                              ]
+                            },
+                            {
+                              "question": "Which auth method should be used?",
+                              "options": [
+                                "OAuth2",
+                                "API key"
+                              ]
+                            }
+                          ],
+                          "answer": ""
+                        }
+                        """.trimIndent(),
+                    ),
+                ),
+                Result.success(
+                    AgentResponse(
+                        content = """
+                        {
+                          "needs_user_input": false,
+                          "questions": [],
+                          "answer": "execution output"
+                        }
+                        """.trimIndent(),
+                    ),
+                ),
+                Result.success(AgentResponse(content = """{"status":"PASS","summary":"ok","details":"ok"}""")),
+            ),
+        )
+        val workflowStore = RecordingSelectableUserDefinedWorkflowStore(
+            workflows = listOf(UserWorkflowOption("workflow-default.json", "Default")),
+            workflowsByFileName = mapOf(
+                "workflow-default.json" to UserWorkflowDefinition(
+                    fileName = "workflow-default.json",
+                    name = "Default",
+                    planning = "Planning step",
+                    execution = "Execution step",
+                    validation = "Validation step",
+                ),
+            ),
+            activeFileName = "workflow-default.json",
+        )
+        val io = FakeCliIO(
+            inputs = listOf("/workflow", "implement integration", "1", "https://api.example.com", "OAuth2", "1", "/exit"),
+            workflowSelections = listOf(0),
+        )
+        val controller = createController(
+            repository = repository,
+            io = io,
+            userDefinedWorkflowStore = workflowStore,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(4, repository.conversations.size)
+        val secondExecutionRequest = repository.conversations[2]
+        assertContains(secondExecutionRequest.last().content, "Question: Which API base URL should be used?")
+        assertContains(secondExecutionRequest.last().content, "Answer: https://api.example.com")
+        assertContains(secondExecutionRequest.last().content, "Question: Which auth method should be used?")
+        assertContains(secondExecutionRequest.last().content, "Answer: OAuth2")
+
+        val output = io.outputText()
+        assertFalse(output.contains("\"needs_user_input\""))
+        assertContains(output, "Questions:")
+        assertContains(output, "1. Which API base URL should be used?")
+        assertContains(output, "- https://api.example.com")
+        assertContains(output, "2. Which auth method should be used?")
+        assertContains(output, "- OAuth2")
+        assertFalse(output.contains("workflow> execution question"))
+    }
+
+    @Test
+    fun restoredPlanningApprovalStateResumesPlanningOnNextUserInput() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "planning output updated")),
+                Result.success(AgentResponse(content = "execution output")),
+                Result.success(AgentResponse(content = """{"status":"PASS","summary":"ok","details":"ok"}""")),
+            ),
+        )
+        val sessionStore = RecordingSessionMemoryStore(
+            loadedState = SessionMemoryState(
+                messages = emptyList(),
+                workflowModeEnabled = true,
+                workflowRuntimeState = WorkflowRuntimeState(
+                    step = WorkflowStep.PLANNING_APPROVAL,
+                    originalUserPrompt = "original task",
+                    planningFeedback = emptyList(),
+                    executionFeedback = emptyList(),
+                    latestPlanningOutput = "old plan",
+                    approvedPlan = null,
+                    latestExecutionOutput = null,
+                ),
+            ),
+        )
+        val workflowStore = RecordingSelectableUserDefinedWorkflowStore(
+            workflows = listOf(UserWorkflowOption("workflow-default.json", "Default")),
+            workflowsByFileName = mapOf(
+                "workflow-default.json" to UserWorkflowDefinition(
+                    fileName = "workflow-default.json",
+                    name = "Default",
+                    planning = "Planning step",
+                    execution = "Execution step",
+                    validation = "Validation step",
+                ),
+            ),
+            activeFileName = "workflow-default.json",
+        )
+        val io = FakeCliIO(inputs = listOf("new detail", "1", "1", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            sessionMemoryStore = sessionStore,
+            userDefinedWorkflowStore = workflowStore,
+        )
+
+        controller.runInteractive()
+
+        assertContains(repository.conversations.first()[0].content, "Planning step")
+        assertContains(repository.conversations.first().last().content, "original task")
+        assertContains(repository.conversations.first().last().content, "new detail")
+        assertEquals(listOf<String?>("Workflow: planning"), io.footerLabels.take(1))
     }
 
     @Test
@@ -2234,6 +2777,7 @@ private class RecordingSessionMemoryStore(
             activeCompactionModeId = loadedState.activeCompactionModeId,
             branchingState = copyBranchingState(loadedState.branchingState),
             workflowModeEnabled = loadedState.workflowModeEnabled,
+            workflowRuntimeState = copyWorkflowRuntimeState(loadedState.workflowRuntimeState),
         )
     }
 
@@ -2245,6 +2789,7 @@ private class RecordingSessionMemoryStore(
             activeCompactionModeId = state.activeCompactionModeId,
             branchingState = copyBranchingState(state.branchingState),
             workflowModeEnabled = state.workflowModeEnabled,
+            workflowRuntimeState = copyWorkflowRuntimeState(state.workflowRuntimeState),
         )
     }
 
@@ -2275,6 +2820,13 @@ private fun copyBranchingState(state: BranchingMemoryState?): BranchingMemorySta
                 },
             )
         },
+    )
+}
+
+private fun copyWorkflowRuntimeState(state: WorkflowRuntimeState?): WorkflowRuntimeState? {
+    return state?.copy(
+        planningFeedback = state.planningFeedback.toList(),
+        executionFeedback = state.executionFeedback.toList(),
     )
 }
 
