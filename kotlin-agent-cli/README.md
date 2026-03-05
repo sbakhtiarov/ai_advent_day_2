@@ -73,6 +73,13 @@ time> <seconds> s
 - Workflow files must match `workflow-<name>.json` and include non-blank top-level keys: `name`, `planning`, `execution`, `validation`.
 - Workflow files can optionally include `basePrompt` as an additional static system prompt for that workflow.
 - Active workflow file selection is persisted in `~/.kotlin-agent-cli/active-workflow.json` as `{ "active_file_name": "<file-name>" }`.
+- Invariant constraints are persisted independently in `~/.kotlin-agent-cli/invariant-constraints.json`.
+- All user-visible assistant responses (interactive, workflow planning/execution, and one-shot `--prompt`) are validated against invariant constraints when configured.
+- Invariant constraints are also injected into each model prompt as strict system-level requirements (normalized to `[Strict] ...` entries).
+- Invariant validation runs with a strict JSON contract: `{"status":"PASS|FAIL","failed_constraints":[{"constraint":"...","source":"user|llm","user_message":"..."}]}`.
+- If invariant validation returns `FAIL`, the response is blocked (not shown/persisted), regeneration runs automatically with validator feedback, and retries are capped at 2.
+- If any failed constraint is sourced from `user`, generation is not retried for that turn.
+- If all retries fail, the turn stops with an explicit invariant-validation error and the failed response is not stored in memory.
 - Working memory is a distilled structured task state updated incrementally after each successful turn from previous working state + latest user/assistant messages.
 - Working memory lifecycle is independent from session memory compaction strategy and session-memory snapshot files.
 - Working memory is injected into interactive prompt context as a dedicated system-context block with normalized JSON task state.
@@ -114,7 +121,7 @@ time> <seconds> s
 - Prompt context order is: system prompt (includes optional user-defined profile defaults), compacted summary (as system context when present), working-memory block (as system context when present), profile-memory block (as system context when present), remaining conversation, current user prompt.
 - If you attach files with `@<path>`, their text content is injected into the next submitted prompt and persisted in session memory.
 - `/profile` opens profile selection menu, switches active user-defined profile, resets in-memory session context, and persists reset snapshot.
-- `/reset` clears in-memory session memory, clears the visible transcript, resets persisted conversation to an empty snapshot, and preserves current mode flags (working/profile memory are not cleared).
+- `/reset` clears in-memory session memory, clears the visible transcript, resets persisted conversation to an empty snapshot, and also clears working memory (profile memory remains intact).
 - One-shot mode (`--prompt`) still does not read/write session/working/profile persisted memory, but it does load the active `user-profile-<name>.json` and inject those defaults into the system prompt.
 - If persistence read/write fails, the app continues with in-memory session behavior.
 
@@ -127,7 +134,8 @@ time> <seconds> s
 - `/compact` - choose compaction strategy (`Rolling summary`, `Sliding window`, `Fact map`, or `Branching`)
 - `/profile` - choose active user profile (`user-profile-<name>.json`)
 - `/workflow` - enable strict workflow mode with workflow selection (toggle off when already enabled)
-- `/reset` - clear conversation memory and transcript, then persist an empty session snapshot while preserving current mode flags (working/profile remain intact)
+- `/invariant` - manage persisted invariant constraints (`Del` removes selected item, `Add new constraint` creates one)
+- `/reset` - clear conversation memory and transcript, clear working memory, then persist an empty session snapshot (profile memory remains intact)
 - `/exit` - close app
 - `@<path>` - attach file path as dialog reference; file text is read only when the next prompt is submitted
 - Inline refs are also supported in prompts (example: `Review @/abs/path/File.kt` or `Review @"~/path with spaces/File.kt"`).

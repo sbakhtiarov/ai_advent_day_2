@@ -592,5 +592,12 @@ private class ProfileMemoryControllerTestCliIO(
 
     override fun openWorkflowMenu(options: List<String>, currentSelection: Int): Int? = currentSelection
 
+    override fun openInvariantMenu(options: List<String>, currentSelection: Int): InvariantMenuResult? {
+        return InvariantMenuResult(
+            action = InvariantMenuAction.CONFIRM,
+            selectedIndex = currentSelection,
+        )
+    }
+
     fun outputText(): String = lines.joinToString(separator = "\n")
 }

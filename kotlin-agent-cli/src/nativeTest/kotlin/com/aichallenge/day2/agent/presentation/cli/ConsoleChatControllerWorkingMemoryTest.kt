@@ -147,7 +147,7 @@ class ConsoleChatControllerWorkingMemoryTest {
     }
 
     @Test
-    fun resetCommandDoesNotClearWorkingMemory() = runBlocking {
+    fun resetCommandClearsWorkingMemory() = runBlocking {
         val repository = WorkingMemoryControllerTestAgentRepository(
             responses = listOf(
                 Result.success(AgentResponse(content = "assistant answer")),
@@ -178,7 +178,7 @@ class ConsoleChatControllerWorkingMemoryTest {
 
         controller.runInteractive()
 
-        assertEquals(0, workingStore.clearCalls)
+        assertEquals(1, workingStore.clearCalls)
         assertEquals(1, workingStore.saveStates.size)
     }
 
@@ -362,6 +362,13 @@ private class WorkingMemoryControllerTestCliIO(
     override fun openProfileMenu(options: List<String>, currentSelection: Int): Int? = currentSelection
 
     override fun openWorkflowMenu(options: List<String>, currentSelection: Int): Int? = currentSelection
+
+    override fun openInvariantMenu(options: List<String>, currentSelection: Int): InvariantMenuResult? {
+        return InvariantMenuResult(
+            action = InvariantMenuAction.CONFIRM,
+            selectedIndex = currentSelection,
+        )
+    }
 
     fun outputText(): String = lines.joinToString(separator = "\n")
 }

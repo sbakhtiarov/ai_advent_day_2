@@ -21,12 +21,17 @@ import com.aichallenge.day2.agent.domain.model.WorkflowStep
 import com.aichallenge.day2.agent.domain.model.WorkingMemoryState
 import com.aichallenge.day2.agent.domain.repository.ProfileMemoryStore
 import com.aichallenge.day2.agent.domain.repository.SessionMemoryStore
+import com.aichallenge.day2.agent.domain.repository.InvariantConstraintStore
 import com.aichallenge.day2.agent.domain.repository.UserDefinedProfileStore
 import com.aichallenge.day2.agent.domain.repository.UserDefinedWorkflowStore
 import com.aichallenge.day2.agent.domain.repository.WorkingMemoryStore
 import com.aichallenge.day2.agent.domain.usecase.BranchClassificationUseCase
 import com.aichallenge.day2.agent.domain.usecase.BuildPromptRequest
 import com.aichallenge.day2.agent.domain.usecase.BuildPromptUseCase
+import com.aichallenge.day2.agent.domain.usecase.InvariantConstraintValidationUseCase
+import com.aichallenge.day2.agent.domain.usecase.InvariantViolationSource
+import com.aichallenge.day2.agent.domain.usecase.InvariantValidationStatus
+import com.aichallenge.day2.agent.domain.usecase.InvariantViolation
 import com.aichallenge.day2.agent.domain.usecase.ProfilePreferenceStateMerger
 import com.aichallenge.day2.agent.domain.usecase.ProfileMemoryDistillationUseCase
 import com.aichallenge.day2.agent.domain.usecase.SessionMemoryCompactionCoordinator
@@ -52,6 +57,7 @@ import kotlin.time.TimeSource
 
 class ConsoleChatController(
     private val sendPromptUseCase: SendPromptUseCase,
+    private val invariantConstraintValidationUseCase: InvariantConstraintValidationUseCase = InvariantConstraintValidationUseCase(sendPromptUseCase),
     initialSystemPrompt: String,
     initialModel: String,
     models: List<ModelProperties>,
@@ -61,6 +67,7 @@ class ConsoleChatController(
     private val profileMemoryStore: ProfileMemoryStore? = null,
     private val userDefinedProfileStore: UserDefinedProfileStore? = null,
     private val userDefinedWorkflowStore: UserDefinedWorkflowStore? = null,
+    private val invariantConstraintStore: InvariantConstraintStore? = null,
     private val persistentMemoryEnabled: Boolean = true,
     private val workingMemoryDistillationUseCase: WorkingMemoryDistillationUseCase? = null,
     private val workingMemoryEnabled: Boolean = true,
@@ -106,6 +113,8 @@ class ConsoleChatController(
     private var profileMemoryInitialized = false
     private var userDefinedProfileInitialized = false
     private var userDefinedWorkflowInitialized = false
+    private var invariantConstraintsInitialized = false
+    private var invariantConstraints = mutableListOf<String>()
     private var workflowModeEnabled = false
     private var activeWorkflow: UserWorkflowDefinition? = null
     private var workflowRuntimeState: WorkflowRuntimeState? = null
@@ -130,6 +139,7 @@ class ConsoleChatController(
     suspend fun runInteractive() {
         initializeUserDefinedProfile()
         initializeUserDefinedWorkflow()
+        initializeInvariantConstraints()
         initializePersistentMemory()
         initializeWorkingMemory()
         initializeProfileMemory()
@@ -179,21 +189,14 @@ class ConsoleChatController(
         }
         initializeUserDefinedProfile()
         initializeUserDefinedWorkflow()
+        initializeInvariantConstraints()
 
         return runCatching {
             val startedAt = TimeSource.Monotonic.markNow()
-            val promptRequest = buildPromptUseCase.execute(
-                request = BuildPromptRequest(
-                    systemPrompt = systemPrompt,
-                    session = sessionMemory.promptDataSnapshot(),
-                    userPrompt = prompt,
-                    workingTaskState = workingMemoryState?.taskState,
-                    profileMemoryState = effectiveProfileMemoryState(),
-                ),
-            )
-            val response = sendPromptUseCase.execute(
-                prompt = promptRequest,
-                model = currentModel,
+            val response = executeAssistantTurnWithInvariantValidation(
+                requestPrompt = prompt,
+                effectiveSystemPrompt = systemPrompt,
+                validateInvariantConstraints = true,
             )
             val elapsedSeconds = startedAt.elapsedNow().inWholeMilliseconds / 1000.0
             io.writeLine(formatAssistantResponse(response.content, response.usage, elapsedSeconds))
@@ -242,6 +245,7 @@ class ConsoleChatController(
         userPromptForProfileMemory: String?,
         effectiveSystemPrompt: String,
         renderAssistantResponse: Boolean = true,
+        validateInvariantConstraints: Boolean = true,
     ): TurnExecutionResult? {
         io.updateFooterStatusLabel(workflowFooterLabel())
         io.showThinkingIndicator()
@@ -274,20 +278,18 @@ class ConsoleChatController(
 
                 try {
                     result = runCatching {
-                        val turnResult = if (activeCompactionMode == SessionCompactionMode.BRANCHING) {
-                            executeBranchingTurn(
-                                requestPrompt = requestPrompt,
-                                effectiveSystemPrompt = effectiveSystemPrompt,
-                            )
-                        } else {
-                            executeLinearTurn(
-                                requestPrompt = requestPrompt,
-                                effectiveSystemPrompt = effectiveSystemPrompt,
-                            )
-                        }
+                        val response = executeAssistantTurnWithInvariantValidation(
+                            requestPrompt = requestPrompt,
+                            effectiveSystemPrompt = effectiveSystemPrompt,
+                            validateInvariantConstraints = validateInvariantConstraints,
+                        )
+                        val sideEffects = applyAcceptedTurnSideEffects(
+                            requestPrompt = requestPrompt,
+                            response = response,
+                        )
                         updateWorkingMemoryAfterSuccessfulTurn(
                             userPrompt = userPromptForWorkingMemory,
-                            assistantResponse = turnResult.response.content,
+                            assistantResponse = response.content,
                         )
                         userPromptForProfileMemory
                             ?.trim()
@@ -298,23 +300,28 @@ class ConsoleChatController(
                                 )
                             }
                         memoryUsageSnapshot = buildUsageSnapshotAfterSuccessfulTurn(
-                            responseContent = turnResult.response.content,
-                            usage = turnResult.response.usage,
+                            responseContent = response.content,
+                            usage = response.usage,
                             messages = activeContextMessages(
                                 systemPromptOverride = effectiveSystemPrompt,
                             ),
                         )
                         val elapsedSeconds = startedAt.elapsedNow().inWholeMilliseconds / 1000.0
-                        val finalizedTurnResult = turnResult.copy(elapsedSeconds = elapsedSeconds)
+                        val finalizedTurnResult = TurnExecutionResult(
+                            response = response,
+                            compacted = sideEffects.compacted,
+                            systemMessages = sideEffects.systemMessages,
+                            elapsedSeconds = elapsedSeconds,
+                        )
                         persistMemorySnapshot()
                         pendingFileReferences.clear()
                         if (renderAssistantResponse) {
-                            dialogBlocks += formatAssistantResponse(turnResult.response.content, turnResult.response.usage, elapsedSeconds)
+                            dialogBlocks += formatAssistantResponse(response.content, response.usage, elapsedSeconds)
                         }
-                        if (turnResult.compacted) {
+                        if (sideEffects.compacted) {
                             dialogBlocks += "system> session memory compacted"
                         }
-                        turnResult.systemMessages.forEach { systemMessage ->
+                        sideEffects.systemMessages.forEach { systemMessage ->
                             dialogBlocks += systemMessage
                         }
                         finalizedTurnResult
@@ -652,6 +659,7 @@ class ConsoleChatController(
                 responseContract = WORKFLOW_VALIDATION_RESPONSE_CONTRACT_PROMPT,
             ),
             renderAssistantResponse = false,
+            validateInvariantConstraints = false,
         ) ?: return null
 
         val parsedOutcome = parseWorkflowValidationOutcome(validationResult.response.content)
@@ -696,6 +704,48 @@ class ConsoleChatController(
             stepPrompt.trim().takeIf { value -> value.isNotEmpty() },
             responseContract?.trim()?.takeIf { value -> value.isNotEmpty() },
         ).joinToString(separator = "\n\n")
+    }
+
+    private fun augmentSystemPromptWithInvariants(baseSystemPrompt: String): String {
+        val invariantBlock = buildInvariantSystemPromptBlock() ?: return baseSystemPrompt
+        return listOf(
+            baseSystemPrompt.trim().takeIf { value -> value.isNotEmpty() },
+            invariantBlock,
+        ).joinToString(separator = "\n\n")
+    }
+
+    private fun buildInvariantSystemPromptBlock(): String? {
+        val strictInvariants = normalizeStrictInvariantConstraints(invariantConstraints)
+        if (strictInvariants.isEmpty()) {
+            return null
+        }
+
+        return buildString {
+            appendLine("Invariant constraints (strict requirements):")
+            strictInvariants.forEachIndexed { index, invariant ->
+                appendLine("${index + 1}. $invariant")
+            }
+            append("All listed invariants are mandatory and must be satisfied in every response.")
+        }.trimEnd()
+    }
+
+    private fun normalizeStrictInvariantConstraints(values: List<String>): List<String> {
+        val seen = mutableSetOf<String>()
+        return values.mapNotNull { value ->
+            val trimmed = value.trim()
+            if (trimmed.isEmpty()) {
+                null
+            } else {
+                val withoutPrefix = trimmed.replaceFirst(INVARIANT_STRICT_PREFIX_REGEX, "").trim()
+                if (withoutPrefix.isEmpty()) {
+                    null
+                } else {
+                    "[Strict] $withoutPrefix"
+                }
+            }
+        }.filter { normalized ->
+            seen.add(normalized.lowercase())
+        }
     }
 
     private fun buildPlanningWorkflowPrompt(state: WorkflowRuntimeState): String {
@@ -1169,10 +1219,11 @@ class ConsoleChatController(
     private suspend fun executeLinearTurn(
         requestPrompt: String,
         effectiveSystemPrompt: String,
-    ): TurnExecutionResult {
+    ): AgentResponse {
+        val effectivePromptWithInvariants = augmentSystemPromptWithInvariants(effectiveSystemPrompt)
         val promptRequest = buildPromptUseCase.execute(
             request = BuildPromptRequest(
-                systemPrompt = effectiveSystemPrompt,
+                systemPrompt = effectivePromptWithInvariants,
                 session = sessionMemory.promptDataSnapshot(),
                 userPrompt = requestPrompt,
                 workingTaskState = workingMemoryState?.taskState,
@@ -1183,32 +1234,21 @@ class ConsoleChatController(
             prompt = promptRequest,
             model = currentModel,
         )
-        sessionMemory.recordSuccessfulTurn(requestPrompt, response.content)
-        val compacted = activeCompactionCoordinator()
-            ?.compactIfNeeded(
-                sessionMemory = sessionMemory,
-                model = currentModel,
-            )
-            ?: false
-
-        return TurnExecutionResult(
-            response = response,
-            compacted = compacted,
-            systemMessages = emptyList(),
-        )
+        return response
     }
 
     private suspend fun executeBranchingTurn(
         requestPrompt: String,
         effectiveSystemPrompt: String,
-    ): TurnExecutionResult {
+    ): AgentResponse {
+        val effectivePromptWithInvariants = augmentSystemPromptWithInvariants(effectiveSystemPrompt)
         val contextWindow = modelById[currentModel]?.contextWindowTokens
         val branchingPromptData = branchingSessionMemory.promptDataForRequest(
             maxEstimatedTokens = contextWindow,
             estimateTokens = { sessionPromptData ->
                 val promptRequest = buildPromptUseCase.execute(
                     request = BuildPromptRequest(
-                        systemPrompt = effectiveSystemPrompt,
+                        systemPrompt = effectivePromptWithInvariants,
                         session = sessionPromptData,
                         userPrompt = requestPrompt,
                         workingTaskState = workingMemoryState?.taskState,
@@ -1220,7 +1260,7 @@ class ConsoleChatController(
         )
         val promptRequest = buildPromptUseCase.execute(
             request = BuildPromptRequest(
-                systemPrompt = effectiveSystemPrompt,
+                systemPrompt = effectivePromptWithInvariants,
                 session = branchingPromptData.session,
                 userPrompt = requestPrompt,
                 workingTaskState = workingMemoryState?.taskState,
@@ -1231,16 +1271,186 @@ class ConsoleChatController(
             prompt = promptRequest,
             model = currentModel,
         )
-        val systemMessages = handleBranchingPostResponse(
-            prompt = requestPrompt,
-            response = response.content,
-        )
+        return response
+    }
 
-        return TurnExecutionResult(
-            response = response,
-            compacted = false,
-            systemMessages = systemMessages,
+    private suspend fun executeAssistantTurnWithInvariantValidation(
+        requestPrompt: String,
+        effectiveSystemPrompt: String,
+        validateInvariantConstraints: Boolean,
+    ): AgentResponse {
+        val maxAttempts = if (validateInvariantConstraints) {
+            INVARIANT_VALIDATION_MAX_RETRIES + 1
+        } else {
+            1
+        }
+        var currentPrompt = requestPrompt
+        val allFailures = mutableListOf<InvariantViolation>()
+
+        repeat(maxAttempts) { attemptIndex ->
+            val response = if (activeCompactionMode == SessionCompactionMode.BRANCHING) {
+                executeBranchingTurn(
+                    requestPrompt = currentPrompt,
+                    effectiveSystemPrompt = effectiveSystemPrompt,
+                )
+            } else {
+                executeLinearTurn(
+                    requestPrompt = currentPrompt,
+                    effectiveSystemPrompt = effectiveSystemPrompt,
+                )
+            }
+
+            if (!validateInvariantConstraints) {
+                return response
+            }
+
+            val validationResult = invariantConstraintValidationUseCase.validate(
+                invariants = invariantConstraints,
+                userPrompt = requestPrompt,
+                assistantResponse = response.content,
+                model = currentModel,
+            )
+
+            if (validationResult.status == InvariantValidationStatus.PASS) {
+                return response
+            }
+
+            val failedConstraints = validationResult.failedConstraints
+            allFailures += failedConstraints
+            val hasUserPromptViolation = failedConstraints.any { failure ->
+                failure.source == InvariantViolationSource.USER
+            }
+            if (hasUserPromptViolation) {
+                throw IllegalStateException(
+                    buildInvariantValidationFailureMessage(
+                        failedConstraints = allFailures,
+                        attemptsUsed = attemptIndex + 1,
+                        stoppedOnUserViolation = true,
+                    ),
+                )
+            }
+            if (attemptIndex == maxAttempts - 1) {
+                return@repeat
+            }
+
+            currentPrompt = buildInvariantRegenerationPrompt(
+                originalRequestPrompt = requestPrompt,
+                previousResponse = response.content,
+                failedConstraints = failedConstraints,
+            )
+        }
+
+        throw IllegalStateException(
+            buildInvariantValidationFailureMessage(
+                failedConstraints = allFailures,
+                attemptsUsed = maxAttempts,
+                stoppedOnUserViolation = false,
+            ),
         )
+    }
+
+    private suspend fun applyAcceptedTurnSideEffects(
+        requestPrompt: String,
+        response: AgentResponse,
+    ): TurnSideEffects {
+        return if (activeCompactionMode == SessionCompactionMode.BRANCHING) {
+            val systemMessages = handleBranchingPostResponse(
+                prompt = requestPrompt,
+                response = response.content,
+            )
+            TurnSideEffects(
+                compacted = false,
+                systemMessages = systemMessages,
+            )
+        } else {
+            sessionMemory.recordSuccessfulTurn(requestPrompt, response.content)
+            val compacted = activeCompactionCoordinator()
+                ?.compactIfNeeded(
+                    sessionMemory = sessionMemory,
+                    model = currentModel,
+                )
+                ?: false
+            TurnSideEffects(
+                compacted = compacted,
+                systemMessages = emptyList(),
+            )
+        }
+    }
+
+    private fun buildInvariantRegenerationPrompt(
+        originalRequestPrompt: String,
+        previousResponse: String,
+        failedConstraints: List<InvariantViolation>,
+    ): String {
+        val effectiveFailures = failedConstraints.takeIf { values -> values.isNotEmpty() }
+            ?: listOf(
+                InvariantViolation(
+                    constraint = "[Strict] Invariant constraint",
+                    userMessage = "Response violated strict invariants. Regenerate while satisfying all strict constraints.",
+                    source = InvariantViolationSource.LLM,
+                ),
+            )
+        return buildString {
+            appendLine("Original user prompt:")
+            appendLine(originalRequestPrompt)
+            appendLine()
+            appendLine("Your previous response was rejected by strict invariant validation.")
+            appendLine("Fix all failed constraints and regenerate a complete corrected response.")
+            appendLine()
+            appendLine("Failed constraints:")
+            effectiveFailures.forEachIndexed { index, failure ->
+                appendLine("${index + 1}. ${failure.constraint}")
+                appendLine("   User message: ${failure.userMessage}")
+            }
+            appendLine()
+            appendLine("Rejected previous response:")
+            appendLine(previousResponse)
+            appendLine()
+            appendLine("Return only the corrected final response.")
+        }.trimEnd()
+    }
+
+    private fun buildInvariantValidationFailureMessage(
+        failedConstraints: List<InvariantViolation>,
+        attemptsUsed: Int,
+        stoppedOnUserViolation: Boolean,
+    ): String {
+        val effectiveFailures = failedConstraints
+            .map { value ->
+                value.copy(
+                    constraint = value.constraint.trim(),
+                    userMessage = value.userMessage.trim(),
+                )
+            }
+            .filter { value -> value.constraint.isNotEmpty() || value.userMessage.isNotEmpty() }
+            .distinctBy { value -> "${value.constraint.lowercase()}\n${value.userMessage.lowercase()}" }
+            .ifEmpty {
+                listOf(
+                    InvariantViolation(
+                        constraint = "[Strict] Invariant constraint",
+                        userMessage = "Response violated strict invariants and could not be corrected automatically.",
+                        source = InvariantViolationSource.LLM,
+                    ),
+                )
+            }
+
+        return buildString {
+            if (stoppedOnUserViolation) {
+                appendLine("Invariant validation failed due to user prompt constraint violation.")
+            } else {
+                appendLine("Invariant validation failed after $attemptsUsed attempts.")
+            }
+            appendLine("Failed constraints:")
+            effectiveFailures.forEachIndexed { index, failure ->
+                appendLine("${index + 1}. ${failure.constraint}")
+                appendLine("   Source: ${failure.source.name.lowercase()}")
+                append("   ")
+                append(failure.userMessage)
+                if (index != effectiveFailures.lastIndex) {
+                    appendLine()
+                }
+            }
+        }.trimEnd()
     }
 
     private suspend fun handleBranchingPostResponse(
@@ -1570,12 +1780,18 @@ class ConsoleChatController(
                 true
             }
 
+            input == "/invariant" -> {
+                handleInvariantCommand()
+                true
+            }
+
             isModelCommand(input) -> {
                 handleModelCommand(input)
                 true
             }
 
             input == "/reset" -> {
+                clearWorkingMemory()
                 resetConversation()
                 workflowRuntimeState = if (workflowModeEnabled) {
                     WorkflowRuntimeState(step = WorkflowStep.USER_INPUT)
@@ -1610,6 +1826,13 @@ class ConsoleChatController(
         pendingFileReferences.clear()
     }
 
+    private fun clearWorkingMemory() {
+        workingMemoryState = null
+        runCatching {
+            workingMemoryStore?.clear()
+        }
+    }
+
     private fun resetWorkflowStepSessionContext() {
         resetConversation()
     }
@@ -1630,6 +1853,18 @@ class ConsoleChatController(
 
         userDefinedWorkflowInitialized = true
         reloadActiveWorkflow()
+    }
+
+    private fun initializeInvariantConstraints() {
+        if (invariantConstraintsInitialized) {
+            return
+        }
+
+        invariantConstraintsInitialized = true
+        val loadedConstraints = runCatching {
+            invariantConstraintStore?.load()
+        }.getOrNull().orEmpty()
+        invariantConstraints = loadedConstraints.toMutableList()
     }
 
     private fun reloadUserDefinedProfile() {
@@ -1847,7 +2082,9 @@ class ConsoleChatController(
         io.writeLine(logoBanner())
         io.writeLine()
         io.writeLine("    type your prompt and press Enter")
-        io.writeLine("    commands: /help, /models, /model <id|number>, /memory, /compact, /profile, /workflow, /reset, /exit, @<path>")
+        io.writeLine(
+            "    commands: /help, /models, /model <id|number>, /memory, /compact, /profile, /workflow, /invariant, /reset, /exit, @<path>",
+        )
         io.writeLine()
 
         dialogBlocks.forEachIndexed { index, block ->
@@ -1880,7 +2117,8 @@ class ConsoleChatController(
         /compact             choose memory compaction strategy
         /profile             choose active user profile
         /workflow            enable workflow mode with workflow selection (toggle off when enabled)
-        /reset               clear conversation and keep current system prompt
+        /invariant           configure invariant constraints
+        /reset               clear conversation and working memory; keep current system prompt
         /exit                close the application
         @<path>              attach file for the next prompt
     """.trimIndent()
@@ -1937,6 +2175,100 @@ class ConsoleChatController(
         workflowRuntimeState = WorkflowRuntimeState(step = WorkflowStep.USER_INPUT)
         workflowUiStep = WorkflowUiStep.USER_INPUT
         persistMemorySnapshot()
+    }
+
+    private fun handleInvariantCommand() {
+        val store = invariantConstraintStore
+        if (store == null) {
+            dialogBlocks += "system> invariant constraint store is unavailable"
+            return
+        }
+
+        var currentSelection = invariantConstraints.size
+        while (true) {
+            val addNewItemIndex = invariantConstraints.size
+            val menuOptions = invariantConstraints + INVARIANT_ADD_NEW_CONSTRAINT_LABEL
+            val selection = io.openInvariantMenu(
+                options = menuOptions,
+                currentSelection = currentSelection.coerceIn(0, menuOptions.lastIndex),
+            ) ?: return
+
+            val selectedIndex = selection.selectedIndex.coerceIn(0, addNewItemIndex)
+            currentSelection = selectedIndex
+
+            when (selection.action) {
+                InvariantMenuAction.DELETE -> {
+                    if (selectedIndex == addNewItemIndex) {
+                        dialogBlocks += "system> '$INVARIANT_ADD_NEW_CONSTRAINT_LABEL' cannot be removed"
+                        continue
+                    }
+
+                    val removedConstraint = invariantConstraints.removeAt(selectedIndex)
+                    val persisted = runCatching {
+                        store.save(invariantConstraints.toList())
+                        true
+                    }.getOrDefault(false)
+                    if (!persisted) {
+                        invariantConstraints.add(selectedIndex, removedConstraint)
+                        dialogBlocks += "system> failed to persist invariant constraints"
+                        continue
+                    }
+
+                    dialogBlocks += "system> invariant constraint removed: \"$removedConstraint\""
+                    currentSelection = selectedIndex.coerceAtMost(invariantConstraints.size)
+                }
+
+                InvariantMenuAction.CONFIRM -> {
+                    if (selectedIndex != addNewItemIndex) {
+                        continue
+                    }
+
+                    val input = readInvariantConstraintInput() ?: continue
+                    val normalizedInput = input.trim()
+                    if (normalizedInput.isEmpty()) {
+                        dialogBlocks += "system> invariant constraint must not be blank"
+                        continue
+                    }
+
+                    val normalizedKey = normalizedInput.lowercase()
+                    val alreadyExists = invariantConstraints.any { existingConstraint ->
+                        existingConstraint.trim().lowercase() == normalizedKey
+                    }
+                    if (alreadyExists) {
+                        dialogBlocks += "system> invariant constraint already exists"
+                        continue
+                    }
+
+                    invariantConstraints += normalizedInput
+                    val persisted = runCatching {
+                        store.save(invariantConstraints.toList())
+                        true
+                    }.getOrDefault(false)
+                    if (!persisted) {
+                        invariantConstraints.removeAt(invariantConstraints.lastIndex)
+                        dialogBlocks += "system> failed to persist invariant constraints"
+                        continue
+                    }
+
+                    dialogBlocks += "system> invariant constraint added"
+                    currentSelection = invariantConstraints.lastIndex
+                }
+            }
+        }
+    }
+
+    private fun readInvariantConstraintInput(): String? {
+        renderScreen()
+        io.showCursor()
+        return try {
+            io.readLineInFooter(
+                prompt = "constraint> ",
+                divider = inputDivider,
+                footerLabel = workflowFooterLabel(),
+            )
+        } finally {
+            io.hideCursor()
+        }
     }
 
     private fun modelsText(): String = buildString {
@@ -2340,6 +2672,11 @@ class ConsoleChatController(
         val elapsedSeconds: Double = 0.0,
     )
 
+    private data class TurnSideEffects(
+        val compacted: Boolean,
+        val systemMessages: List<String>,
+    )
+
     private data class WorkflowQuestion(
         val text: String,
         val options: List<String>,
@@ -2383,6 +2720,8 @@ class ConsoleChatController(
 
     companion object {
         private const val WORKFLOW_APPROVAL_INPUT_PROMPT = "choice/comment> "
+        private const val INVARIANT_ADD_NEW_CONSTRAINT_LABEL = "Add new constraint"
+        private const val INVARIANT_VALIDATION_MAX_RETRIES = 2
         private val WORKFLOW_PLANNING_APPROVAL_PROMPT = """
             Planning result approval:
             1. Approve
@@ -2412,6 +2751,7 @@ class ConsoleChatController(
         private const val THINKING_TENTHS_PER_SECOND = 10L
         private const val THINKING_TENTH_DIVISOR_MS = 100L
         private val THINKING_SPINNER_FRAMES = charArrayOf('|', '/', '-', '\\')
+        private val INVARIANT_STRICT_PREFIX_REGEX = Regex("^\\[\\s*strict\\s*\\]\\s*", RegexOption.IGNORE_CASE)
         private val FENCED_CODE_BLOCK_REGEX = Regex("```(?:json)?\\s*([\\s\\S]*?)```", RegexOption.IGNORE_CASE)
         private val TRAILING_REFERENCE_DELIMITERS = setOf('.', ',', ';', ':', '!', '?', ')', ']', '}')
         private val KNOWN_FILE_EXTENSIONS = setOf(

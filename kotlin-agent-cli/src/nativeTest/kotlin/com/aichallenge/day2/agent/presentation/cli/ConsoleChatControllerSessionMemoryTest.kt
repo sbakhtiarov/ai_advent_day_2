@@ -26,6 +26,7 @@ import com.aichallenge.day2.agent.domain.model.UserWorkflowOption
 import com.aichallenge.day2.agent.domain.model.WorkflowRuntimeState
 import com.aichallenge.day2.agent.domain.model.WorkflowStep
 import com.aichallenge.day2.agent.domain.repository.AgentRepository
+import com.aichallenge.day2.agent.domain.repository.InvariantConstraintStore
 import com.aichallenge.day2.agent.domain.repository.SessionMemoryStore
 import com.aichallenge.day2.agent.domain.repository.UserDefinedProfileStore
 import com.aichallenge.day2.agent.domain.repository.UserDefinedWorkflowStore
@@ -1370,6 +1371,7 @@ class ConsoleChatControllerSessionMemoryTest {
         val repository = RecordingAgentRepository(
             responses = listOf(
                 Result.success(AgentResponse(content = "one-shot answer")),
+                Result.success(AgentResponse(content = """{"status":"PASS","failed_constraints":[]}""")),
             ),
         )
         val store = RecordingSessionMemoryStore(
@@ -1398,6 +1400,380 @@ class ConsoleChatControllerSessionMemoryTest {
         assertEquals(0, store.loadCalls)
         assertEquals(0, store.saveStates.size)
         assertEquals(0, store.clearCalls)
+    }
+
+    @Test
+    fun runSinglePromptLoadsInvariantConstraintsOnStartup() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "one-shot answer")),
+                Result.success(AgentResponse(content = """{"status":"PASS","failed_constraints":[]}""")),
+            ),
+        )
+        val invariantStore = RecordingInvariantConstraintStore(
+            loadedConstraints = listOf("Always run tests"),
+        )
+        val controller = createController(
+            repository = repository,
+            io = FakeCliIO(inputs = emptyList()),
+            invariantConstraintStore = invariantStore,
+            persistentMemoryEnabled = false,
+        )
+
+        val exitCode = controller.runSinglePrompt("one-shot question")
+
+        assertEquals(0, exitCode)
+        assertEquals(1, invariantStore.loadCalls)
+        assertEquals(0, invariantStore.saveConstraints.size)
+        assertEquals(2, repository.conversations.size)
+    }
+
+    @Test
+    fun interactiveModeLoadsInvariantConstraintsOnStartup() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val invariantStore = RecordingInvariantConstraintStore(
+            loadedConstraints = listOf("Always run tests"),
+        )
+        val controller = createController(
+            repository = repository,
+            io = FakeCliIO(inputs = listOf("/exit")),
+            invariantConstraintStore = invariantStore,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(1, invariantStore.loadCalls)
+        assertEquals(0, invariantStore.saveConstraints.size)
+    }
+
+    @Test
+    fun invariantValidationPassesOnFirstAttempt() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "answer one")),
+                Result.success(AgentResponse(content = """{"status":"PASS","failed_constraints":[]}""")),
+            ),
+        )
+        val invariantStore = RecordingInvariantConstraintStore(
+            loadedConstraints = listOf("Always run tests"),
+        )
+        val io = FakeCliIO(inputs = listOf("prompt one", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            invariantConstraintStore = invariantStore,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(2, repository.conversations.size)
+        assertEquals("prompt one", repository.conversations[0][1].content)
+        assertContains(
+            repository.conversations[1][0].content,
+            "You validate assistant responses against strict invariant constraints.",
+        )
+        assertContains(repository.conversations[1][1].content, "1. [Strict] Always run tests")
+        assertContains(io.outputText(), "answer one")
+    }
+
+    @Test
+    fun invariantConstraintsAreInjectedIntoEachMainPromptSystemMessage() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "answer one")),
+                Result.success(AgentResponse(content = """{"status":"PASS","failed_constraints":[]}""")),
+            ),
+        )
+        val invariantStore = RecordingInvariantConstraintStore(
+            loadedConstraints = listOf(" Always run tests ", "[Strict] Avoid destructive changes", "[strict] always run tests"),
+        )
+        val controller = createController(
+            repository = repository,
+            io = FakeCliIO(inputs = listOf("prompt one", "/exit")),
+            invariantConstraintStore = invariantStore,
+        )
+
+        controller.runInteractive()
+
+        val systemPrompt = repository.conversations[0][0].content
+        assertContains(systemPrompt, "Invariant constraints (strict requirements):")
+        assertContains(systemPrompt, "1. [Strict] Always run tests")
+        assertContains(systemPrompt, "2. [Strict] Avoid destructive changes")
+        assertContains(systemPrompt, "must be satisfied in every response")
+    }
+
+    @Test
+    fun invariantValidationRetriesAndStoresOnlyAcceptedResponse() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "bad answer")),
+                Result.success(
+                    AgentResponse(
+                        content = """
+                        {
+                          "status":"FAIL",
+                          "failed_constraints":[
+                            {
+                              "constraint":"[Strict] Always run tests",
+                              "source":"llm",
+                              "user_message":"Include concrete test evidence."
+                            }
+                          ]
+                        }
+                        """.trimIndent(),
+                    ),
+                ),
+                Result.success(AgentResponse(content = "good answer")),
+                Result.success(AgentResponse(content = """{"status":"PASS","failed_constraints":[]}""")),
+                Result.success(AgentResponse(content = "second answer")),
+                Result.success(AgentResponse(content = """{"status":"PASS","failed_constraints":[]}""")),
+            ),
+        )
+        val invariantStore = RecordingInvariantConstraintStore(
+            loadedConstraints = listOf("Always run tests"),
+        )
+        val io = FakeCliIO(inputs = listOf("prompt one", "prompt two", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            invariantConstraintStore = invariantStore,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(6, repository.conversations.size)
+        assertContains(
+            repository.conversations[2][1].content,
+            "Your previous response was rejected by strict invariant validation.",
+        )
+        assertContains(repository.conversations[2][1].content, "Include concrete test evidence.")
+        val secondPromptRequest = repository.conversations[4]
+        assertEquals(
+            listOf(MessageRole.SYSTEM, MessageRole.USER, MessageRole.ASSISTANT, MessageRole.USER),
+            secondPromptRequest.map { it.role },
+        )
+        assertEquals("good answer", secondPromptRequest[2].content)
+        assertFalse(io.outputText().contains("bad answer"))
+        assertContains(io.outputText(), "good answer")
+    }
+
+    @Test
+    fun invariantValidationUserSourceDoesNotRetryGeneration() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "bad answer")),
+                Result.success(
+                    AgentResponse(
+                        content = """
+                        {
+                          "status":"FAIL",
+                          "failed_constraints":[
+                            {
+                              "constraint":"[Strict] Always run tests",
+                              "source":"user",
+                              "user_message":"Your request explicitly asks to skip tests."
+                            }
+                          ]
+                        }
+                        """.trimIndent(),
+                    ),
+                ),
+                Result.success(AgentResponse(content = "good answer")),
+                Result.success(AgentResponse(content = """{"status":"PASS","failed_constraints":[]}""")),
+            ),
+        )
+        val invariantStore = RecordingInvariantConstraintStore(
+            loadedConstraints = listOf("Always run tests"),
+        )
+        val io = FakeCliIO(inputs = listOf("prompt one", "prompt two", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            invariantConstraintStore = invariantStore,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(4, repository.conversations.size)
+        val secondPromptRequest = repository.conversations[2]
+        assertEquals(
+            listOf(MessageRole.SYSTEM, MessageRole.USER),
+            secondPromptRequest.map { it.role },
+        )
+        assertEquals("prompt two", secondPromptRequest[1].content)
+        assertContains(io.outputText(), "Invariant validation failed due to user prompt constraint violation.")
+        assertContains(io.outputText(), "Source: user")
+        assertContains(io.outputText(), "Your request explicitly asks to skip tests.")
+        assertFalse(io.outputText().contains("bad answer"))
+    }
+
+    @Test
+    fun invariantValidationStopsAfterRetryLimitAndKeepsMemoryClean() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "bad answer 1")),
+                Result.success(
+                    AgentResponse(
+                        content = """
+                        {
+                          "status":"FAIL",
+                          "failed_constraints":[
+                            {"constraint":"[Strict] Always run tests","source":"llm","user_message":"Add test evidence."}
+                          ]
+                        }
+                        """.trimIndent(),
+                    ),
+                ),
+                Result.success(AgentResponse(content = "bad answer 2")),
+                Result.success(
+                    AgentResponse(
+                        content = """
+                        {
+                          "status":"FAIL",
+                          "failed_constraints":[
+                            {"constraint":"[Strict] Always run tests","source":"llm","user_message":"Still missing tests."}
+                          ]
+                        }
+                        """.trimIndent(),
+                    ),
+                ),
+                Result.success(AgentResponse(content = "bad answer 3")),
+                Result.success(
+                    AgentResponse(
+                        content = """
+                        {
+                          "status":"FAIL",
+                          "failed_constraints":[
+                            {"constraint":"[Strict] Always run tests","source":"llm","user_message":"Tests are required."}
+                          ]
+                        }
+                        """.trimIndent(),
+                    ),
+                ),
+                Result.success(AgentResponse(content = "good answer")),
+                Result.success(AgentResponse(content = """{"status":"PASS","failed_constraints":[]}""")),
+            ),
+        )
+        val invariantStore = RecordingInvariantConstraintStore(
+            loadedConstraints = listOf("Always run tests"),
+        )
+        val io = FakeCliIO(inputs = listOf("prompt one", "prompt two", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            invariantConstraintStore = invariantStore,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(8, repository.conversations.size)
+        assertContains(io.outputText(), "Invariant validation failed after 3 attempts.")
+        val secondPromptRequest = repository.conversations[6]
+        assertEquals(
+            listOf(MessageRole.SYSTEM, MessageRole.USER),
+            secondPromptRequest.map { it.role },
+        )
+        assertEquals("prompt two", secondPromptRequest[1].content)
+    }
+
+    @Test
+    fun runSinglePromptAppliesInvariantValidationAndRetry() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "bad answer")),
+                Result.success(
+                    AgentResponse(
+                        content = """
+                        {
+                          "status":"FAIL",
+                          "failed_constraints":[
+                            {"constraint":"[Strict] Always run tests","source":"llm","user_message":"Add test evidence."}
+                          ]
+                        }
+                        """.trimIndent(),
+                    ),
+                ),
+                Result.success(AgentResponse(content = "good answer")),
+                Result.success(AgentResponse(content = """{"status":"PASS","failed_constraints":[]}""")),
+            ),
+        )
+        val invariantStore = RecordingInvariantConstraintStore(
+            loadedConstraints = listOf("Always run tests"),
+        )
+        val io = FakeCliIO(inputs = emptyList())
+        val controller = createController(
+            repository = repository,
+            io = io,
+            invariantConstraintStore = invariantStore,
+            persistentMemoryEnabled = false,
+        )
+
+        val exitCode = controller.runSinglePrompt("one-shot question")
+
+        assertEquals(0, exitCode)
+        assertEquals(4, repository.conversations.size)
+        assertContains(
+            repository.conversations[2][1].content,
+            "Your previous response was rejected by strict invariant validation.",
+        )
+        assertContains(io.outputText(), "good answer")
+        assertFalse(io.outputText().contains("bad answer"))
+    }
+
+    @Test
+    fun branchingModeValidatesOnlyMainAssistantResponse() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "assistant answer")),
+                Result.success(AgentResponse(content = """{"status":"PASS","failed_constraints":[]}""")),
+                Result.success(
+                    AgentResponse(
+                        content = """
+                        {
+                          "topic": {"kind": "new", "key": "", "name": "Building new application"},
+                          "subtopic": {"kind": "new", "key": "", "name": "Architecture"}
+                        }
+                        """.trimIndent(),
+                    ),
+                ),
+                Result.success(
+                    AgentResponse(
+                        content = """
+                        {
+                          "allowNewTopic": true,
+                          "reuseTopicKey": "",
+                          "allowNewSubtopic": true,
+                          "reuseSubtopicKey": ""
+                        }
+                        """.trimIndent(),
+                    ),
+                ),
+                Result.success(AgentResponse(content = "updated topic summary")),
+            ),
+        )
+        val invariantStore = RecordingInvariantConstraintStore(
+            loadedConstraints = listOf("Always run tests"),
+        )
+        val controller = createController(
+            repository = repository,
+            io = FakeCliIO(inputs = listOf("Create architecture", "/exit")),
+            invariantConstraintStore = invariantStore,
+            compactionCoordinators = mapOf(
+                SessionCompactionMode.BRANCHING to SessionMemoryCompactionCoordinator.disabled(),
+            ),
+            defaultCompactionMode = SessionCompactionMode.BRANCHING,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(5, repository.conversations.size)
+        val invariantValidationRequests = repository.conversations.count { conversation ->
+            conversation.firstOrNull()?.content?.contains(
+                "You validate assistant responses against strict invariant constraints.",
+            ) == true
+        }
+        assertEquals(1, invariantValidationRequests)
+        assertContains(repository.conversations[2][0].content, "You classify conversation turns into topic and subtopic")
     }
 
     @Test
@@ -1758,12 +2134,197 @@ class ConsoleChatControllerSessionMemoryTest {
         controller.runInteractive()
 
         val output = io.outputText()
-        assertContains(output, "commands: /help, /models, /model <id|number>, /memory, /compact, /profile, /workflow, /reset, /exit, @<path>")
+        assertContains(
+            output,
+            "commands: /help, /models, /model <id|number>, /memory, /compact, /profile, /workflow, /invariant, /reset, /exit, @<path>",
+        )
         assertContains(output, "/memory              show session-memory context usage")
         assertContains(output, "/compact             choose memory compaction strategy")
         assertContains(output, "/profile             choose active user profile")
         assertContains(output, "/workflow            enable workflow mode with workflow selection (toggle off when enabled)")
+        assertContains(output, "/invariant           configure invariant constraints")
         assertContains(output, "@<path>              attach file for the next prompt")
+    }
+
+    @Test
+    fun invariantCommandAddsConstraintAndPersists() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val invariantStore = RecordingInvariantConstraintStore()
+        val io = FakeCliIO(
+            inputs = listOf("/invariant", "Always run tests before finalizing", "/exit"),
+            invariantSelections = listOf(
+                InvariantMenuResult(action = InvariantMenuAction.CONFIRM, selectedIndex = 0),
+                null,
+            ),
+        )
+        val controller = createController(
+            repository = repository,
+            io = io,
+            invariantConstraintStore = invariantStore,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(
+            listOf(listOf("Always run tests before finalizing")),
+            invariantStore.saveConstraints,
+        )
+        assertContains(io.outputText(), "system> invariant constraint added")
+    }
+
+    @Test
+    fun invariantCommandDeletesConstraintAndPersists() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val invariantStore = RecordingInvariantConstraintStore(
+            loadedConstraints = listOf(
+                "Always run tests",
+                "Keep commits atomic",
+            ),
+        )
+        val io = FakeCliIO(
+            inputs = listOf("/invariant", "/exit"),
+            invariantSelections = listOf(
+                InvariantMenuResult(action = InvariantMenuAction.DELETE, selectedIndex = 1),
+                null,
+            ),
+        )
+        val controller = createController(
+            repository = repository,
+            io = io,
+            invariantConstraintStore = invariantStore,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(
+            listOf(listOf("Always run tests")),
+            invariantStore.saveConstraints,
+        )
+        assertContains(io.outputText(), "system> invariant constraint removed: \"Keep commits atomic\"")
+    }
+
+    @Test
+    fun invariantCommandRejectsBlankConstraint() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val invariantStore = RecordingInvariantConstraintStore()
+        val io = FakeCliIO(
+            inputs = listOf("/invariant", "   ", "/exit"),
+            invariantSelections = listOf(
+                InvariantMenuResult(action = InvariantMenuAction.CONFIRM, selectedIndex = 0),
+                null,
+            ),
+        )
+        val controller = createController(
+            repository = repository,
+            io = io,
+            invariantConstraintStore = invariantStore,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(0, invariantStore.saveConstraints.size)
+        assertContains(io.outputText(), "system> invariant constraint must not be blank")
+    }
+
+    @Test
+    fun invariantCommandRejectsDuplicateConstraintCaseInsensitively() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val invariantStore = RecordingInvariantConstraintStore(
+            loadedConstraints = listOf("Always run tests"),
+        )
+        val io = FakeCliIO(
+            inputs = listOf("/invariant", "  always RUN tests  ", "/exit"),
+            invariantSelections = listOf(
+                InvariantMenuResult(action = InvariantMenuAction.CONFIRM, selectedIndex = 1),
+                null,
+            ),
+        )
+        val controller = createController(
+            repository = repository,
+            io = io,
+            invariantConstraintStore = invariantStore,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(0, invariantStore.saveConstraints.size)
+        assertContains(io.outputText(), "system> invariant constraint already exists")
+    }
+
+    @Test
+    fun invariantCommandDeleteOnAddNewItemIsIgnored() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val invariantStore = RecordingInvariantConstraintStore()
+        val io = FakeCliIO(
+            inputs = listOf("/invariant", "/exit"),
+            invariantSelections = listOf(
+                InvariantMenuResult(action = InvariantMenuAction.DELETE, selectedIndex = 0),
+                null,
+            ),
+        )
+        val controller = createController(
+            repository = repository,
+            io = io,
+            invariantConstraintStore = invariantStore,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(0, invariantStore.saveConstraints.size)
+        assertContains(io.outputText(), "system> 'Add new constraint' cannot be removed")
+    }
+
+    @Test
+    fun invariantCommandKeepsMenuOpenForBatchEdits() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val invariantStore = RecordingInvariantConstraintStore()
+        val io = FakeCliIO(
+            inputs = listOf("/invariant", "Keep PR scope small", "/exit"),
+            invariantSelections = listOf(
+                InvariantMenuResult(action = InvariantMenuAction.CONFIRM, selectedIndex = 0),
+                InvariantMenuResult(action = InvariantMenuAction.DELETE, selectedIndex = 0),
+                null,
+            ),
+        )
+        val controller = createController(
+            repository = repository,
+            io = io,
+            invariantConstraintStore = invariantStore,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(
+            listOf(
+                listOf("Keep PR scope small"),
+                emptyList(),
+            ),
+            invariantStore.saveConstraints,
+        )
+    }
+
+    @Test
+    fun invariantCommandEnterOnExistingConstraintIsNoOp() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val invariantStore = RecordingInvariantConstraintStore(
+            loadedConstraints = listOf("Always run tests"),
+        )
+        val io = FakeCliIO(
+            inputs = listOf("/invariant", "/exit"),
+            invariantSelections = listOf(
+                InvariantMenuResult(action = InvariantMenuAction.CONFIRM, selectedIndex = 0),
+                null,
+            ),
+        )
+        val controller = createController(
+            repository = repository,
+            io = io,
+            invariantConstraintStore = invariantStore,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(0, invariantStore.saveConstraints.size)
     }
 
     @Test
@@ -2675,6 +3236,7 @@ class ConsoleChatControllerSessionMemoryTest {
         sessionMemoryStore: SessionMemoryStore? = null,
         userDefinedProfileStore: UserDefinedProfileStore? = null,
         userDefinedWorkflowStore: UserDefinedWorkflowStore? = null,
+        invariantConstraintStore: InvariantConstraintStore? = null,
         persistentMemoryEnabled: Boolean = true,
         fileReferenceReader: FileReferenceReader = RecordingFileReferenceReader(emptyMap()),
         compactionCoordinators: Map<SessionCompactionMode, SessionMemoryCompactionCoordinator> = mapOf(
@@ -2700,6 +3262,7 @@ class ConsoleChatControllerSessionMemoryTest {
             sessionMemoryStore = sessionMemoryStore,
             userDefinedProfileStore = userDefinedProfileStore,
             userDefinedWorkflowStore = userDefinedWorkflowStore,
+            invariantConstraintStore = invariantConstraintStore,
             persistentMemoryEnabled = persistentMemoryEnabled,
             fileReferenceReader = fileReferenceReader,
             compactionCoordinators = compactionCoordinators,
@@ -2731,11 +3294,13 @@ private class FakeCliIO(
     private val compactionSelections: List<Int?> = emptyList(),
     private val profileSelections: List<Int?> = emptyList(),
     private val workflowSelections: List<Int?> = emptyList(),
+    private val invariantSelections: List<InvariantMenuResult?> = emptyList(),
 ) : CliIO {
     private val queuedInputs = ArrayDeque<String?>(inputs)
     private var nextCompactionSelectionIndex = 0
     private var nextProfileSelectionIndex = 0
     private var nextWorkflowSelectionIndex = 0
+    private var nextInvariantSelectionIndex = 0
     private val lines = mutableListOf<String>()
     var showThinkingIndicatorCalls: Int = 0
         private set
@@ -2806,6 +3371,18 @@ private class FakeCliIO(
         return currentSelection
     }
 
+    override fun openInvariantMenu(options: List<String>, currentSelection: Int): InvariantMenuResult? {
+        val selection = invariantSelections.getOrNull(nextInvariantSelectionIndex)
+        if (nextInvariantSelectionIndex < invariantSelections.size) {
+            nextInvariantSelectionIndex += 1
+            return selection
+        }
+        return InvariantMenuResult(
+            action = InvariantMenuAction.CONFIRM,
+            selectedIndex = currentSelection,
+        )
+    }
+
     private fun nextInput(): String? = queuedInputs.removeFirstOrNull()
 
     fun outputText(): String = lines.joinToString(separator = "\n")
@@ -2860,6 +3437,23 @@ private class RecordingSelectableUserDefinedProfileStore(
         setActiveCalls += fileName
         activeFileName = fileName
         return true
+    }
+}
+
+private class RecordingInvariantConstraintStore(
+    private val loadedConstraints: List<String> = emptyList(),
+) : InvariantConstraintStore {
+    var loadCalls: Int = 0
+        private set
+    val saveConstraints = mutableListOf<List<String>>()
+
+    override fun load(): List<String> {
+        loadCalls += 1
+        return loadedConstraints.toList()
+    }
+
+    override fun save(constraints: List<String>) {
+        saveConstraints += constraints.toList()
     }
 }
 

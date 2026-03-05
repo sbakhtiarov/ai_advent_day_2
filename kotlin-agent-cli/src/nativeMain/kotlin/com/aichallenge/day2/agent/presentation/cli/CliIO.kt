@@ -38,7 +38,18 @@ interface CliIO {
     fun openCompactionMenu(options: List<String>, currentSelection: Int): Int?
     fun openProfileMenu(options: List<String>, currentSelection: Int): Int?
     fun openWorkflowMenu(options: List<String>, currentSelection: Int): Int?
+    fun openInvariantMenu(options: List<String>, currentSelection: Int): InvariantMenuResult?
 }
+
+enum class InvariantMenuAction {
+    CONFIRM,
+    DELETE,
+}
+
+data class InvariantMenuResult(
+    val action: InvariantMenuAction,
+    val selectedIndex: Int,
+)
 
 object StdCliIO : CliIO {
     private var thinkingIndicatorVisible = false
@@ -562,6 +573,123 @@ object StdCliIO : CliIO {
         return result
     }
 
+    override fun openInvariantMenu(options: List<String>, currentSelection: Int): InvariantMenuResult? {
+        if (options.isEmpty()) {
+            return null
+        }
+
+        var selectedIndex = currentSelection.coerceIn(0, options.lastIndex)
+
+        fun buildMenuLines(): List<String> {
+            val lines = mutableListOf<String>()
+            lines += "   Invariant constraints"
+            lines += ""
+            options.forEachIndexed { index, option ->
+                val optionText = "${index + 1}. $option"
+                val decorated = if (index == selectedIndex) {
+                    "$OPTION_SELECTED_COLOR$optionText$ANSI_RESET"
+                } else {
+                    optionText
+                }
+                lines += "   $decorated"
+            }
+            lines += ""
+            lines += "   Press Enter to select, Del to remove, ESC to close"
+            return lines
+        }
+
+        fun renderMenu() {
+            print("\u001B8")
+            print('\r')
+
+            val terminalWidth = detectTerminalWidth().coerceAtLeast(1)
+            val menuLines = buildMenuLines()
+            val menuHeight = calculateWrappedLineCount(menuLines, terminalWidth)
+            ensureMenuFits(requiredMenuLines = menuHeight)
+
+            print("\u001B7")
+            print("\u001B[J")
+            menuLines.forEachIndexed { index, line ->
+                print(line)
+                if (index != menuLines.lastIndex) {
+                    print('\n')
+                }
+            }
+        }
+
+        print("\r\n")
+        print("\u001B7")
+        renderMenu()
+
+        var result: InvariantMenuResult? = null
+
+        withRawInput<Unit> {
+            while (true) {
+                when (readByte()) {
+                    null -> {
+                        result = null
+                        break
+                    }
+
+                    ENTER_CR, ENTER_LF -> {
+                        result = InvariantMenuResult(
+                            action = InvariantMenuAction.CONFIRM,
+                            selectedIndex = selectedIndex,
+                        )
+                        break
+                    }
+
+                    DELETE -> {
+                        result = InvariantMenuResult(
+                            action = InvariantMenuAction.DELETE,
+                            selectedIndex = selectedIndex,
+                        )
+                        break
+                    }
+
+                    ESCAPE -> {
+                        val escNext = readOptionalByte(timeoutDeciseconds = 1)
+                        if (escNext == null) {
+                            result = null
+                            break
+                        }
+
+                        if (escNext == CSI) {
+                            when (readOptionalByte(timeoutDeciseconds = 1)) {
+                                ARROW_UP -> {
+                                    selectedIndex = (selectedIndex - 1 + options.size) % options.size
+                                    renderMenu()
+                                }
+
+                                ARROW_DOWN -> {
+                                    selectedIndex = (selectedIndex + 1) % options.size
+                                    renderMenu()
+                                }
+
+                                CSI_DELETE_PRIMARY -> {
+                                    if (readOptionalByte(timeoutDeciseconds = 1) == CSI_TILDE) {
+                                        result = InvariantMenuResult(
+                                            action = InvariantMenuAction.DELETE,
+                                            selectedIndex = selectedIndex,
+                                        )
+                                        break
+                                    }
+                                }
+
+                                else -> Unit
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        print("\u001B8")
+        print('\r')
+        print("\u001B[J")
+        return result
+    }
+
     private fun redrawFooterFromPromptAnchor(
         prompt: String,
         input: StringBuilder,
@@ -859,6 +987,8 @@ object StdCliIO : CliIO {
     private const val CSI = 91
     private const val ARROW_UP = 65
     private const val ARROW_DOWN = 66
+    private const val CSI_DELETE_PRIMARY = 51
+    private const val CSI_TILDE = 126
     private const val ARROW_LEFT = 68
     private const val ARROW_RIGHT = 67
     private const val DIVIDER_COLOR = "\u001B[38;5;240m"
