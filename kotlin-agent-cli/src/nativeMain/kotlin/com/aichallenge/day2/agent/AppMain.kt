@@ -170,6 +170,7 @@ private fun printEnvironmentHelp() {
         
         Optional configuration (environment variable or local.properties):
           OPENAI_BASE_URL      default: https://api.openai.com/v1
+          OPENAI_API_LOG_FILE  default: ~/.kotlin-agent-cli/openai-api-traffic.log (blank disables)
         """.trimIndent(),
     )
 }

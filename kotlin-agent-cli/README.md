@@ -21,6 +21,7 @@ Create `local.properties` in this folder (`kotlin-agent-cli/local.properties`):
 ```properties
 OPENAI_API_KEY=sk-...
 OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_API_LOG_FILE=/Users/you/.kotlin-agent-cli/openai-api-traffic.log
 ```
 
 Environment variables are still supported and take precedence over `local.properties`.
@@ -35,7 +36,12 @@ Optional:
 
 ```bash
 export OPENAI_BASE_URL="https://api.openai.com/v1"
+export OPENAI_API_LOG_FILE="$HOME/.kotlin-agent-cli/openai-api-traffic.log"
 ```
+
+Raw OpenAI API traffic is logged to `~/.kotlin-agent-cli/openai-api-traffic.log` by default.
+Set `OPENAI_API_LOG_FILE` to a different absolute path to override it, or set it to an empty value to disable file logging.
+The logger writes raw JSON request/response bodies plus HTTP status and headers; the `Authorization` header is redacted in the log file.
 
 Model catalog is built into the app (including pricing and context-window metadata).
 Use `/models` to see all available models and `/model <id|number>` to switch the active one.

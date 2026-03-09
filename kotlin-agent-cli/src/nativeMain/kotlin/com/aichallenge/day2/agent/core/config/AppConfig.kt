@@ -28,12 +28,14 @@ data class AppConfig(
     val models: List<ModelProperties>,
     val baseUrl: String,
     val systemPrompt: String,
+    val apiTrafficLogFilePath: String?,
 ) {
     companion object {
         private const val DEFAULT_MODEL = "gpt-4.1-mini"
         private const val DEFAULT_BASE_URL = "https://api.openai.com/v1"
         private const val DEFAULT_SYSTEM_PROMPT =
             "You are a concise and pragmatic assistant. Ask for clarification only when needed."
+        private const val DEFAULT_API_TRAFFIC_LOG_FILE = ".kotlin-agent-cli/openai-api-traffic.log"
         private const val LOCAL_PROPERTIES_FILE = "local.properties"
         private const val READ_BUFFER_SIZE = 4096
 
@@ -130,6 +132,12 @@ data class AppConfig(
             val models = internalModelCatalog()
             validateModelCatalog(models)
             val baseUrl = readConfig("OPENAI_BASE_URL", localProperties).orEmpty().trim().ifEmpty { DEFAULT_BASE_URL }
+            val configuredApiTrafficLogPath = readConfigAllowingBlank("OPENAI_API_LOG_FILE", localProperties)
+            val apiTrafficLogFilePath = when {
+                configuredApiTrafficLogPath == null -> defaultApiTrafficLogFilePath()
+                configuredApiTrafficLogPath.isBlank() -> null
+                else -> configuredApiTrafficLogPath.trim()
+            }
 
             return AppConfig(
                 apiKey = apiKey,
@@ -137,6 +145,7 @@ data class AppConfig(
                 models = models,
                 baseUrl = baseUrl.trimEnd('/'),
                 systemPrompt = DEFAULT_SYSTEM_PROMPT,
+                apiTrafficLogFilePath = apiTrafficLogFilePath,
             )
         }
 
@@ -154,7 +163,29 @@ data class AppConfig(
         }
 
         @OptIn(ExperimentalForeignApi::class)
+        private fun readConfigAllowingBlank(name: String, localProperties: Map<String, String>): String? {
+            val envValue = readEnv(name)
+            if (envValue != null) {
+                return envValue
+            }
+            return if (localProperties.containsKey(name)) {
+                localProperties[name].orEmpty()
+            } else {
+                null
+            }
+        }
+
+        @OptIn(ExperimentalForeignApi::class)
         private fun readEnv(name: String): String? = getenv(name)?.toKString()
+
+        @OptIn(ExperimentalForeignApi::class)
+        private fun defaultApiTrafficLogFilePath(): String? {
+            val homeDirectory = readEnv("HOME")?.trim().orEmpty()
+            if (homeDirectory.isEmpty()) {
+                return null
+            }
+            return "${homeDirectory.trimEnd('/')}/$DEFAULT_API_TRAFFIC_LOG_FILE"
+        }
 
         @OptIn(ExperimentalForeignApi::class)
         private fun loadLocalProperties(): Map<String, String> {

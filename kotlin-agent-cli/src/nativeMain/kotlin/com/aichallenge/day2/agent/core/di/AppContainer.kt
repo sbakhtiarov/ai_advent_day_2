@@ -1,6 +1,7 @@
 package com.aichallenge.day2.agent.core.di
 
 import com.aichallenge.day2.agent.core.config.AppConfig
+import com.aichallenge.day2.agent.core.logging.ApiTrafficFileLogger
 import com.aichallenge.day2.agent.data.remote.OpenAiRemoteDataSource
 import com.aichallenge.day2.agent.data.repository.OpenAiAgentRepository
 import com.aichallenge.day2.agent.domain.usecase.BuildPromptUseCase
@@ -15,13 +16,13 @@ import kotlinx.serialization.json.Json
 class AppContainer(
     config: AppConfig,
 ) {
+    private val json = Json {
+        ignoreUnknownKeys = true
+    }
+    private val apiTrafficLogger = config.apiTrafficLogFilePath?.let(::ApiTrafficFileLogger)
     private val httpClient = HttpClient(Curl) {
         install(ContentNegotiation) {
-            json(
-                Json {
-                    ignoreUnknownKeys = true
-                },
-            )
+            json(json)
         }
         install(HttpTimeout) {
             connectTimeoutMillis = 15_000
@@ -33,6 +34,8 @@ class AppContainer(
     private val remoteDataSource = OpenAiRemoteDataSource(
         httpClient = httpClient,
         config = config,
+        json = json,
+        apiTrafficLogger = apiTrafficLogger,
     )
 
     private val repository = OpenAiAgentRepository(remoteDataSource)

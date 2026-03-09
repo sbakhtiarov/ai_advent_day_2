@@ -1,21 +1,27 @@
 package com.aichallenge.day2.agent.data.remote
 
 import com.aichallenge.day2.agent.core.config.AppConfig
+import com.aichallenge.day2.agent.core.logging.ApiTrafficFileLogger
 import com.aichallenge.day2.agent.domain.model.MessageRole
 import com.aichallenge.day2.agent.domain.model.PromptRequestData
 import com.aichallenge.day2.agent.domain.model.TokenUsage
 import io.ktor.client.HttpClient
-import io.ktor.client.call.body
 import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
+import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.contentType
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 
 class OpenAiRemoteDataSource(
     private val httpClient: HttpClient,
     private val config: AppConfig,
+    private val json: Json,
+    private val apiTrafficLogger: ApiTrafficFileLogger? = null,
 ) {
     data class AssistantReply(
         val content: String,
@@ -37,38 +43,71 @@ class OpenAiRemoteDataSource(
             .joinToString(separator = "\n\n")
             .ifBlank { null }
         val inputMessages = prompt.messages
+        val requestPayload = ResponsesApiRequest(
+            model = model ?: config.model,
+            instructions = instructions,
+            temperature = temperature,
+            input = inputMessages.map { message ->
+                RequestMessage(
+                    role = message.role.toApiRole(),
+                    content = listOf(
+                        RequestContent(
+                            type = message.role.toApiContentType(),
+                            text = message.content,
+                        ),
+                    ),
+                )
+            },
+        )
+        val rawRequestBody = json.encodeToString(requestPayload)
+        val exchangeId = apiTrafficLogger?.reserveExchangeId() ?: 0L
+        val requestUrl = "${config.baseUrl}/responses"
 
-        val response = httpClient.post("${config.baseUrl}/responses") {
-            header(HttpHeaders.Authorization, "Bearer ${config.apiKey}")
-            contentType(ContentType.Application.Json)
-            setBody(
-                ResponsesApiRequest(
-                    model = model ?: config.model,
-                    instructions = instructions,
-                    temperature = temperature,
-                    input = inputMessages.map { message ->
-                        RequestMessage(
-                            role = message.role.toApiRole(),
-                            content = listOf(
-                                RequestContent(
-                                    type = message.role.toApiContentType(),
-                                    text = message.content,
-                                ),
-                            ),
-                        )
-                    },
-                ),
-            )
+        apiTrafficLogger?.logRequest(
+            exchangeId = exchangeId,
+            method = "POST",
+            url = requestUrl,
+            headers = listOf(
+                HttpHeaders.Authorization to "Bearer ${config.apiKey}",
+                HttpHeaders.ContentType to ContentType.Application.Json.toString(),
+            ),
+            body = rawRequestBody,
+        )
+
+        val response = try {
+            httpClient.post(requestUrl) {
+                header(HttpHeaders.Authorization, "Bearer ${config.apiKey}")
+                contentType(ContentType.Application.Json)
+                setBody(requestPayload)
+            }
+        } catch (throwable: Throwable) {
+            apiTrafficLogger?.logFailure(exchangeId, throwable)
+            throw throwable
         }
+        val rawResponseBody = try {
+            response.bodyAsText()
+        } catch (throwable: Throwable) {
+            apiTrafficLogger?.logFailure(exchangeId, throwable)
+            throw throwable
+        }
+
+        apiTrafficLogger?.logResponse(
+            exchangeId = exchangeId,
+            statusCode = response.status.value,
+            statusDescription = response.status.description,
+            headers = response.headers.entries().map { (name, values) ->
+                name to values.joinToString(separator = ", ")
+            },
+            body = rawResponseBody,
+        )
 
         if (response.status.value !in 200..299) {
-            val payload = response.body<String>()
             throw IllegalStateException(
-                "OpenAI request failed with HTTP ${response.status.value}: $payload",
+                "OpenAI request failed with HTTP ${response.status.value}: $rawResponseBody",
             )
         }
 
-        val payload = response.body<ResponsesApiEnvelope>()
+        val payload = json.decodeFromString<ResponsesApiEnvelope>(rawResponseBody)
         val output = extractOutput(payload)
         if (output.isBlank()) {
             throw IllegalStateException("OpenAI returned an empty response.")

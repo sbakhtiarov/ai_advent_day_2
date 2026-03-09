@@ -141,6 +141,56 @@ class AppConfigTest {
         }
     }
 
+    @Test
+    fun defaultApiTrafficLogFileUsesHomeDirectory() {
+        withEnvironment(
+            mapOf(
+                "OPENAI_API_KEY" to "test-api-key",
+                "HOME" to "/tmp/app-config-home",
+                "OPENAI_API_LOG_FILE" to "",
+            ),
+        ) {
+            unsetEnvironment("OPENAI_API_LOG_FILE")
+
+            val config = AppConfig.fromEnvironment()
+
+            assertEquals(
+                "/tmp/app-config-home/.kotlin-agent-cli/openai-api-traffic.log",
+                config.apiTrafficLogFilePath,
+            )
+        }
+    }
+
+    @Test
+    fun explicitBlankApiTrafficLogFileDisablesLogging() {
+        withEnvironment(
+            mapOf(
+                "OPENAI_API_KEY" to "test-api-key",
+                "HOME" to "/tmp/app-config-home",
+                "OPENAI_API_LOG_FILE" to "",
+            ),
+        ) {
+            val config = AppConfig.fromEnvironment()
+
+            assertEquals(null, config.apiTrafficLogFilePath)
+        }
+    }
+
+    @Test
+    fun explicitApiTrafficLogFileOverridesDefaultLocation() {
+        withEnvironment(
+            mapOf(
+                "OPENAI_API_KEY" to "test-api-key",
+                "HOME" to "/tmp/app-config-home",
+                "OPENAI_API_LOG_FILE" to "/tmp/custom-openai.log",
+            ),
+        ) {
+            val config = AppConfig.fromEnvironment()
+
+            assertEquals("/tmp/custom-openai.log", config.apiTrafficLogFilePath)
+        }
+    }
+
     @OptIn(ExperimentalForeignApi::class)
     private fun withEnvironment(
         overrides: Map<String, String>,
@@ -164,5 +214,10 @@ class AppConfigTest {
                 }
             }
         }
+    }
+
+    @OptIn(ExperimentalForeignApi::class)
+    private fun unsetEnvironment(name: String) {
+        unsetenv(name)
     }
 }
