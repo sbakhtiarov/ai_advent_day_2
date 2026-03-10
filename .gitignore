@@ -9,3 +9,6 @@
 # Local secrets
 local.properties
 **/local.properties
+
+# JVM heap dumps
+*.hprof
