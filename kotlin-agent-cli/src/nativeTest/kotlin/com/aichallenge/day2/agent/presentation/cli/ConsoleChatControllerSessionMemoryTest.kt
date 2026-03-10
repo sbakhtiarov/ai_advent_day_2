@@ -9,6 +9,7 @@ import com.aichallenge.day2.agent.domain.model.ConversationMessage
 import com.aichallenge.day2.agent.domain.model.MemoryEstimateSource
 import com.aichallenge.day2.agent.domain.model.MemoryUsageSnapshot
 import com.aichallenge.day2.agent.domain.model.MessageRole
+import com.aichallenge.day2.agent.domain.model.McpServerConfig
 import com.aichallenge.day2.agent.domain.model.PromptRequestData
 import com.aichallenge.day2.agent.domain.model.ProfilePreferenceState
 import com.aichallenge.day2.agent.domain.model.RollingWindowCompactionStartPolicy
@@ -27,6 +28,7 @@ import com.aichallenge.day2.agent.domain.model.WorkflowRuntimeState
 import com.aichallenge.day2.agent.domain.model.WorkflowStep
 import com.aichallenge.day2.agent.domain.repository.AgentRepository
 import com.aichallenge.day2.agent.domain.repository.InvariantConstraintStore
+import com.aichallenge.day2.agent.domain.repository.McpServerStore
 import com.aichallenge.day2.agent.domain.repository.SessionMemoryStore
 import com.aichallenge.day2.agent.domain.repository.UserDefinedProfileStore
 import com.aichallenge.day2.agent.domain.repository.UserDefinedWorkflowStore
@@ -2136,12 +2138,13 @@ class ConsoleChatControllerSessionMemoryTest {
         val output = io.outputText()
         assertContains(
             output,
-            "commands: /help, /models, /model <id|number>, /memory, /compact, /profile, /workflow, /invariant, /reset, /exit, @<path>",
+            "commands: /help, /models, /model <id|number>, /memory, /compact, /profile, /workflow, /mcp, /invariant, /reset, /exit, @<path>",
         )
         assertContains(output, "/memory              show session-memory context usage")
         assertContains(output, "/compact             choose memory compaction strategy")
         assertContains(output, "/profile             choose active user profile")
         assertContains(output, "/workflow            enable workflow mode with workflow selection (toggle off when enabled)")
+        assertContains(output, "/mcp                 configure MCP servers")
         assertContains(output, "/invariant           configure invariant constraints")
         assertContains(output, "@<path>              attach file for the next prompt")
     }
@@ -2446,6 +2449,128 @@ class ConsoleChatControllerSessionMemoryTest {
         controller.runInteractive()
 
         assertContains(io.outputText(), "system> no valid user profiles found")
+    }
+
+    @Test
+    fun mcpCommandShowsMessageWhenNoValidServersFound() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val mcpStore = RecordingMcpServerStore()
+        val io = FakeCliIO(inputs = listOf("/mcp", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            mcpServerStore = mcpStore,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(1, mcpStore.loadCalls)
+        assertContains(io.outputText(), "system> no valid MCP servers found")
+    }
+
+    @Test
+    fun mcpCommandTogglesSelectedServerAndPersists() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val mcpStore = RecordingMcpServerStore(
+            loadedServers = listOf(
+                McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = true),
+                McpServerConfig(name = "GitHub", url = "http://localhost:3001", enabled = false),
+            ),
+        )
+        val io = FakeCliIO(
+            inputs = listOf("/mcp", "/exit"),
+            mcpSelections = listOf(0, null),
+        )
+        val controller = createController(
+            repository = repository,
+            io = io,
+            mcpServerStore = mcpStore,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(1, mcpStore.saveStates.size)
+        assertEquals(false, mcpStore.saveStates.single()[0].enabled)
+        assertEquals(false, mcpStore.currentServers()[0].enabled)
+        assertEquals(false, mcpStore.currentServers()[1].enabled)
+    }
+
+    @Test
+    fun mcpCommandKeepsMenuOpenForMultipleToggles() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val mcpStore = RecordingMcpServerStore(
+            loadedServers = listOf(
+                McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = true),
+                McpServerConfig(name = "GitHub", url = "http://localhost:3001", enabled = false),
+            ),
+        )
+        val io = FakeCliIO(
+            inputs = listOf("/mcp", "/exit"),
+            mcpSelections = listOf(0, 1, null),
+        )
+        val controller = createController(
+            repository = repository,
+            io = io,
+            mcpServerStore = mcpStore,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(2, mcpStore.saveStates.size)
+        assertEquals(false, mcpStore.saveStates[0][0].enabled)
+        assertEquals(true, mcpStore.saveStates[1][1].enabled)
+        assertEquals(false, mcpStore.currentServers()[0].enabled)
+        assertEquals(true, mcpStore.currentServers()[1].enabled)
+    }
+
+    @Test
+    fun mcpCommandCancelKeepsStateUnchanged() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val mcpStore = RecordingMcpServerStore(
+            loadedServers = listOf(
+                McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = true),
+            ),
+        )
+        val io = FakeCliIO(
+            inputs = listOf("/mcp", "/exit"),
+            mcpSelections = listOf(null),
+        )
+        val controller = createController(
+            repository = repository,
+            io = io,
+            mcpServerStore = mcpStore,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(0, mcpStore.saveStates.size)
+        assertEquals(true, mcpStore.currentServers().single().enabled)
+    }
+
+    @Test
+    fun mcpCommandSaveFailureRevertsStateAndShowsMessage() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val mcpStore = RecordingMcpServerStore(
+            loadedServers = listOf(
+                McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = true),
+            ),
+            failOnSaveCalls = setOf(1),
+        )
+        val io = FakeCliIO(
+            inputs = listOf("/mcp", "/exit"),
+            mcpSelections = listOf(0, null),
+        )
+        val controller = createController(
+            repository = repository,
+            io = io,
+            mcpServerStore = mcpStore,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(0, mcpStore.saveStates.size)
+        assertEquals(true, mcpStore.currentServers().single().enabled)
+        assertContains(io.outputText(), "system> failed to persist MCP server state")
     }
 
     @Test
@@ -3237,6 +3362,7 @@ class ConsoleChatControllerSessionMemoryTest {
         userDefinedProfileStore: UserDefinedProfileStore? = null,
         userDefinedWorkflowStore: UserDefinedWorkflowStore? = null,
         invariantConstraintStore: InvariantConstraintStore? = null,
+        mcpServerStore: McpServerStore? = null,
         persistentMemoryEnabled: Boolean = true,
         fileReferenceReader: FileReferenceReader = RecordingFileReferenceReader(emptyMap()),
         compactionCoordinators: Map<SessionCompactionMode, SessionMemoryCompactionCoordinator> = mapOf(
@@ -3263,6 +3389,7 @@ class ConsoleChatControllerSessionMemoryTest {
             userDefinedProfileStore = userDefinedProfileStore,
             userDefinedWorkflowStore = userDefinedWorkflowStore,
             invariantConstraintStore = invariantConstraintStore,
+            mcpServerStore = mcpServerStore,
             persistentMemoryEnabled = persistentMemoryEnabled,
             fileReferenceReader = fileReferenceReader,
             compactionCoordinators = compactionCoordinators,
@@ -3292,12 +3419,14 @@ private class RecordingAgentRepository(
 private class FakeCliIO(
     inputs: List<String>,
     private val compactionSelections: List<Int?> = emptyList(),
+    private val mcpSelections: List<Int?> = emptyList(),
     private val profileSelections: List<Int?> = emptyList(),
     private val workflowSelections: List<Int?> = emptyList(),
     private val invariantSelections: List<InvariantMenuResult?> = emptyList(),
 ) : CliIO {
     private val queuedInputs = ArrayDeque<String?>(inputs)
     private var nextCompactionSelectionIndex = 0
+    private var nextMcpSelectionIndex = 0
     private var nextProfileSelectionIndex = 0
     private var nextWorkflowSelectionIndex = 0
     private var nextInvariantSelectionIndex = 0
@@ -3353,6 +3482,15 @@ private class FakeCliIO(
         return currentSelection
     }
 
+    override fun openMcpMenu(options: List<McpMenuOption>, currentSelection: Int, reuseAnchor: Boolean): Int? {
+        val selection = mcpSelections.getOrNull(nextMcpSelectionIndex)
+        if (nextMcpSelectionIndex < mcpSelections.size) {
+            nextMcpSelectionIndex += 1
+            return selection
+        }
+        return currentSelection
+    }
+
     override fun openProfileMenu(options: List<String>, currentSelection: Int): Int? {
         val selection = profileSelections.getOrNull(nextProfileSelectionIndex)
         if (nextProfileSelectionIndex < profileSelections.size) {
@@ -3386,6 +3524,33 @@ private class FakeCliIO(
     private fun nextInput(): String? = queuedInputs.removeFirstOrNull()
 
     fun outputText(): String = lines.joinToString(separator = "\n")
+}
+
+private class RecordingMcpServerStore(
+    loadedServers: List<McpServerConfig> = emptyList(),
+    private val failOnSaveCalls: Set<Int> = emptySet(),
+) : McpServerStore {
+    private var servers = loadedServers.map { server -> server.copy() }.toMutableList()
+    var loadCalls: Int = 0
+        private set
+    private var saveCallCount: Int = 0
+    val saveStates = mutableListOf<List<McpServerConfig>>()
+
+    override fun load(): List<McpServerConfig> {
+        loadCalls += 1
+        return servers.map { server -> server.copy() }
+    }
+
+    override fun save(servers: List<McpServerConfig>) {
+        saveCallCount += 1
+        if (saveCallCount in failOnSaveCalls) {
+            error("save failure")
+        }
+        this.servers = servers.map { server -> server.copy() }.toMutableList()
+        saveStates += this.servers.map { server -> server.copy() }
+    }
+
+    fun currentServers(): List<McpServerConfig> = servers.map { server -> server.copy() }
 }
 
 private class RecordingSelectableUserDefinedWorkflowStore(

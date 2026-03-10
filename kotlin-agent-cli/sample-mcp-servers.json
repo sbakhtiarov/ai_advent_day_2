@@ -1,0 +1,6 @@
+{
+  "servers": [
+    { "name": "Linear", "url": "http://localhost:3000", "enabled": true },
+    { "name": "GitHub", "url": "http://localhost:3001", "enabled": false }
+  ]
+}

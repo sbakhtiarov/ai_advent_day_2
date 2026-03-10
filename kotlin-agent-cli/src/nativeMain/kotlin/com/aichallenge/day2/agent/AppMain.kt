@@ -6,6 +6,7 @@ import com.aichallenge.day2.agent.core.di.AppContainer
 import com.aichallenge.day2.agent.data.local.JsonFileProfileMemoryStore
 import com.aichallenge.day2.agent.data.local.JsonFileSessionMemoryStore
 import com.aichallenge.day2.agent.data.local.JsonFileInvariantConstraintStore
+import com.aichallenge.day2.agent.data.local.JsonFileMcpServerStore
 import com.aichallenge.day2.agent.data.local.JsonFileUserDefinedProfileStore
 import com.aichallenge.day2.agent.data.local.JsonFileUserDefinedWorkflowStore
 import com.aichallenge.day2.agent.data.local.JsonFileWorkingMemoryStore
@@ -96,6 +97,7 @@ private suspend fun runApp(args: Array<String>): Int {
     val userDefinedProfileStore = JsonFileUserDefinedProfileStore.fromDefaultLocation()
     val userDefinedWorkflowStore = JsonFileUserDefinedWorkflowStore.fromDefaultLocation()
     val invariantConstraintStore = JsonFileInvariantConstraintStore.fromDefaultLocation()
+    val mcpServerStore = JsonFileMcpServerStore.fromDefaultLocation()
     val workingMemoryDistillationUseCase = if (isInteractiveMode) {
         WorkingMemoryDistillationUseCase(container.sendPromptUseCase)
     } else {
@@ -119,6 +121,7 @@ private suspend fun runApp(args: Array<String>): Int {
         userDefinedProfileStore = userDefinedProfileStore,
         userDefinedWorkflowStore = userDefinedWorkflowStore,
         invariantConstraintStore = invariantConstraintStore,
+        mcpServerStore = mcpServerStore,
         workingMemoryDistillationUseCase = workingMemoryDistillationUseCase,
         profileMemoryDistillationUseCase = profileMemoryDistillationUseCase,
         profileEnvironmentFactsProvider = ProfileEnvironmentFactsProvider(),

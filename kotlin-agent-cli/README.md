@@ -46,6 +46,17 @@ The logger writes raw JSON request/response bodies plus HTTP status and headers;
 Model catalog is built into the app (including pricing and context-window metadata).
 Use `/models` to see all available models and `/model <id|number>` to switch the active one.
 
+MCP server configuration is read from `~/.kotlin-agent-cli/mcp-servers.json`.
+Example:
+
+```json
+{
+  "servers": [
+    { "name": "Linear", "url": "http://localhost:3000", "enabled": true }
+  ]
+}
+```
+
 Interactive mode:
 
 ```bash
@@ -79,6 +90,7 @@ time> <seconds> s
 - Workflow files must match `workflow-<name>.json` and include non-blank top-level keys: `name`, `planning`, `execution`, `validation`.
 - Workflow files can optionally include `basePrompt` as an additional static system prompt for that workflow.
 - Active workflow file selection is persisted in `~/.kotlin-agent-cli/active-workflow.json` as `{ "active_file_name": "<file-name>" }`.
+- MCP server configuration is loaded from `~/.kotlin-agent-cli/mcp-servers.json`.
 - Invariant constraints are persisted independently in `~/.kotlin-agent-cli/invariant-constraints.json`.
 - All user-visible assistant responses (interactive, workflow planning/execution, and one-shot `--prompt`) are validated against invariant constraints when configured.
 - Invariant constraints are also injected into each model prompt as strict system-level requirements (normalized to `[Strict] ...` entries).
@@ -140,6 +152,7 @@ time> <seconds> s
 - `/compact` - choose compaction strategy (`Rolling summary`, `Sliding window`, `Fact map`, or `Branching`)
 - `/profile` - choose active user profile (`user-profile-<name>.json`)
 - `/workflow` - enable strict workflow mode with workflow selection (toggle off when already enabled)
+- `/mcp` - configure MCP servers from `mcp-servers.json` (`Enter` toggles, `ESC` closes)
 - `/invariant` - manage persisted invariant constraints (`Del` removes selected item, `Add new constraint` creates one)
 - `/reset` - clear conversation memory and transcript, clear working memory, then persist an empty session snapshot (profile memory remains intact)
 - `/exit` - close app

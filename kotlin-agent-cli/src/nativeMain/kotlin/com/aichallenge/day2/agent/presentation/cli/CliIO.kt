@@ -36,10 +36,16 @@ interface CliIO {
     fun hideThinkingIndicator() {}
     fun updateFooterStatusLabel(label: String?) {}
     fun openCompactionMenu(options: List<String>, currentSelection: Int): Int?
+    fun openMcpMenu(options: List<McpMenuOption>, currentSelection: Int, reuseAnchor: Boolean = false): Int?
     fun openProfileMenu(options: List<String>, currentSelection: Int): Int?
     fun openWorkflowMenu(options: List<String>, currentSelection: Int): Int?
     fun openInvariantMenu(options: List<String>, currentSelection: Int): InvariantMenuResult?
 }
+
+data class McpMenuOption(
+    val name: String,
+    val enabled: Boolean,
+)
 
 enum class InvariantMenuAction {
     CONFIRM,
@@ -156,7 +162,7 @@ object StdCliIO : CliIO {
         )
 
         return withRawInput<String?> {
-            var result: String? = null
+            var result: String?
 
             loop@ while (true) {
                 val key = if (pendingKeys.isNotEmpty()) pendingKeys.removeFirst() else readByte()
@@ -336,6 +342,108 @@ object StdCliIO : CliIO {
         }
 
         print("\r\n")
+        print("\u001B7")
+        renderMenu()
+
+        var result: Int? = null
+
+        withRawInput<Unit> {
+            while (true) {
+                when (readByte()) {
+                    null -> {
+                        result = null
+                        break
+                    }
+
+                    ENTER_CR, ENTER_LF -> {
+                        result = selectedIndex
+                        break
+                    }
+
+                    ESCAPE -> {
+                        val escNext = readOptionalByte(timeoutDeciseconds = 1)
+                        if (escNext == null) {
+                            result = null
+                            break
+                        }
+
+                        if (escNext == CSI) {
+                            when (readOptionalByte(timeoutDeciseconds = 1)) {
+                                ARROW_UP -> {
+                                    selectedIndex = (selectedIndex - 1 + options.size) % options.size
+                                    renderMenu()
+                                }
+
+                                ARROW_DOWN -> {
+                                    selectedIndex = (selectedIndex + 1) % options.size
+                                    renderMenu()
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        print("\u001B8")
+        print('\r')
+        print("\u001B[J")
+        return result
+    }
+
+    override fun openMcpMenu(options: List<McpMenuOption>, currentSelection: Int, reuseAnchor: Boolean): Int? {
+        if (options.isEmpty()) {
+            return null
+        }
+
+        var selectedIndex = currentSelection.coerceIn(0, options.lastIndex)
+
+        fun buildMenuLines(): List<String> {
+            val lines = mutableListOf<String>()
+            lines += "   MCP servers"
+            lines += ""
+            options.forEachIndexed { index, option ->
+                val marker = if (index == selectedIndex) {
+                    "$OPTION_SELECTED_COLOR> $ANSI_RESET"
+                } else {
+                    "  "
+                }
+                val name = if (index == selectedIndex) {
+                    "$OPTION_SELECTED_COLOR${option.name}$ANSI_RESET"
+                } else {
+                    option.name
+                }
+                val indicatorColor = if (option.enabled) MCP_ENABLED_OPTION_COLOR else MCP_DISABLED_OPTION_COLOR
+                val indicatorText = if (option.enabled) "[enabled]" else "[disabled]"
+                lines += "   $marker$name $indicatorColor$indicatorText$ANSI_RESET"
+            }
+            lines += ""
+            lines += "   Press Enter to toggle, ESC to close"
+            return lines
+        }
+
+        fun renderMenu() {
+            print("\u001B8")
+            print('\r')
+
+            val terminalWidth = detectTerminalWidth().coerceAtLeast(1)
+            val menuLines = buildMenuLines()
+            val menuHeight = calculateWrappedLineCount(menuLines, terminalWidth)
+            ensureMenuFits(requiredMenuLines = menuHeight)
+
+            print("\u001B7")
+            print("\u001B[J")
+            menuLines.forEachIndexed { index, line ->
+                print(line)
+                if (index != menuLines.lastIndex) {
+                    print('\n')
+                }
+            }
+        }
+
+        if (!reuseAnchor) {
+            print("\r\n")
+        }
         print("\u001B7")
         renderMenu()
 
@@ -994,6 +1102,8 @@ object StdCliIO : CliIO {
     private const val DIVIDER_COLOR = "\u001B[38;5;240m"
     private const val FOOTER_LABEL_COLOR = "\u001B[38;5;196m"
     private const val THINKING_LABEL_COLOR = "\u001B[38;5;45m"
+    private const val MCP_ENABLED_OPTION_COLOR = "\u001B[38;5;42m"
+    private const val MCP_DISABLED_OPTION_COLOR = "\u001B[38;5;244m"
     private const val THINKING_LABEL_PADDING = "  "
     private const val OPTION_SELECTED_COLOR = "\u001B[38;5;39m"
     private const val ANSI_RESET = "\u001B[0m"

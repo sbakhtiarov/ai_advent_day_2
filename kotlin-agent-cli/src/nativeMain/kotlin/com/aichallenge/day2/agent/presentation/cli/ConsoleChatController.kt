@@ -7,6 +7,7 @@ import com.aichallenge.day2.agent.domain.model.BranchingSessionMemory
 import com.aichallenge.day2.agent.domain.model.ConversationMessage
 import com.aichallenge.day2.agent.domain.model.MemoryEstimateSource
 import com.aichallenge.day2.agent.domain.model.MemoryUsageSnapshot
+import com.aichallenge.day2.agent.domain.model.McpServerConfig
 import com.aichallenge.day2.agent.domain.model.ProfileMemoryState
 import com.aichallenge.day2.agent.domain.model.ProfilePreferenceState
 import com.aichallenge.day2.agent.domain.model.SessionCompactionMode
@@ -22,6 +23,7 @@ import com.aichallenge.day2.agent.domain.model.WorkingMemoryState
 import com.aichallenge.day2.agent.domain.repository.ProfileMemoryStore
 import com.aichallenge.day2.agent.domain.repository.SessionMemoryStore
 import com.aichallenge.day2.agent.domain.repository.InvariantConstraintStore
+import com.aichallenge.day2.agent.domain.repository.McpServerStore
 import com.aichallenge.day2.agent.domain.repository.UserDefinedProfileStore
 import com.aichallenge.day2.agent.domain.repository.UserDefinedWorkflowStore
 import com.aichallenge.day2.agent.domain.repository.WorkingMemoryStore
@@ -68,6 +70,7 @@ class ConsoleChatController(
     private val userDefinedProfileStore: UserDefinedProfileStore? = null,
     private val userDefinedWorkflowStore: UserDefinedWorkflowStore? = null,
     private val invariantConstraintStore: InvariantConstraintStore? = null,
+    private val mcpServerStore: McpServerStore? = null,
     private val persistentMemoryEnabled: Boolean = true,
     private val workingMemoryDistillationUseCase: WorkingMemoryDistillationUseCase? = null,
     private val workingMemoryEnabled: Boolean = true,
@@ -114,7 +117,10 @@ class ConsoleChatController(
     private var userDefinedProfileInitialized = false
     private var userDefinedWorkflowInitialized = false
     private var invariantConstraintsInitialized = false
+    private var mcpServersInitialized = false
     private var invariantConstraints = mutableListOf<String>()
+    private var mcpServers = mutableListOf<McpServerConfig>()
+    private var mcpMenuSelection = 0
     private var workflowModeEnabled = false
     private var activeWorkflow: UserWorkflowDefinition? = null
     private var workflowRuntimeState: WorkflowRuntimeState? = null
@@ -137,6 +143,7 @@ class ConsoleChatController(
     }
 
     suspend fun runInteractive() {
+        initializeMcpServers()
         initializeUserDefinedProfile()
         initializeUserDefinedWorkflow()
         initializeInvariantConstraints()
@@ -187,6 +194,7 @@ class ConsoleChatController(
             io.writeLine("error> --prompt must not be empty")
             return 1
         }
+        initializeMcpServers()
         initializeUserDefinedProfile()
         initializeUserDefinedWorkflow()
         initializeInvariantConstraints()
@@ -1780,6 +1788,11 @@ class ConsoleChatController(
                 true
             }
 
+            input == "/mcp" -> {
+                handleMcpCommand()
+                true
+            }
+
             input == "/invariant" -> {
                 handleInvariantCommand()
                 true
@@ -1865,6 +1878,18 @@ class ConsoleChatController(
             invariantConstraintStore?.load()
         }.getOrNull().orEmpty()
         invariantConstraints = loadedConstraints.toMutableList()
+    }
+
+    private fun initializeMcpServers() {
+        if (mcpServersInitialized) {
+            return
+        }
+
+        mcpServersInitialized = true
+        mcpServers = runCatching {
+            mcpServerStore?.load()
+        }.getOrNull().orEmpty().toMutableList()
+        mcpMenuSelection = mcpMenuSelection.coerceIn(0, mcpServers.lastIndex.coerceAtLeast(0))
     }
 
     private fun reloadUserDefinedProfile() {
@@ -2083,7 +2108,7 @@ class ConsoleChatController(
         io.writeLine()
         io.writeLine("    type your prompt and press Enter")
         io.writeLine(
-            "    commands: /help, /models, /model <id|number>, /memory, /compact, /profile, /workflow, /invariant, /reset, /exit, @<path>",
+            "    commands: /help, /models, /model <id|number>, /memory, /compact, /profile, /workflow, /mcp, /invariant, /reset, /exit, @<path>",
         )
         io.writeLine()
 
@@ -2117,11 +2142,55 @@ class ConsoleChatController(
         /compact             choose memory compaction strategy
         /profile             choose active user profile
         /workflow            enable workflow mode with workflow selection (toggle off when enabled)
+        /mcp                 configure MCP servers
         /invariant           configure invariant constraints
         /reset               clear conversation and working memory; keep current system prompt
         /exit                close the application
         @<path>              attach file for the next prompt
     """.trimIndent()
+
+    private fun handleMcpCommand() {
+        initializeMcpServers()
+        val store = mcpServerStore
+        if (store == null || mcpServers.isEmpty()) {
+            dialogBlocks += "system> no valid MCP servers found"
+            return
+        }
+
+        var currentSelection = mcpMenuSelection.coerceIn(0, mcpServers.lastIndex)
+        var reuseMenuAnchor = false
+        while (true) {
+            val selectedIndex = io.openMcpMenu(
+                options = mcpServers.map { server ->
+                    McpMenuOption(
+                        name = server.name,
+                        enabled = server.enabled,
+                    )
+                },
+                currentSelection = currentSelection,
+                reuseAnchor = reuseMenuAnchor,
+            ) ?: run {
+                mcpMenuSelection = currentSelection
+                return
+            }
+
+            currentSelection = selectedIndex.coerceIn(0, mcpServers.lastIndex)
+            reuseMenuAnchor = true
+            val currentServer = mcpServers[currentSelection]
+            mcpServers[currentSelection] = currentServer.copy(enabled = !currentServer.enabled)
+
+            val persisted = runCatching {
+                store.save(mcpServers.toList())
+                true
+            }.getOrDefault(false)
+            if (!persisted) {
+                mcpServers[currentSelection] = currentServer
+                dialogBlocks += "system> failed to persist MCP server state"
+            }
+
+            mcpMenuSelection = currentSelection
+        }
+    }
 
     private fun handleWorkflowCommand() {
         if (workflowModeEnabled) {
