@@ -8,6 +8,10 @@ import com.aichallenge.day2.agent.domain.model.ConversationMessage
 import com.aichallenge.day2.agent.domain.model.MemoryEstimateSource
 import com.aichallenge.day2.agent.domain.model.MemoryUsageSnapshot
 import com.aichallenge.day2.agent.domain.model.McpServerConfig
+import com.aichallenge.day2.agent.domain.model.McpRuntimeStatus
+import com.aichallenge.day2.agent.domain.model.McpServerRuntimeState
+import com.aichallenge.day2.agent.domain.model.McpToolCatalogStatus
+import com.aichallenge.day2.agent.domain.model.McpToolDefinition
 import com.aichallenge.day2.agent.domain.model.ProfileMemoryState
 import com.aichallenge.day2.agent.domain.model.ProfilePreferenceState
 import com.aichallenge.day2.agent.domain.model.SessionCompactionMode
@@ -27,6 +31,8 @@ import com.aichallenge.day2.agent.domain.repository.McpServerStore
 import com.aichallenge.day2.agent.domain.repository.UserDefinedProfileStore
 import com.aichallenge.day2.agent.domain.repository.UserDefinedWorkflowStore
 import com.aichallenge.day2.agent.domain.repository.WorkingMemoryStore
+import com.aichallenge.day2.agent.domain.service.McpRuntimeService
+import com.aichallenge.day2.agent.domain.service.NoOpMcpRuntimeService
 import com.aichallenge.day2.agent.domain.usecase.BranchClassificationUseCase
 import com.aichallenge.day2.agent.domain.usecase.BuildPromptRequest
 import com.aichallenge.day2.agent.domain.usecase.BuildPromptUseCase
@@ -71,6 +77,7 @@ class ConsoleChatController(
     private val userDefinedWorkflowStore: UserDefinedWorkflowStore? = null,
     private val invariantConstraintStore: InvariantConstraintStore? = null,
     private val mcpServerStore: McpServerStore? = null,
+    private val mcpRuntimeService: McpRuntimeService = NoOpMcpRuntimeService,
     private val persistentMemoryEnabled: Boolean = true,
     private val workingMemoryDistillationUseCase: WorkingMemoryDistillationUseCase? = null,
     private val workingMemoryEnabled: Boolean = true,
@@ -120,6 +127,7 @@ class ConsoleChatController(
     private var mcpServersInitialized = false
     private var invariantConstraints = mutableListOf<String>()
     private var mcpServers = mutableListOf<McpServerConfig>()
+    private val pendingMcpStartupMessages = mutableListOf<String>()
     private var mcpMenuSelection = 0
     private var workflowModeEnabled = false
     private var activeWorkflow: UserWorkflowDefinition? = null
@@ -144,6 +152,7 @@ class ConsoleChatController(
 
     suspend fun runInteractive() {
         initializeMcpServers()
+        dialogBlocks += consumePendingMcpStartupMessages()
         initializeUserDefinedProfile()
         initializeUserDefinedWorkflow()
         initializeInvariantConstraints()
@@ -195,6 +204,9 @@ class ConsoleChatController(
             return 1
         }
         initializeMcpServers()
+        consumePendingMcpStartupMessages().forEach { message ->
+            io.writeLine(message)
+        }
         initializeUserDefinedProfile()
         initializeUserDefinedWorkflow()
         initializeInvariantConstraints()
@@ -1880,7 +1892,7 @@ class ConsoleChatController(
         invariantConstraints = loadedConstraints.toMutableList()
     }
 
-    private fun initializeMcpServers() {
+    private suspend fun initializeMcpServers() {
         if (mcpServersInitialized) {
             return
         }
@@ -1890,6 +1902,52 @@ class ConsoleChatController(
             mcpServerStore?.load()
         }.getOrNull().orEmpty().toMutableList()
         mcpMenuSelection = mcpMenuSelection.coerceIn(0, mcpServers.lastIndex.coerceAtLeast(0))
+        if (mcpServers.isEmpty()) {
+            return
+        }
+
+        val runtimeStates = runCatching {
+            mcpRuntimeService.initializeEnabledServers(mcpServers.toList())
+        }.getOrElse { throwable ->
+            mcpServers.map { server ->
+                if (server.enabled) {
+                    McpServerRuntimeState(
+                        server = server,
+                        status = McpRuntimeStatus.FAILED,
+                        failureMessage = throwable.message?.trim().takeUnless { it.isNullOrEmpty() } ?: "Unexpected error",
+                    )
+                } else {
+                    McpServerRuntimeState(
+                        server = server,
+                        status = McpRuntimeStatus.DISABLED,
+                    )
+                }
+            }
+        }
+        pendingMcpStartupMessages += runtimeStates.flatMap { state ->
+            buildList {
+                if (state.status == McpRuntimeStatus.FAILED) {
+                    add("system> MCP server '${state.server.name}' initialization failed: ${state.failureMessage ?: "Unexpected error"}")
+                }
+                if (state.status == McpRuntimeStatus.READY && state.toolCatalogStatus == McpToolCatalogStatus.FAILED) {
+                    add(
+                        "system> MCP tools for '${state.server.name}' could not be loaded: ${
+                            state.toolCatalogFailureMessage ?: "Unexpected error"
+                        }",
+                    )
+                }
+            }
+        }
+    }
+
+    private fun consumePendingMcpStartupMessages(): List<String> {
+        if (pendingMcpStartupMessages.isEmpty()) {
+            return emptyList()
+        }
+
+        return pendingMcpStartupMessages.toList().also {
+            pendingMcpStartupMessages.clear()
+        }
     }
 
     private fun reloadUserDefinedProfile() {
@@ -2150,7 +2208,6 @@ class ConsoleChatController(
     """.trimIndent()
 
     private fun handleMcpCommand() {
-        initializeMcpServers()
         val store = mcpServerStore
         if (store == null || mcpServers.isEmpty()) {
             dialogBlocks += "system> no valid MCP servers found"
@@ -2160,11 +2217,12 @@ class ConsoleChatController(
         var currentSelection = mcpMenuSelection.coerceIn(0, mcpServers.lastIndex)
         var reuseMenuAnchor = false
         while (true) {
-            val selectedIndex = io.openMcpMenu(
+            val menuResult = io.openMcpMenu(
                 options = mcpServers.map { server ->
                     McpMenuOption(
                         name = server.name,
                         enabled = server.enabled,
+                        runtimeStatus = mcpRuntimeService.runtimeStateFor(server).status,
                     )
                 },
                 currentSelection = currentSelection,
@@ -2174,9 +2232,16 @@ class ConsoleChatController(
                 return
             }
 
-            currentSelection = selectedIndex.coerceIn(0, mcpServers.lastIndex)
+            currentSelection = menuResult.selectedIndex.coerceIn(0, mcpServers.lastIndex)
             reuseMenuAnchor = true
             val currentServer = mcpServers[currentSelection]
+
+            if (menuResult.action == McpMenuAction.INFO) {
+                dialogBlocks += formatMcpToolsDialog(currentServer)
+                mcpMenuSelection = currentSelection
+                return
+            }
+
             mcpServers[currentSelection] = currentServer.copy(enabled = !currentServer.enabled)
 
             val persisted = runCatching {
@@ -2186,9 +2251,56 @@ class ConsoleChatController(
             if (!persisted) {
                 mcpServers[currentSelection] = currentServer
                 dialogBlocks += "system> failed to persist MCP server state"
+            } else {
+                mcpRuntimeService.clearFailureState(mcpServers[currentSelection])
             }
 
             mcpMenuSelection = currentSelection
+        }
+    }
+
+    private fun formatMcpToolsDialog(server: McpServerConfig): String {
+        val runtimeState = mcpRuntimeService.runtimeStateFor(server)
+        if (runtimeState.status != McpRuntimeStatus.READY) {
+            return "system> MCP server '${server.name}' is not initialized"
+        }
+
+        val toolCatalog = mcpRuntimeService.toolCatalogFor(server)
+        return when (toolCatalog.status) {
+            McpToolCatalogStatus.FAILED -> {
+                "system> MCP tools for '${server.name}' could not be loaded: ${toolCatalog.failureMessage ?: "Unexpected error"}"
+            }
+
+            McpToolCatalogStatus.LOADED -> {
+                if (toolCatalog.tools.isEmpty()) {
+                    "system> MCP server '${server.name}' has no tools"
+                } else {
+                    buildString {
+                        appendLine("mcp> tools for '${server.name}'")
+                        toolCatalog.tools.forEachIndexed { index, tool ->
+                            appendLine()
+                            append(formatMcpToolEntry(index, tool))
+                        }
+                    }.trimEnd()
+                }
+            }
+
+            McpToolCatalogStatus.NOT_REQUESTED -> {
+                "system> MCP tools for '${server.name}' are not available"
+            }
+        }
+    }
+
+    private fun formatMcpToolEntry(index: Int, tool: McpToolDefinition): String {
+        val displayName = tool.title?.trim().takeUnless { it.isNullOrEmpty() } ?: tool.name
+        val description = tool.description?.trim().takeUnless { it.isNullOrEmpty() } ?: "No description provided."
+        return buildString {
+            append("${index + 1}. $displayName")
+            if (displayName != tool.name) {
+                append(" (${tool.name})")
+            }
+            appendLine()
+            append(description)
         }
     }
 

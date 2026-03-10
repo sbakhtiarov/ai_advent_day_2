@@ -1,5 +1,6 @@
 package com.aichallenge.day2.agent.presentation.cli
 
+import com.aichallenge.day2.agent.domain.model.McpRuntimeStatus
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.ByteVar
 import kotlinx.cinterop.alloc
@@ -36,7 +37,7 @@ interface CliIO {
     fun hideThinkingIndicator() {}
     fun updateFooterStatusLabel(label: String?) {}
     fun openCompactionMenu(options: List<String>, currentSelection: Int): Int?
-    fun openMcpMenu(options: List<McpMenuOption>, currentSelection: Int, reuseAnchor: Boolean = false): Int?
+    fun openMcpMenu(options: List<McpMenuOption>, currentSelection: Int, reuseAnchor: Boolean = false): McpMenuResult?
     fun openProfileMenu(options: List<String>, currentSelection: Int): Int?
     fun openWorkflowMenu(options: List<String>, currentSelection: Int): Int?
     fun openInvariantMenu(options: List<String>, currentSelection: Int): InvariantMenuResult?
@@ -45,6 +46,17 @@ interface CliIO {
 data class McpMenuOption(
     val name: String,
     val enabled: Boolean,
+    val runtimeStatus: McpRuntimeStatus = McpRuntimeStatus.NOT_ATTEMPTED,
+)
+
+enum class McpMenuAction {
+    TOGGLE,
+    INFO,
+}
+
+data class McpMenuResult(
+    val action: McpMenuAction,
+    val selectedIndex: Int,
 )
 
 enum class InvariantMenuAction {
@@ -391,7 +403,7 @@ object StdCliIO : CliIO {
         return result
     }
 
-    override fun openMcpMenu(options: List<McpMenuOption>, currentSelection: Int, reuseAnchor: Boolean): Int? {
+    override fun openMcpMenu(options: List<McpMenuOption>, currentSelection: Int, reuseAnchor: Boolean): McpMenuResult? {
         if (options.isEmpty()) {
             return null
         }
@@ -415,10 +427,15 @@ object StdCliIO : CliIO {
                 }
                 val indicatorColor = if (option.enabled) MCP_ENABLED_OPTION_COLOR else MCP_DISABLED_OPTION_COLOR
                 val indicatorText = if (option.enabled) "[enabled]" else "[disabled]"
-                lines += "   $marker$name $indicatorColor$indicatorText$ANSI_RESET"
+                val failureBadge = if (option.enabled && option.runtimeStatus == McpRuntimeStatus.FAILED) {
+                    " ${MCP_FAILED_OPTION_COLOR}[failed]$ANSI_RESET"
+                } else {
+                    ""
+                }
+                lines += "   $marker$name $indicatorColor$indicatorText$ANSI_RESET$failureBadge"
             }
             lines += ""
-            lines += "   Press Enter to toggle, ESC to close"
+            lines += "   Press Enter to toggle, I to inspect tools, ESC to close"
             return lines
         }
 
@@ -447,7 +464,7 @@ object StdCliIO : CliIO {
         print("\u001B7")
         renderMenu()
 
-        var result: Int? = null
+        var result: McpMenuResult? = null
 
         withRawInput<Unit> {
             while (true) {
@@ -458,7 +475,18 @@ object StdCliIO : CliIO {
                     }
 
                     ENTER_CR, ENTER_LF -> {
-                        result = selectedIndex
+                        result = McpMenuResult(
+                            action = McpMenuAction.TOGGLE,
+                            selectedIndex = selectedIndex,
+                        )
+                        break
+                    }
+
+                    73, 105 -> {
+                        result = McpMenuResult(
+                            action = McpMenuAction.INFO,
+                            selectedIndex = selectedIndex,
+                        )
                         break
                     }
 
@@ -1104,6 +1132,7 @@ object StdCliIO : CliIO {
     private const val THINKING_LABEL_COLOR = "\u001B[38;5;45m"
     private const val MCP_ENABLED_OPTION_COLOR = "\u001B[38;5;42m"
     private const val MCP_DISABLED_OPTION_COLOR = "\u001B[38;5;244m"
+    private const val MCP_FAILED_OPTION_COLOR = "\u001B[38;5;196m"
     private const val THINKING_LABEL_PADDING = "  "
     private const val OPTION_SELECTED_COLOR = "\u001B[38;5;39m"
     private const val ANSI_RESET = "\u001B[0m"

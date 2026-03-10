@@ -122,6 +122,7 @@ private suspend fun runApp(args: Array<String>): Int {
         userDefinedWorkflowStore = userDefinedWorkflowStore,
         invariantConstraintStore = invariantConstraintStore,
         mcpServerStore = mcpServerStore,
+        mcpRuntimeService = container.mcpRuntimeService,
         workingMemoryDistillationUseCase = workingMemoryDistillationUseCase,
         profileMemoryDistillationUseCase = profileMemoryDistillationUseCase,
         profileEnvironmentFactsProvider = ProfileEnvironmentFactsProvider(),

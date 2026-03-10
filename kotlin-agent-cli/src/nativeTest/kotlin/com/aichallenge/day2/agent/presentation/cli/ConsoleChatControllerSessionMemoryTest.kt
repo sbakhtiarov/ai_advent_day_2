@@ -10,6 +10,11 @@ import com.aichallenge.day2.agent.domain.model.MemoryEstimateSource
 import com.aichallenge.day2.agent.domain.model.MemoryUsageSnapshot
 import com.aichallenge.day2.agent.domain.model.MessageRole
 import com.aichallenge.day2.agent.domain.model.McpServerConfig
+import com.aichallenge.day2.agent.domain.model.McpRuntimeStatus
+import com.aichallenge.day2.agent.domain.model.McpServerRuntimeState
+import com.aichallenge.day2.agent.domain.model.McpToolCatalogState
+import com.aichallenge.day2.agent.domain.model.McpToolCatalogStatus
+import com.aichallenge.day2.agent.domain.model.McpToolDefinition
 import com.aichallenge.day2.agent.domain.model.PromptRequestData
 import com.aichallenge.day2.agent.domain.model.ProfilePreferenceState
 import com.aichallenge.day2.agent.domain.model.RollingWindowCompactionStartPolicy
@@ -32,6 +37,8 @@ import com.aichallenge.day2.agent.domain.repository.McpServerStore
 import com.aichallenge.day2.agent.domain.repository.SessionMemoryStore
 import com.aichallenge.day2.agent.domain.repository.UserDefinedProfileStore
 import com.aichallenge.day2.agent.domain.repository.UserDefinedWorkflowStore
+import com.aichallenge.day2.agent.domain.service.McpConnectedSession
+import com.aichallenge.day2.agent.domain.service.McpRuntimeService
 import com.aichallenge.day2.agent.domain.usecase.SessionMemoryCompactionCoordinator
 import com.aichallenge.day2.agent.domain.usecase.SendPromptUseCase
 import com.aichallenge.day2.agent.domain.usecase.SlidingWindowCompactionStrategy
@@ -2479,7 +2486,10 @@ class ConsoleChatControllerSessionMemoryTest {
         )
         val io = FakeCliIO(
             inputs = listOf("/mcp", "/exit"),
-            mcpSelections = listOf(0, null),
+            mcpSelections = listOf(
+                McpMenuResult(action = McpMenuAction.TOGGLE, selectedIndex = 0),
+                null,
+            ),
         )
         val controller = createController(
             repository = repository,
@@ -2506,7 +2516,11 @@ class ConsoleChatControllerSessionMemoryTest {
         )
         val io = FakeCliIO(
             inputs = listOf("/mcp", "/exit"),
-            mcpSelections = listOf(0, 1, null),
+            mcpSelections = listOf(
+                McpMenuResult(action = McpMenuAction.TOGGLE, selectedIndex = 0),
+                McpMenuResult(action = McpMenuAction.TOGGLE, selectedIndex = 1),
+                null,
+            ),
         )
         val controller = createController(
             repository = repository,
@@ -2558,7 +2572,10 @@ class ConsoleChatControllerSessionMemoryTest {
         )
         val io = FakeCliIO(
             inputs = listOf("/mcp", "/exit"),
-            mcpSelections = listOf(0, null),
+            mcpSelections = listOf(
+                McpMenuResult(action = McpMenuAction.TOGGLE, selectedIndex = 0),
+                null,
+            ),
         )
         val controller = createController(
             repository = repository,
@@ -2571,6 +2588,284 @@ class ConsoleChatControllerSessionMemoryTest {
         assertEquals(0, mcpStore.saveStates.size)
         assertEquals(true, mcpStore.currentServers().single().enabled)
         assertContains(io.outputText(), "system> failed to persist MCP server state")
+    }
+
+    @Test
+    fun interactiveStartupShowsMcpInitializationFailureMessage() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val io = FakeCliIO(inputs = listOf("/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            mcpServerStore = RecordingMcpServerStore(
+                loadedServers = listOf(
+                    McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = true),
+                ),
+            ),
+            mcpRuntimeService = RecordingMcpRuntimeService(
+                runtimeStates = mapOf(
+                    "Linear" to McpServerRuntimeState(
+                        server = McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = true),
+                        status = McpRuntimeStatus.FAILED,
+                        failureMessage = "Connection refused",
+                    ),
+                ),
+            ),
+        )
+
+        controller.runInteractive()
+
+        assertContains(io.outputText(), "system> MCP server 'Linear' initialization failed: Connection refused")
+    }
+
+    @Test
+    fun runSinglePromptPrintsMcpInitializationFailureBeforeAssistantOutput() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "one-shot answer")),
+            ),
+        )
+        val io = FakeCliIO(inputs = emptyList())
+        val controller = createController(
+            repository = repository,
+            io = io,
+            mcpServerStore = RecordingMcpServerStore(
+                loadedServers = listOf(
+                    McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = true),
+                ),
+            ),
+            mcpRuntimeService = RecordingMcpRuntimeService(
+                runtimeStates = mapOf(
+                    "Linear" to McpServerRuntimeState(
+                        server = McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = true),
+                        status = McpRuntimeStatus.FAILED,
+                        failureMessage = "Connection refused",
+                    ),
+                ),
+            ),
+        )
+
+        val exitCode = controller.runSinglePrompt("one-shot question")
+
+        assertEquals(0, exitCode)
+        val output = io.outputText()
+        assertContains(output, "system> MCP server 'Linear' initialization failed: Connection refused")
+        assertContains(output, "one-shot answer")
+        assertTrue(
+            output.indexOf("system> MCP server 'Linear' initialization failed: Connection refused") <
+                output.indexOf("one-shot answer"),
+        )
+    }
+
+    @Test
+    fun mcpCommandPassesFailedRuntimeStatusToMenu() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val io = FakeCliIO(
+            inputs = listOf("/mcp", "/exit"),
+            mcpSelections = listOf(null),
+        )
+        val controller = createController(
+            repository = repository,
+            io = io,
+            mcpServerStore = RecordingMcpServerStore(
+                loadedServers = listOf(
+                    McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = true),
+                ),
+            ),
+            mcpRuntimeService = RecordingMcpRuntimeService(
+                runtimeStates = mapOf(
+                    "Linear" to McpServerRuntimeState(
+                        server = McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = true),
+                        status = McpRuntimeStatus.FAILED,
+                        failureMessage = "Connection refused",
+                    ),
+                ),
+            ),
+        )
+
+        controller.runInteractive()
+
+        assertEquals(McpRuntimeStatus.FAILED, io.mcpMenuOptions.single().runtimeStatus)
+    }
+
+    @Test
+    fun interactiveStartupShowsMcpToolLoadingFailureMessage() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val io = FakeCliIO(inputs = listOf("/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            mcpServerStore = RecordingMcpServerStore(
+                loadedServers = listOf(
+                    McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = true),
+                ),
+            ),
+            mcpRuntimeService = RecordingMcpRuntimeService(
+                runtimeStates = mapOf(
+                    "Linear" to McpServerRuntimeState(
+                        server = McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = true),
+                        status = McpRuntimeStatus.READY,
+                        toolCatalogStatus = McpToolCatalogStatus.FAILED,
+                        toolCatalogFailureMessage = "tools unavailable",
+                    ),
+                ),
+            ),
+        )
+
+        controller.runInteractive()
+
+        assertContains(io.outputText(), "system> MCP tools for 'Linear' could not be loaded: tools unavailable")
+    }
+
+    @Test
+    fun mcpMenuInfoPrintsAllToolsAndDescriptions() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val io = FakeCliIO(
+            inputs = listOf("/mcp", "/exit"),
+            mcpSelections = listOf(
+                McpMenuResult(action = McpMenuAction.INFO, selectedIndex = 0),
+            ),
+        )
+        val controller = createController(
+            repository = repository,
+            io = io,
+            mcpServerStore = RecordingMcpServerStore(
+                loadedServers = listOf(
+                    McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = true),
+                ),
+            ),
+            mcpRuntimeService = RecordingMcpRuntimeService(
+                runtimeStates = mapOf(
+                    "Linear" to McpServerRuntimeState(
+                        server = McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = true),
+                        status = McpRuntimeStatus.READY,
+                        toolCatalogStatus = McpToolCatalogStatus.LOADED,
+                        tools = listOf(
+                            McpToolDefinition(
+                                name = "search_issues",
+                                title = "Search issues",
+                                description = "Search Linear issues",
+                                inputSchemaJson = """{"type":"object"}""",
+                            ),
+                            McpToolDefinition(
+                                name = "create_issue",
+                                description = null,
+                                inputSchemaJson = """{"type":"object"}""",
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        controller.runInteractive()
+
+        val output = io.outputText()
+        assertContains(output, "mcp> tools for 'Linear'")
+        assertContains(output, "1. Search issues (search_issues)")
+        assertContains(output, "Search Linear issues")
+        assertContains(output, "2. create_issue")
+        assertContains(output, "No description provided.")
+    }
+
+    @Test
+    fun mcpMenuInfoPrintsNoToolsMessageForEmptyCatalog() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val io = FakeCliIO(
+            inputs = listOf("/mcp", "/exit"),
+            mcpSelections = listOf(
+                McpMenuResult(action = McpMenuAction.INFO, selectedIndex = 0),
+            ),
+        )
+        val controller = createController(
+            repository = repository,
+            io = io,
+            mcpServerStore = RecordingMcpServerStore(
+                loadedServers = listOf(
+                    McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = true),
+                ),
+            ),
+            mcpRuntimeService = RecordingMcpRuntimeService(
+                runtimeStates = mapOf(
+                    "Linear" to McpServerRuntimeState(
+                        server = McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = true),
+                        status = McpRuntimeStatus.READY,
+                        toolCatalogStatus = McpToolCatalogStatus.LOADED,
+                    ),
+                ),
+            ),
+        )
+
+        controller.runInteractive()
+
+        assertContains(io.outputText(), "system> MCP server 'Linear' has no tools")
+    }
+
+    @Test
+    fun mcpMenuInfoPrintsCatalogFailureMessage() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val io = FakeCliIO(
+            inputs = listOf("/mcp", "/exit"),
+            mcpSelections = listOf(
+                McpMenuResult(action = McpMenuAction.INFO, selectedIndex = 0),
+            ),
+        )
+        val controller = createController(
+            repository = repository,
+            io = io,
+            mcpServerStore = RecordingMcpServerStore(
+                loadedServers = listOf(
+                    McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = true),
+                ),
+            ),
+            mcpRuntimeService = RecordingMcpRuntimeService(
+                runtimeStates = mapOf(
+                    "Linear" to McpServerRuntimeState(
+                        server = McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = true),
+                        status = McpRuntimeStatus.READY,
+                        toolCatalogStatus = McpToolCatalogStatus.FAILED,
+                        toolCatalogFailureMessage = "tools unavailable",
+                    ),
+                ),
+            ),
+        )
+
+        controller.runInteractive()
+
+        assertContains(io.outputText(), "system> MCP tools for 'Linear' could not be loaded: tools unavailable")
+    }
+
+    @Test
+    fun mcpMenuInfoPrintsNotInitializedMessage() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val io = FakeCliIO(
+            inputs = listOf("/mcp", "/exit"),
+            mcpSelections = listOf(
+                McpMenuResult(action = McpMenuAction.INFO, selectedIndex = 0),
+            ),
+        )
+        val controller = createController(
+            repository = repository,
+            io = io,
+            mcpServerStore = RecordingMcpServerStore(
+                loadedServers = listOf(
+                    McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = true),
+                ),
+            ),
+            mcpRuntimeService = RecordingMcpRuntimeService(
+                runtimeStates = mapOf(
+                    "Linear" to McpServerRuntimeState(
+                        server = McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = true),
+                        status = McpRuntimeStatus.FAILED,
+                        failureMessage = "Connection refused",
+                    ),
+                ),
+            ),
+        )
+
+        controller.runInteractive()
+
+        assertContains(io.outputText(), "system> MCP server 'Linear' is not initialized")
     }
 
     @Test
@@ -3363,6 +3658,7 @@ class ConsoleChatControllerSessionMemoryTest {
         userDefinedWorkflowStore: UserDefinedWorkflowStore? = null,
         invariantConstraintStore: InvariantConstraintStore? = null,
         mcpServerStore: McpServerStore? = null,
+        mcpRuntimeService: McpRuntimeService = RecordingMcpRuntimeService(),
         persistentMemoryEnabled: Boolean = true,
         fileReferenceReader: FileReferenceReader = RecordingFileReferenceReader(emptyMap()),
         compactionCoordinators: Map<SessionCompactionMode, SessionMemoryCompactionCoordinator> = mapOf(
@@ -3390,6 +3686,7 @@ class ConsoleChatControllerSessionMemoryTest {
             userDefinedWorkflowStore = userDefinedWorkflowStore,
             invariantConstraintStore = invariantConstraintStore,
             mcpServerStore = mcpServerStore,
+            mcpRuntimeService = mcpRuntimeService,
             persistentMemoryEnabled = persistentMemoryEnabled,
             fileReferenceReader = fileReferenceReader,
             compactionCoordinators = compactionCoordinators,
@@ -3419,7 +3716,7 @@ private class RecordingAgentRepository(
 private class FakeCliIO(
     inputs: List<String>,
     private val compactionSelections: List<Int?> = emptyList(),
-    private val mcpSelections: List<Int?> = emptyList(),
+    private val mcpSelections: List<McpMenuResult?> = emptyList(),
     private val profileSelections: List<Int?> = emptyList(),
     private val workflowSelections: List<Int?> = emptyList(),
     private val invariantSelections: List<InvariantMenuResult?> = emptyList(),
@@ -3441,6 +3738,7 @@ private class FakeCliIO(
         private set
     val footerLabels = mutableListOf<String?>()
     val footerPrompts = mutableListOf<String>()
+    val mcpMenuOptions = mutableListOf<McpMenuOption>()
 
     override fun clearScreen() = Unit
 
@@ -3482,13 +3780,18 @@ private class FakeCliIO(
         return currentSelection
     }
 
-    override fun openMcpMenu(options: List<McpMenuOption>, currentSelection: Int, reuseAnchor: Boolean): Int? {
+    override fun openMcpMenu(options: List<McpMenuOption>, currentSelection: Int, reuseAnchor: Boolean): McpMenuResult? {
+        mcpMenuOptions.clear()
+        mcpMenuOptions += options
         val selection = mcpSelections.getOrNull(nextMcpSelectionIndex)
         if (nextMcpSelectionIndex < mcpSelections.size) {
             nextMcpSelectionIndex += 1
             return selection
         }
-        return currentSelection
+        return McpMenuResult(
+            action = McpMenuAction.TOGGLE,
+            selectedIndex = currentSelection,
+        )
     }
 
     override fun openProfileMenu(options: List<String>, currentSelection: Int): Int? {
@@ -3551,6 +3854,39 @@ private class RecordingMcpServerStore(
     }
 
     fun currentServers(): List<McpServerConfig> = servers.map { server -> server.copy() }
+}
+
+private class RecordingMcpRuntimeService(
+    private val runtimeStates: Map<String, McpServerRuntimeState> = emptyMap(),
+) : McpRuntimeService {
+    override suspend fun initializeEnabledServers(servers: List<McpServerConfig>): List<McpServerRuntimeState> {
+        return servers.map(::runtimeStateFor)
+    }
+
+    override fun runtimeStateFor(server: McpServerConfig): McpServerRuntimeState {
+        return runtimeStates[server.name] ?: McpServerRuntimeState(
+            server = server,
+            status = if (server.enabled) McpRuntimeStatus.NOT_ATTEMPTED else McpRuntimeStatus.DISABLED,
+        )
+    }
+
+    override fun toolCatalogFor(server: McpServerConfig): McpToolCatalogState {
+        val state = runtimeStateFor(server)
+        return McpToolCatalogState(
+            server = server,
+            status = state.toolCatalogStatus,
+            tools = state.tools,
+            failureMessage = state.toolCatalogFailureMessage,
+        )
+    }
+
+    override fun runtimeStates(): List<McpServerRuntimeState> = runtimeStates.values.toList()
+
+    override fun connectedSession(serverName: String): McpConnectedSession? = null
+
+    override fun clearFailureState(server: McpServerConfig) = Unit
+
+    override suspend fun close() = Unit
 }
 
 private class RecordingSelectableUserDefinedWorkflowStore(

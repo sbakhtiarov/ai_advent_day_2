@@ -588,7 +588,14 @@ private class ProfileMemoryControllerTestCliIO(
         return currentSelection
     }
 
-    override fun openMcpMenu(options: List<McpMenuOption>, currentSelection: Int, reuseAnchor: Boolean): Int? = currentSelection
+    override fun openMcpMenu(
+        options: List<McpMenuOption>,
+        currentSelection: Int,
+        reuseAnchor: Boolean,
+    ): McpMenuResult? = McpMenuResult(
+        action = McpMenuAction.TOGGLE,
+        selectedIndex = currentSelection,
+    )
 
     override fun openProfileMenu(options: List<String>, currentSelection: Int): Int? = currentSelection
 
