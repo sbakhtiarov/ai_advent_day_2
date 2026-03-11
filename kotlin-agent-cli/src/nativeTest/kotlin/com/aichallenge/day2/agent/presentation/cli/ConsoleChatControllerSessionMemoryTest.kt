@@ -12,9 +12,11 @@ import com.aichallenge.day2.agent.domain.model.MessageRole
 import com.aichallenge.day2.agent.domain.model.McpServerConfig
 import com.aichallenge.day2.agent.domain.model.McpRuntimeStatus
 import com.aichallenge.day2.agent.domain.model.McpServerRuntimeState
+import com.aichallenge.day2.agent.domain.model.McpToolCallResult
 import com.aichallenge.day2.agent.domain.model.McpToolCatalogState
 import com.aichallenge.day2.agent.domain.model.McpToolCatalogStatus
 import com.aichallenge.day2.agent.domain.model.McpToolDefinition
+import com.aichallenge.day2.agent.domain.model.McpTransportConfig
 import com.aichallenge.day2.agent.domain.model.PromptRequestData
 import com.aichallenge.day2.agent.domain.model.ProfilePreferenceState
 import com.aichallenge.day2.agent.domain.model.RollingWindowCompactionStartPolicy
@@ -43,6 +45,10 @@ import com.aichallenge.day2.agent.domain.usecase.SessionMemoryCompactionCoordina
 import com.aichallenge.day2.agent.domain.usecase.SendPromptUseCase
 import com.aichallenge.day2.agent.domain.usecase.SlidingWindowCompactionStrategy
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
@@ -2476,12 +2482,335 @@ class ConsoleChatControllerSessionMemoryTest {
     }
 
     @Test
+    fun mcpToolCommandInvokesToolWithEmptyArgumentsByDefault() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val server = httpMcpServer(name = "Linear", url = "http://localhost:3000", enabled = true)
+        val runtimeService = RecordingMcpRuntimeService(
+            runtimeStates = mapOf(
+                "Linear" to McpServerRuntimeState(
+                    server = server,
+                    status = McpRuntimeStatus.READY,
+                    toolCatalogStatus = McpToolCatalogStatus.LOADED,
+                    tools = listOf(
+                        McpToolDefinition(
+                            name = "search_issues",
+                            description = "Search Linear issues",
+                            inputSchemaJson = """{"type":"object"}""",
+                        ),
+                    ),
+                ),
+            ),
+            toolCallResultsByKey = mapOf(
+                ("Linear" to "search_issues") to Result.success(
+                    McpToolCallResult(
+                        isError = false,
+                        content = buildJsonArray {
+                            add(
+                                buildJsonObject {
+                                    put("type", "text")
+                                    put("text", "ok")
+                                },
+                            )
+                        },
+                        structuredContent = buildJsonObject {
+                            put("count", 1)
+                        },
+                        meta = buildJsonObject {
+                            put("request_id", "req-1")
+                        },
+                    ),
+                ),
+            ),
+        )
+        val io = FakeCliIO(inputs = listOf("/mcp 1 search_issues", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            mcpServerStore = RecordingMcpServerStore(loadedServers = listOf(server)),
+            mcpRuntimeService = runtimeService,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(
+            listOf(
+                RecordedMcpToolCall(
+                    server = server,
+                    toolName = "search_issues",
+                    arguments = buildJsonObject {},
+                ),
+            ),
+            runtimeService.callToolRequests,
+        )
+        val output = io.outputText()
+        assertContains(output, "mcp> Linear/search_issues")
+        assertContains(output, "\"is_error\": false")
+        assertContains(output, "\"structured_content\": {")
+        assertContains(output, "\"_meta\": {")
+    }
+
+    @Test
+    fun mcpToolCommandParsesJsonObjectArguments() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val server = httpMcpServer(name = "Linear", url = "http://localhost:3000", enabled = true)
+        val runtimeService = RecordingMcpRuntimeService(
+            runtimeStates = mapOf(
+                "Linear" to McpServerRuntimeState(
+                    server = server,
+                    status = McpRuntimeStatus.READY,
+                    toolCatalogStatus = McpToolCatalogStatus.LOADED,
+                    tools = listOf(
+                        McpToolDefinition(
+                            name = "search_issues",
+                            description = "Search Linear issues",
+                            inputSchemaJson = """{"type":"object"}""",
+                        ),
+                    ),
+                ),
+            ),
+            toolCallResultsByKey = mapOf(
+                ("Linear" to "search_issues") to Result.success(
+                    McpToolCallResult(
+                        isError = false,
+                        content = buildJsonArray {
+                            add(
+                                buildJsonObject {
+                                    put("type", "text")
+                                    put("text", "ok")
+                                },
+                            )
+                        },
+                    ),
+                ),
+            ),
+        )
+        val controller = createController(
+            repository = repository,
+            io = FakeCliIO(inputs = listOf("/mcp 1 search_issues {\"city\":\"Berlin\",\"days\":1}", "/exit")),
+            mcpServerStore = RecordingMcpServerStore(loadedServers = listOf(server)),
+            mcpRuntimeService = runtimeService,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(
+            buildJsonObject {
+                put("city", "Berlin")
+                put("days", 1)
+            },
+            runtimeService.callToolRequests.single().arguments,
+        )
+    }
+
+    @Test
+    fun mcpToolCommandRejectsOutOfRangeServerIndex() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val io = FakeCliIO(inputs = listOf("/mcp 2 search_issues", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            mcpServerStore = RecordingMcpServerStore(
+                loadedServers = listOf(
+                    httpMcpServer(name = "Linear", url = "http://localhost:3000", enabled = true),
+                ),
+            ),
+        )
+
+        controller.runInteractive()
+
+        assertContains(io.outputText(), "system> invalid MCP server index '2'")
+    }
+
+    @Test
+    fun mcpToolCommandRejectsDisabledServer() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val runtimeService = RecordingMcpRuntimeService()
+        val io = FakeCliIO(inputs = listOf("/mcp 1 search_issues", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            mcpServerStore = RecordingMcpServerStore(
+                loadedServers = listOf(
+                    httpMcpServer(name = "Linear", url = "http://localhost:3000", enabled = false),
+                ),
+            ),
+            mcpRuntimeService = runtimeService,
+        )
+
+        controller.runInteractive()
+
+        assertTrue(runtimeService.callToolRequests.isEmpty())
+        assertContains(io.outputText(), "system> MCP server 'Linear' is disabled; enable the server first")
+    }
+
+    @Test
+    fun mcpToolCommandRejectsServerThatIsNotReady() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val server = httpMcpServer(name = "Linear", url = "http://localhost:3000", enabled = true)
+        val runtimeService = RecordingMcpRuntimeService(
+            runtimeStates = mapOf(
+                "Linear" to McpServerRuntimeState(
+                    server = server,
+                    status = McpRuntimeStatus.FAILED,
+                    failureMessage = "Connection refused",
+                ),
+            ),
+        )
+        val io = FakeCliIO(inputs = listOf("/mcp 1 search_issues", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            mcpServerStore = RecordingMcpServerStore(loadedServers = listOf(server)),
+            mcpRuntimeService = runtimeService,
+        )
+
+        controller.runInteractive()
+
+        assertTrue(runtimeService.callToolRequests.isEmpty())
+        assertContains(io.outputText(), "system> MCP server 'Linear' is not initialized")
+    }
+
+    @Test
+    fun mcpToolCommandRejectsInvalidJsonArguments() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val server = httpMcpServer(name = "Linear", url = "http://localhost:3000", enabled = true)
+        val io = FakeCliIO(inputs = listOf("/mcp 1 search_issues {\"city\":", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            mcpServerStore = RecordingMcpServerStore(loadedServers = listOf(server)),
+            mcpRuntimeService = RecordingMcpRuntimeService(
+                runtimeStates = mapOf(
+                    "Linear" to McpServerRuntimeState(
+                        server = server,
+                        status = McpRuntimeStatus.READY,
+                        toolCatalogStatus = McpToolCatalogStatus.LOADED,
+                        tools = listOf(
+                            McpToolDefinition(
+                                name = "search_issues",
+                                description = "Search Linear issues",
+                                inputSchemaJson = """{"type":"object"}""",
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        controller.runInteractive()
+
+        assertContains(io.outputText(), "system> MCP tool arguments must be valid JSON")
+    }
+
+    @Test
+    fun mcpToolCommandRejectsNonObjectJsonArguments() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val server = httpMcpServer(name = "Linear", url = "http://localhost:3000", enabled = true)
+        val io = FakeCliIO(inputs = listOf("/mcp 1 search_issues [1,2,3]", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            mcpServerStore = RecordingMcpServerStore(loadedServers = listOf(server)),
+            mcpRuntimeService = RecordingMcpRuntimeService(
+                runtimeStates = mapOf(
+                    "Linear" to McpServerRuntimeState(
+                        server = server,
+                        status = McpRuntimeStatus.READY,
+                        toolCatalogStatus = McpToolCatalogStatus.LOADED,
+                        tools = listOf(
+                            McpToolDefinition(
+                                name = "search_issues",
+                                description = "Search Linear issues",
+                                inputSchemaJson = """{"type":"object"}""",
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        controller.runInteractive()
+
+        assertContains(io.outputText(), "system> MCP tool arguments must be a JSON object")
+    }
+
+    @Test
+    fun mcpToolCommandRejectsUnknownToolName() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val server = httpMcpServer(name = "Linear", url = "http://localhost:3000", enabled = true)
+        val runtimeService = RecordingMcpRuntimeService(
+            runtimeStates = mapOf(
+                "Linear" to McpServerRuntimeState(
+                    server = server,
+                    status = McpRuntimeStatus.READY,
+                    toolCatalogStatus = McpToolCatalogStatus.LOADED,
+                    tools = listOf(
+                        McpToolDefinition(
+                            name = "search_issues",
+                            description = "Search Linear issues",
+                            inputSchemaJson = """{"type":"object"}""",
+                        ),
+                    ),
+                ),
+            ),
+        )
+        val io = FakeCliIO(inputs = listOf("/mcp 1 create_issue", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            mcpServerStore = RecordingMcpServerStore(loadedServers = listOf(server)),
+            mcpRuntimeService = runtimeService,
+        )
+
+        controller.runInteractive()
+
+        assertTrue(runtimeService.callToolRequests.isEmpty())
+        assertContains(io.outputText(), "system> MCP server 'Linear' has no tool named 'create_issue'")
+    }
+
+    @Test
+    fun mcpToolCommandPrintsRuntimeFailureMessage() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val server = httpMcpServer(name = "Linear", url = "http://localhost:3000", enabled = true)
+        val runtimeService = RecordingMcpRuntimeService(
+            runtimeStates = mapOf(
+                "Linear" to McpServerRuntimeState(
+                    server = server,
+                    status = McpRuntimeStatus.READY,
+                    toolCatalogStatus = McpToolCatalogStatus.LOADED,
+                    tools = listOf(
+                        McpToolDefinition(
+                            name = "search_issues",
+                            description = "Search Linear issues",
+                            inputSchemaJson = """{"type":"object"}""",
+                        ),
+                    ),
+                ),
+            ),
+            toolCallResultsByKey = mapOf(
+                ("Linear" to "search_issues") to Result.failure(IllegalStateException("Broken pipe")),
+            ),
+        )
+        val io = FakeCliIO(inputs = listOf("/mcp 1 search_issues", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            mcpServerStore = RecordingMcpServerStore(loadedServers = listOf(server)),
+            mcpRuntimeService = runtimeService,
+        )
+
+        controller.runInteractive()
+
+        assertContains(io.outputText(), "system> MCP tool 'search_issues' failed: Broken pipe")
+    }
+
+    @Test
     fun mcpCommandTogglesSelectedServerAndPersists() = runBlocking {
         val repository = RecordingAgentRepository(responses = emptyList())
         val mcpStore = RecordingMcpServerStore(
             loadedServers = listOf(
-                McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = true),
-                McpServerConfig(name = "GitHub", url = "http://localhost:3001", enabled = false),
+                httpMcpServer(name = "Linear", url = "http://localhost:3000", enabled = true),
+                httpMcpServer(name = "GitHub", url = "http://localhost:3001", enabled = false),
             ),
         )
         val io = FakeCliIO(
@@ -2510,8 +2839,8 @@ class ConsoleChatControllerSessionMemoryTest {
         val repository = RecordingAgentRepository(responses = emptyList())
         val mcpStore = RecordingMcpServerStore(
             loadedServers = listOf(
-                McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = true),
-                McpServerConfig(name = "GitHub", url = "http://localhost:3001", enabled = false),
+                httpMcpServer(name = "Linear", url = "http://localhost:3000", enabled = true),
+                httpMcpServer(name = "GitHub", url = "http://localhost:3001", enabled = false),
             ),
         )
         val io = FakeCliIO(
@@ -2542,7 +2871,7 @@ class ConsoleChatControllerSessionMemoryTest {
         val repository = RecordingAgentRepository(responses = emptyList())
         val mcpStore = RecordingMcpServerStore(
             loadedServers = listOf(
-                McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = true),
+                httpMcpServer(name = "Linear", url = "http://localhost:3000", enabled = true),
             ),
         )
         val io = FakeCliIO(
@@ -2566,7 +2895,7 @@ class ConsoleChatControllerSessionMemoryTest {
         val repository = RecordingAgentRepository(responses = emptyList())
         val mcpStore = RecordingMcpServerStore(
             loadedServers = listOf(
-                McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = true),
+                httpMcpServer(name = "Linear", url = "http://localhost:3000", enabled = true),
             ),
             failOnSaveCalls = setOf(1),
         )
@@ -2599,13 +2928,13 @@ class ConsoleChatControllerSessionMemoryTest {
             io = io,
             mcpServerStore = RecordingMcpServerStore(
                 loadedServers = listOf(
-                    McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = true),
+                    httpMcpServer(name = "Linear", url = "http://localhost:3000", enabled = true),
                 ),
             ),
             mcpRuntimeService = RecordingMcpRuntimeService(
                 runtimeStates = mapOf(
                     "Linear" to McpServerRuntimeState(
-                        server = McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = true),
+                        server = httpMcpServer(name = "Linear", url = "http://localhost:3000", enabled = true),
                         status = McpRuntimeStatus.FAILED,
                         failureMessage = "Connection refused",
                     ),
@@ -2619,42 +2948,41 @@ class ConsoleChatControllerSessionMemoryTest {
     }
 
     @Test
-    fun runSinglePromptPrintsMcpInitializationFailureBeforeAssistantOutput() = runBlocking {
+    fun runSinglePromptDoesNotInitializeMcpServers() = runBlocking {
         val repository = RecordingAgentRepository(
             responses = listOf(
                 Result.success(AgentResponse(content = "one-shot answer")),
             ),
         )
         val io = FakeCliIO(inputs = emptyList())
+        val mcpStore = RecordingMcpServerStore(
+            loadedServers = listOf(
+                httpMcpServer(name = "Linear", url = "http://localhost:3000", enabled = true),
+            ),
+        )
+        val runtimeService = RecordingMcpRuntimeService(
+            runtimeStates = mapOf(
+                "Linear" to McpServerRuntimeState(
+                    server = httpMcpServer(name = "Linear", url = "http://localhost:3000", enabled = true),
+                    status = McpRuntimeStatus.FAILED,
+                    failureMessage = "Connection refused",
+                ),
+            ),
+        )
         val controller = createController(
             repository = repository,
             io = io,
-            mcpServerStore = RecordingMcpServerStore(
-                loadedServers = listOf(
-                    McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = true),
-                ),
-            ),
-            mcpRuntimeService = RecordingMcpRuntimeService(
-                runtimeStates = mapOf(
-                    "Linear" to McpServerRuntimeState(
-                        server = McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = true),
-                        status = McpRuntimeStatus.FAILED,
-                        failureMessage = "Connection refused",
-                    ),
-                ),
-            ),
+            mcpServerStore = mcpStore,
+            mcpRuntimeService = runtimeService,
         )
 
         val exitCode = controller.runSinglePrompt("one-shot question")
 
         assertEquals(0, exitCode)
-        val output = io.outputText()
-        assertContains(output, "system> MCP server 'Linear' initialization failed: Connection refused")
-        assertContains(output, "one-shot answer")
-        assertTrue(
-            output.indexOf("system> MCP server 'Linear' initialization failed: Connection refused") <
-                output.indexOf("one-shot answer"),
-        )
+        assertEquals(0, mcpStore.loadCalls)
+        assertEquals(0, runtimeService.initializeCalls)
+        assertContains(io.outputText(), "one-shot answer")
+        assertFalse(io.outputText().contains("MCP server 'Linear' initialization failed"))
     }
 
     @Test
@@ -2669,13 +2997,13 @@ class ConsoleChatControllerSessionMemoryTest {
             io = io,
             mcpServerStore = RecordingMcpServerStore(
                 loadedServers = listOf(
-                    McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = true),
+                    httpMcpServer(name = "Linear", url = "http://localhost:3000", enabled = true),
                 ),
             ),
             mcpRuntimeService = RecordingMcpRuntimeService(
                 runtimeStates = mapOf(
                     "Linear" to McpServerRuntimeState(
-                        server = McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = true),
+                        server = httpMcpServer(name = "Linear", url = "http://localhost:3000", enabled = true),
                         status = McpRuntimeStatus.FAILED,
                         failureMessage = "Connection refused",
                     ),
@@ -2697,13 +3025,13 @@ class ConsoleChatControllerSessionMemoryTest {
             io = io,
             mcpServerStore = RecordingMcpServerStore(
                 loadedServers = listOf(
-                    McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = true),
+                    httpMcpServer(name = "Linear", url = "http://localhost:3000", enabled = true),
                 ),
             ),
             mcpRuntimeService = RecordingMcpRuntimeService(
                 runtimeStates = mapOf(
                     "Linear" to McpServerRuntimeState(
-                        server = McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = true),
+                        server = httpMcpServer(name = "Linear", url = "http://localhost:3000", enabled = true),
                         status = McpRuntimeStatus.READY,
                         toolCatalogStatus = McpToolCatalogStatus.FAILED,
                         toolCatalogFailureMessage = "tools unavailable",
@@ -2731,13 +3059,13 @@ class ConsoleChatControllerSessionMemoryTest {
             io = io,
             mcpServerStore = RecordingMcpServerStore(
                 loadedServers = listOf(
-                    McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = true),
+                    httpMcpServer(name = "Linear", url = "http://localhost:3000", enabled = true),
                 ),
             ),
             mcpRuntimeService = RecordingMcpRuntimeService(
                 runtimeStates = mapOf(
                     "Linear" to McpServerRuntimeState(
-                        server = McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = true),
+                        server = httpMcpServer(name = "Linear", url = "http://localhost:3000", enabled = true),
                         status = McpRuntimeStatus.READY,
                         toolCatalogStatus = McpToolCatalogStatus.LOADED,
                         tools = listOf(
@@ -2782,13 +3110,13 @@ class ConsoleChatControllerSessionMemoryTest {
             io = io,
             mcpServerStore = RecordingMcpServerStore(
                 loadedServers = listOf(
-                    McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = true),
+                    httpMcpServer(name = "Linear", url = "http://localhost:3000", enabled = true),
                 ),
             ),
             mcpRuntimeService = RecordingMcpRuntimeService(
                 runtimeStates = mapOf(
                     "Linear" to McpServerRuntimeState(
-                        server = McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = true),
+                        server = httpMcpServer(name = "Linear", url = "http://localhost:3000", enabled = true),
                         status = McpRuntimeStatus.READY,
                         toolCatalogStatus = McpToolCatalogStatus.LOADED,
                     ),
@@ -2815,13 +3143,13 @@ class ConsoleChatControllerSessionMemoryTest {
             io = io,
             mcpServerStore = RecordingMcpServerStore(
                 loadedServers = listOf(
-                    McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = true),
+                    httpMcpServer(name = "Linear", url = "http://localhost:3000", enabled = true),
                 ),
             ),
             mcpRuntimeService = RecordingMcpRuntimeService(
                 runtimeStates = mapOf(
                     "Linear" to McpServerRuntimeState(
-                        server = McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = true),
+                        server = httpMcpServer(name = "Linear", url = "http://localhost:3000", enabled = true),
                         status = McpRuntimeStatus.READY,
                         toolCatalogStatus = McpToolCatalogStatus.FAILED,
                         toolCatalogFailureMessage = "tools unavailable",
@@ -2849,13 +3177,13 @@ class ConsoleChatControllerSessionMemoryTest {
             io = io,
             mcpServerStore = RecordingMcpServerStore(
                 loadedServers = listOf(
-                    McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = true),
+                    httpMcpServer(name = "Linear", url = "http://localhost:3000", enabled = true),
                 ),
             ),
             mcpRuntimeService = RecordingMcpRuntimeService(
                 runtimeStates = mapOf(
                     "Linear" to McpServerRuntimeState(
-                        server = McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = true),
+                        server = httpMcpServer(name = "Linear", url = "http://localhost:3000", enabled = true),
                         status = McpRuntimeStatus.FAILED,
                         failureMessage = "Connection refused",
                     ),
@@ -3713,6 +4041,14 @@ private class RecordingAgentRepository(
     }
 }
 
+private fun httpMcpServer(name: String, url: String, enabled: Boolean): McpServerConfig {
+    return McpServerConfig(
+        name = name,
+        enabled = enabled,
+        transport = McpTransportConfig.Http(url = url),
+    )
+}
+
 private class FakeCliIO(
     inputs: List<String>,
     private val compactionSelections: List<Int?> = emptyList(),
@@ -3858,9 +4194,26 @@ private class RecordingMcpServerStore(
 
 private class RecordingMcpRuntimeService(
     private val runtimeStates: Map<String, McpServerRuntimeState> = emptyMap(),
+    private val toolCallResultsByKey: Map<Pair<String, String>, Result<McpToolCallResult>> = emptyMap(),
 ) : McpRuntimeService {
+    var initializeCalls: Int = 0
+        private set
+    val callToolRequests = mutableListOf<RecordedMcpToolCall>()
+
     override suspend fun initializeEnabledServers(servers: List<McpServerConfig>): List<McpServerRuntimeState> {
+        initializeCalls += 1
         return servers.map(::runtimeStateFor)
+    }
+
+    override suspend fun callTool(server: McpServerConfig, toolName: String, arguments: JsonObject): McpToolCallResult {
+        callToolRequests += RecordedMcpToolCall(
+            server = server,
+            toolName = toolName,
+            arguments = arguments,
+        )
+        return toolCallResultsByKey[server.name to toolName]
+            ?.getOrThrow()
+            ?: error("No prepared MCP tool result for ${server.name}/$toolName")
     }
 
     override fun runtimeStateFor(server: McpServerConfig): McpServerRuntimeState {
@@ -3888,6 +4241,12 @@ private class RecordingMcpRuntimeService(
 
     override suspend fun close() = Unit
 }
+
+private data class RecordedMcpToolCall(
+    val server: McpServerConfig,
+    val toolName: String,
+    val arguments: JsonObject,
+)
 
 private class RecordingSelectableUserDefinedWorkflowStore(
     private val workflows: List<UserWorkflowOption>,

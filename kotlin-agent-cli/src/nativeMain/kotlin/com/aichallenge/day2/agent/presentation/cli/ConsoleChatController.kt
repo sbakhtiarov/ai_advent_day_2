@@ -10,6 +10,7 @@ import com.aichallenge.day2.agent.domain.model.MemoryUsageSnapshot
 import com.aichallenge.day2.agent.domain.model.McpServerConfig
 import com.aichallenge.day2.agent.domain.model.McpRuntimeStatus
 import com.aichallenge.day2.agent.domain.model.McpServerRuntimeState
+import com.aichallenge.day2.agent.domain.model.McpToolCallResult
 import com.aichallenge.day2.agent.domain.model.McpToolCatalogStatus
 import com.aichallenge.day2.agent.domain.model.McpToolDefinition
 import com.aichallenge.day2.agent.domain.model.ProfileMemoryState
@@ -51,12 +52,15 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.roundToLong
@@ -202,10 +206,6 @@ class ConsoleChatController(
         if (prompt.isBlank()) {
             io.writeLine("error> --prompt must not be empty")
             return 1
-        }
-        initializeMcpServers()
-        consumePendingMcpStartupMessages().forEach { message ->
-            io.writeLine(message)
         }
         initializeUserDefinedProfile()
         initializeUserDefinedWorkflow()
@@ -1768,7 +1768,7 @@ class ConsoleChatController(
         return substring(0, endIndex)
     }
 
-    private fun handleCommand(input: String): Boolean {
+    private suspend fun handleCommand(input: String): Boolean {
         return when {
             input == "/help" -> {
                 dialogBlocks += helpText()
@@ -1802,6 +1802,11 @@ class ConsoleChatController(
 
             input == "/mcp" -> {
                 handleMcpCommand()
+                true
+            }
+
+            input.startsWith("/mcp ") -> {
+                handleMcpToolCommand(input)
                 true
             }
 
@@ -2201,6 +2206,8 @@ class ConsoleChatController(
         /profile             choose active user profile
         /workflow            enable workflow mode with workflow selection (toggle off when enabled)
         /mcp                 configure MCP servers
+        /mcp <n> <tool> [json-object-args]
+                             call an MCP tool on an enabled ready server
         /invariant           configure invariant constraints
         /reset               clear conversation and working memory; keep current system prompt
         /exit                close the application
@@ -2256,6 +2263,144 @@ class ConsoleChatController(
             }
 
             mcpMenuSelection = currentSelection
+        }
+    }
+
+    private suspend fun handleMcpToolCommand(input: String) {
+        if (mcpServerStore == null || mcpServers.isEmpty()) {
+            dialogBlocks += "system> no valid MCP servers found"
+            return
+        }
+
+        val command = parseMcpToolCommand(input) ?: return
+        val server = mcpServers.getOrNull(command.serverIndex - 1)
+        if (server == null) {
+            dialogBlocks += "system> invalid MCP server index '${command.serverIndexRaw}'"
+            return
+        }
+
+        if (!server.enabled) {
+            dialogBlocks += "system> MCP server '${server.name}' is disabled; enable the server first"
+            return
+        }
+
+        val runtimeState = mcpRuntimeService.runtimeStateFor(server)
+        if (runtimeState.status != McpRuntimeStatus.READY) {
+            dialogBlocks += "system> MCP server '${server.name}' is not initialized"
+            return
+        }
+
+        val toolCatalog = mcpRuntimeService.toolCatalogFor(server)
+        when (toolCatalog.status) {
+            McpToolCatalogStatus.FAILED -> {
+                dialogBlocks += "system> MCP tools for '${server.name}' could not be loaded: ${toolCatalog.failureMessage ?: "Unexpected error"}"
+                return
+            }
+
+            McpToolCatalogStatus.NOT_REQUESTED -> {
+                dialogBlocks += "system> MCP tools for '${server.name}' are not available"
+                return
+            }
+
+            McpToolCatalogStatus.LOADED -> Unit
+        }
+
+        if (toolCatalog.tools.none { tool -> tool.name == command.toolName }) {
+            dialogBlocks += "system> MCP server '${server.name}' has no tool named '${command.toolName}'"
+            return
+        }
+
+        runCatching {
+            mcpRuntimeService.callTool(
+                server = server,
+                toolName = command.toolName,
+                arguments = command.arguments,
+            )
+        }.onSuccess { result ->
+            dialogBlocks += formatMcpToolCallResult(
+                server = server,
+                toolName = command.toolName,
+                result = result,
+            )
+        }.onFailure { throwable ->
+            dialogBlocks += "system> MCP tool '${command.toolName}' failed: ${throwable.message?.trim().takeUnless { it.isNullOrEmpty() } ?: "Unexpected error"}"
+        }
+    }
+
+    private fun parseMcpToolCommand(input: String): ParsedMcpToolCommand? {
+        val rawPayload = input.removePrefix("/mcp").trim()
+        if (rawPayload.isEmpty()) {
+            dialogBlocks += MCP_TOOL_COMMAND_USAGE
+            return null
+        }
+
+        val tokens = rawPayload.split(Regex("\\s+"), limit = 3)
+        if (tokens.size < 2) {
+            dialogBlocks += MCP_TOOL_COMMAND_USAGE
+            return null
+        }
+
+        val serverIndexRaw = tokens[0].trim()
+        val serverIndex = serverIndexRaw.toIntOrNull()
+        if (serverIndex == null || serverIndex < 1) {
+            dialogBlocks += "system> invalid MCP server index '$serverIndexRaw'"
+            return null
+        }
+
+        val toolName = tokens[1].trim()
+        if (toolName.isEmpty()) {
+            dialogBlocks += MCP_TOOL_COMMAND_USAGE
+            return null
+        }
+
+        val arguments = tokens.getOrNull(2)
+            ?.trim()
+            ?.takeIf { value -> value.isNotEmpty() }
+            ?.let { rawArguments ->
+                parseMcpToolArguments(rawArguments) ?: return null
+            }
+            ?: EMPTY_JSON_OBJECT
+
+        return ParsedMcpToolCommand(
+            serverIndex = serverIndex,
+            serverIndexRaw = serverIndexRaw,
+            toolName = toolName,
+            arguments = arguments,
+        )
+    }
+
+    private fun parseMcpToolArguments(rawArguments: String): JsonObject? {
+        val parsed = runCatching {
+            mcpCommandJson.parseToJsonElement(rawArguments)
+        }.getOrElse {
+            dialogBlocks += "system> MCP tool arguments must be valid JSON"
+            return null
+        }
+
+        return parsed as? JsonObject ?: run {
+            dialogBlocks += "system> MCP tool arguments must be a JSON object"
+            null
+        }
+    }
+
+    private fun formatMcpToolCallResult(
+        server: McpServerConfig,
+        toolName: String,
+        result: McpToolCallResult,
+    ): String {
+        val envelope = buildJsonObject {
+            put("is_error", result.isError)
+            put("content", result.content)
+            result.structuredContent?.let { structuredContent ->
+                put("structured_content", structuredContent)
+            }
+            result.meta?.let { meta ->
+                put("_meta", meta)
+            }
+        }
+        return buildString {
+            appendLine("mcp> ${server.name}/$toolName")
+            append(mcpCommandJson.encodeToString(JsonObject.serializer(), envelope))
         }
     }
 
@@ -2967,6 +3112,11 @@ class ConsoleChatController(
         private val workflowStepResponseJson: Json = Json {
             ignoreUnknownKeys = true
         }
+        private val mcpCommandJson: Json = Json {
+            prettyPrint = true
+        }
+        private val EMPTY_JSON_OBJECT = buildJsonObject {}
+        private const val MCP_TOOL_COMMAND_USAGE = "system> usage: /mcp <server-index> <tool-name> [json-object-args]"
         private val WORKFLOW_STEP_RESPONSE_CONTRACT_PROMPT = """
             Response format contract:
             - Return only valid JSON object with keys:
@@ -2991,4 +3141,11 @@ class ConsoleChatController(
             - Do not include markdown, explanations, or code fences.
         """.trimIndent()
     }
+
+    private data class ParsedMcpToolCommand(
+        val serverIndex: Int,
+        val serverIndexRaw: String,
+        val toolName: String,
+        val arguments: JsonObject,
+    )
 }

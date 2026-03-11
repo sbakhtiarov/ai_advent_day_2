@@ -4,22 +4,33 @@ import com.aichallenge.day2.agent.core.config.AppRuntimeInfo
 import com.aichallenge.day2.agent.domain.model.McpRuntimeStatus
 import com.aichallenge.day2.agent.domain.model.McpServerConfig
 import com.aichallenge.day2.agent.domain.model.McpServerRuntimeState
+import com.aichallenge.day2.agent.domain.model.McpToolCallResult
 import com.aichallenge.day2.agent.domain.model.McpToolCatalogState
 import com.aichallenge.day2.agent.domain.model.McpToolCatalogStatus
 import com.aichallenge.day2.agent.domain.model.McpToolDefinition
+import com.aichallenge.day2.agent.domain.model.McpTransportConfig
 import com.aichallenge.day2.agent.domain.service.McpConnectedSession
 import com.aichallenge.day2.agent.domain.service.McpRuntimeService
 import io.ktor.client.HttpClient
 import io.modelcontextprotocol.kotlin.sdk.client.Client
+import io.modelcontextprotocol.kotlin.sdk.client.StdioClientTransport
 import io.modelcontextprotocol.kotlin.sdk.client.StreamableHttpClientTransport
+import io.modelcontextprotocol.kotlin.sdk.shared.Transport
+import io.modelcontextprotocol.kotlin.sdk.types.CallToolRequest
+import io.modelcontextprotocol.kotlin.sdk.types.CallToolRequestParams
+import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
 import io.modelcontextprotocol.kotlin.sdk.types.Implementation
 import io.modelcontextprotocol.kotlin.sdk.types.ListToolsRequest
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.encodeToJsonElement
+import kotlinx.serialization.json.jsonArray
 
 class SdkMcpRuntimeService internal constructor(
     private val sessionManager: McpSessionManager,
 ) : McpRuntimeService {
+    private val json = Json { prettyPrint = true }
     private val runtimeStates = linkedMapOf<McpServerKey, McpServerRuntimeState>()
 
     override suspend fun initializeEnabledServers(servers: List<McpServerConfig>): List<McpServerRuntimeState> {
@@ -61,6 +72,12 @@ class SdkMcpRuntimeService internal constructor(
         return servers.map(::runtimeStateFor)
     }
 
+    override suspend fun callTool(server: McpServerConfig, toolName: String, arguments: JsonObject): McpToolCallResult {
+        val session = sessionManager.session(server)
+            ?: error("MCP server '${server.name}' is not connected")
+        return normalizeToolCallResult(session.callTool(toolName = toolName, arguments = arguments))
+    }
+
     override fun runtimeStateFor(server: McpServerConfig): McpServerRuntimeState {
         return runtimeStates[McpServerKey(server)] ?: McpServerRuntimeState(
             server = server,
@@ -93,6 +110,15 @@ class SdkMcpRuntimeService internal constructor(
         sessionManager.closeAll()
     }
 
+    private fun normalizeToolCallResult(result: CallToolResult): McpToolCallResult {
+        return McpToolCallResult(
+            isError = result.isError == true,
+            content = json.encodeToJsonElement(result.content).jsonArray,
+            structuredContent = result.structuredContent,
+            meta = result.meta,
+        )
+    }
+
     private suspend fun loadToolCatalog(session: ManagedMcpSession, server: McpServerConfig): McpToolCatalogState {
         return runCatching {
             val tools = mutableListOf<McpToolDefinition>()
@@ -118,11 +144,17 @@ class SdkMcpRuntimeService internal constructor(
     }
 
     companion object {
-        fun create(httpClient: HttpClient): SdkMcpRuntimeService {
+        internal fun create(
+            httpClient: HttpClient,
+            processLauncher: McpProcessLauncher = PosixMcpProcessLauncher(),
+        ): SdkMcpRuntimeService {
             return SdkMcpRuntimeService(
                 sessionManager = McpSessionManager(
                     connector = SdkMcpClientConnector(
-                        transportFactory = SdkMcpTransportFactory(httpClient),
+                        transportFactory = SdkMcpTransportFactory(
+                            httpClient = httpClient,
+                            processLauncher = processLauncher,
+                        ),
                     ),
                 ),
             )
@@ -144,6 +176,8 @@ internal class McpSessionManager(
         return session
     }
 
+    fun session(server: McpServerConfig): ManagedMcpSession? = sessions[McpServerKey(server)]
+
     fun sessionByName(serverName: String): McpConnectedSession? {
         return sessions.values.firstOrNull { session -> session.server.name == serverName }
     }
@@ -164,47 +198,106 @@ internal interface McpClientConnector {
 }
 
 internal interface ManagedMcpSession : McpConnectedSession {
+    suspend fun callTool(toolName: String, arguments: JsonObject): CallToolResult
     suspend fun listTools(cursor: String?): ManagedToolPage
     suspend fun close()
 }
 
 internal interface McpTransportFactory {
-    fun create(url: String): StreamableHttpClientTransport
+    fun create(server: McpServerConfig): ManagedTransportResources
+}
+
+internal interface ManagedTransportResources {
+    val transport: Transport
+    suspend fun close()
+}
+
+internal interface McpClientFactory {
+    fun create(): Client
 }
 
 internal class SdkMcpClientConnector(
     private val transportFactory: McpTransportFactory,
+    private val clientFactory: McpClientFactory = DefaultMcpClientFactory(),
 ) : McpClientConnector {
     override suspend fun connect(server: McpServerConfig): ManagedMcpSession {
-        val client = Client(
+        val client = clientFactory.create()
+        val transportResources = transportFactory.create(server)
+        return runCatching {
+            client.connect(transportResources.transport)
+            SdkManagedMcpSession(
+                server = server,
+                client = client,
+                transportResources = transportResources,
+            )
+        }.getOrElse { throwable ->
+            runCatching { client.close() }
+            runCatching { transportResources.close() }
+            throw throwable
+        }
+    }
+}
+
+internal class DefaultMcpClientFactory : McpClientFactory {
+    override fun create(): Client {
+        return Client(
             clientInfo = Implementation(
                 name = AppRuntimeInfo.APP_NAME,
                 version = AppRuntimeInfo.APP_VERSION,
             ),
-        )
-        val transport = transportFactory.create(server.url)
-        client.connect(transport)
-        return SdkManagedMcpSession(
-            server = server,
-            client = client,
         )
     }
 }
 
 internal class SdkMcpTransportFactory(
     private val httpClient: HttpClient,
+    private val processLauncher: McpProcessLauncher,
 ) : McpTransportFactory {
-    override fun create(url: String): StreamableHttpClientTransport {
-        return StreamableHttpClientTransport(
-            client = httpClient,
-            url = url,
+    override fun create(server: McpServerConfig): ManagedTransportResources = when (val transport = server.transport) {
+        is McpTransportConfig.Http -> HttpTransportResources(
+            transport = StreamableHttpClientTransport(
+                client = httpClient,
+                url = transport.url,
+            ),
         )
+
+        is McpTransportConfig.Stdio -> {
+            val process = processLauncher.launch(
+                command = transport.command,
+                args = transport.args,
+            )
+            StdioTransportResources(
+                transport = StdioClientTransport(
+                    input = process.stdout,
+                    output = process.stdin,
+                    error = process.stderr,
+                    classifyStderr = { StdioClientTransport.StderrSeverity.DEBUG },
+                ),
+                process = process,
+            )
+        }
+    }
+}
+
+internal class HttpTransportResources(
+    override val transport: Transport,
+) : ManagedTransportResources {
+    override suspend fun close() = Unit
+}
+
+internal class StdioTransportResources(
+    override val transport: Transport,
+    private val process: ManagedMcpProcess,
+) : ManagedTransportResources {
+    override suspend fun close() {
+        process.close()
     }
 }
 
 internal class SdkManagedMcpSession(
     override val server: McpServerConfig,
     private val client: Client,
+    private val transportResources: ManagedTransportResources,
 ) : ManagedMcpSession {
     private val json = Json { prettyPrint = true }
 
@@ -230,8 +323,34 @@ internal class SdkManagedMcpSession(
         )
     }
 
+    override suspend fun callTool(toolName: String, arguments: JsonObject): CallToolResult {
+        return client.callTool(
+            request = CallToolRequest(
+                params = CallToolRequestParams(
+                    name = toolName,
+                    arguments = arguments,
+                ),
+            ),
+        )
+    }
+
     override suspend fun close() {
-        client.close()
+        var failure: Throwable? = null
+        runCatching {
+            client.close()
+        }.onFailure { throwable ->
+            failure = throwable
+        }
+        runCatching {
+            transportResources.close()
+        }.onFailure { throwable ->
+            if (failure == null) {
+                failure = throwable
+            }
+        }
+        failure?.let { throwable ->
+            throw throwable
+        }
     }
 }
 
@@ -242,10 +361,10 @@ internal data class ManagedToolPage(
 
 internal data class McpServerKey(
     val name: String,
-    val url: String,
+    val transport: McpTransportConfig,
 ) {
     constructor(server: McpServerConfig) : this(
         name = server.name,
-        url = server.url,
+        transport = server.transport,
     )
 }

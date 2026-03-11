@@ -52,10 +52,25 @@ Example:
 ```json
 {
   "servers": [
-    { "name": "Linear", "url": "http://localhost:3000", "enabled": true }
+    { "name": "Linear", "type": "http", "url": "http://localhost:3000", "enabled": true },
+    {
+      "name": "Local MCP",
+      "type": "stdio",
+      "command": "node",
+      "args": ["/Users/you/path/to/server/dist/cli.js"],
+      "enabled": false
+    }
   ]
 }
 ```
+
+In interactive mode, `/mcp` still opens the MCP server menu. You can also invoke a tool directly for connectivity checks:
+
+```text
+/mcp <server-index> <tool-name> [json-object-args]
+```
+
+`server-index` is 1-based and follows the configured server order from `mcp-servers.json`. `json-object-args` must be a raw JSON object; if omitted, the CLI sends `{}`.
 
 Interactive mode:
 
@@ -91,6 +106,8 @@ time> <seconds> s
 - Workflow files can optionally include `basePrompt` as an additional static system prompt for that workflow.
 - Active workflow file selection is persisted in `~/.kotlin-agent-cli/active-workflow.json` as `{ "active_file_name": "<file-name>" }`.
 - MCP server configuration is loaded from `~/.kotlin-agent-cli/mcp-servers.json`.
+- MCP server entries use explicit transport types: `http` (`url`) or `stdio` (`command` + `args`).
+- Legacy URL-only MCP entries are still accepted on load and are rewritten to the explicit `type` format on the next save.
 - Invariant constraints are persisted independently in `~/.kotlin-agent-cli/invariant-constraints.json`.
 - All user-visible assistant responses (interactive, workflow planning/execution, and one-shot `--prompt`) are validated against invariant constraints when configured.
 - Invariant constraints are also injected into each model prompt as strict system-level requirements (normalized to `[Strict] ...` entries).
@@ -152,7 +169,8 @@ time> <seconds> s
 - `/compact` - choose compaction strategy (`Rolling summary`, `Sliding window`, `Fact map`, or `Branching`)
 - `/profile` - choose active user profile (`user-profile-<name>.json`)
 - `/workflow` - enable strict workflow mode with workflow selection (toggle off when already enabled)
-- `/mcp` - configure MCP servers from `mcp-servers.json` (`Enter` toggles, `ESC` closes)
+- `/mcp` - configure MCP servers from `mcp-servers.json` (`Enter` toggles, `I` inspects tools, `ESC` closes)
+- `/mcp <server-index> <tool-name> [json-object-args]` - call a tool on an enabled, already initialized MCP server (`args` must be a JSON object, omitted means `{}`)
 - `/invariant` - manage persisted invariant constraints (`Del` removes selected item, `Add new constraint` creates one)
 - `/reset` - clear conversation memory and transcript, clear working memory, then persist an empty session snapshot (profile memory remains intact)
 - `/exit` - close app

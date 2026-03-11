@@ -1,14 +1,21 @@
 package com.aichallenge.day2.agent.data.local
 
 import com.aichallenge.day2.agent.domain.model.McpServerConfig
+import com.aichallenge.day2.agent.domain.model.McpTransportConfig
 import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.cinterop.ByteVar
+import kotlinx.cinterop.allocArray
 import kotlinx.cinterop.convert
+import kotlinx.cinterop.memScoped
+import kotlinx.cinterop.toKString
 import platform.posix.EEXIST
 import platform.posix.errno
 import platform.posix.fclose
+import platform.posix.fgets
 import platform.posix.fopen
 import platform.posix.fputs
 import platform.posix.mkdir
@@ -16,7 +23,7 @@ import platform.posix.mode_t
 
 class JsonFileMcpServerStoreTest {
     @Test
-    fun loadParsesValidServersInFileOrder() {
+    fun loadParsesExplicitHttpAndStdioServersInFileOrder() {
         val filePath = uniqueMcpConfigFilePath()
         ensureDirectoryExists(parentDirectory(filePath))
         writeTextFile(
@@ -24,8 +31,14 @@ class JsonFileMcpServerStoreTest {
             """
                 {
                   "servers": [
-                    { "name": "Linear", "url": "http://localhost:3000", "enabled": true },
-                    { "name": "GitHub", "url": "http://localhost:3001", "enabled": false }
+                    { "name": "Linear", "type": "http", "url": "http://localhost:3000", "enabled": true },
+                    {
+                      "name": "Local MCP",
+                      "type": "stdio",
+                      "command": "node",
+                      "args": ["/tmp/server.js"],
+                      "enabled": false
+                    }
                   ]
                 }
             """.trimIndent(),
@@ -35,75 +48,154 @@ class JsonFileMcpServerStoreTest {
 
         assertEquals(
             listOf(
-                McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = true),
-                McpServerConfig(name = "GitHub", url = "http://localhost:3001", enabled = false),
+                httpServer(name = "Linear", url = "http://localhost:3000", enabled = true),
+                stdioServer(name = "Local MCP", command = "node", args = listOf("/tmp/server.js"), enabled = false),
             ),
             store.load(),
         )
     }
 
     @Test
-    fun loadSkipsEntriesWithBlankNameOrUrlAndReturnsEmptyForMalformedJson() {
-        val validFilePath = uniqueMcpConfigFilePath()
-        ensureDirectoryExists(parentDirectory(validFilePath))
+    fun loadSupportsLegacyHttpEntriesAndSkipsInvalidEntries() {
+        val filePath = uniqueMcpConfigFilePath()
+        ensureDirectoryExists(parentDirectory(filePath))
         writeTextFile(
-            validFilePath,
+            filePath,
             """
                 {
                   "servers": [
-                    { "name": "Linear", "url": "http://localhost:3000", "enabled": true },
-                    { "name": "   ", "url": "http://localhost:3001", "enabled": true },
-                    { "name": "GitHub", "url": "   ", "enabled": false }
+                    { "name": "Legacy", "url": "http://localhost:3000", "enabled": true },
+                    { "name": "Blank URL", "type": "http", "url": "   ", "enabled": true },
+                    { "name": "Blank command", "type": "stdio", "command": "   ", "args": [], "enabled": true },
+                    { "name": "Blank arg", "type": "stdio", "command": "node", "args": ["   "], "enabled": true },
+                    { "name": "Unknown", "type": "socket", "enabled": true }
                   ]
                 }
             """.trimIndent(),
         )
-        val malformedFilePath = uniqueMcpConfigFilePath()
-        ensureDirectoryExists(parentDirectory(malformedFilePath))
-        writeTextFile(
-            malformedFilePath,
-            "{ malformed json",
-        )
 
-        val validStore = JsonFileMcpServerStore(validFilePath)
-        val malformedStore = JsonFileMcpServerStore(malformedFilePath)
+        val store = JsonFileMcpServerStore(filePath)
 
         assertEquals(
             listOf(
-                McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = true),
+                httpServer(name = "Legacy", url = "http://localhost:3000", enabled = true),
             ),
-            validStore.load(),
+            store.load(),
         )
-        assertEquals(emptyList(), malformedStore.load())
     }
 
     @Test
-    fun loadReturnsEmptyWhenFileIsMissing() {
-        val store = JsonFileMcpServerStore(uniqueMcpConfigFilePath())
+    fun loadAcceptsTrailingCommaInServersArray() {
+        val filePath = uniqueMcpConfigFilePath()
+        ensureDirectoryExists(parentDirectory(filePath))
+        writeTextFile(
+            filePath,
+            """
+                {
+                  "servers": [
+                    { "name": "Weather", "type": "http", "url": "https://weather.chukai.io/mcp", "enabled": true },
+                    {
+                      "name": "Google Drive",
+                      "type": "stdio",
+                      "command": "node",
+                      "args": ["/tmp/server.js"],
+                      "enabled": true
+                    },
+                  ]
+                }
+            """.trimIndent(),
+        )
 
-        assertEquals(emptyList(), store.load())
+        val store = JsonFileMcpServerStore(filePath)
+
+        assertEquals(
+            listOf(
+                httpServer(name = "Weather", url = "https://weather.chukai.io/mcp", enabled = true),
+                stdioServer(name = "Google Drive", command = "node", args = listOf("/tmp/server.js"), enabled = true),
+            ),
+            store.load(),
+        )
     }
 
     @Test
-    fun saveWritesToggledStateBackInSameOrder() {
+    fun loadReturnsEmptyForMalformedJsonAndMissingFile() {
+        val malformedFilePath = uniqueMcpConfigFilePath()
+        ensureDirectoryExists(parentDirectory(malformedFilePath))
+        writeTextFile(malformedFilePath, "{ malformed json")
+
+        assertEquals(emptyList(), JsonFileMcpServerStore(malformedFilePath).load())
+        assertEquals(emptyList(), JsonFileMcpServerStore(uniqueMcpConfigFilePath()).load())
+    }
+
+    @Test
+    fun saveWritesExplicitTransportTypesAndPreservesOrder() {
         val filePath = uniqueMcpConfigFilePath()
         val store = JsonFileMcpServerStore(filePath)
 
         store.save(
             listOf(
-                McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = false),
-                McpServerConfig(name = "GitHub", url = "http://localhost:3001", enabled = true),
+                httpServer(name = "Linear", url = "http://localhost:3000", enabled = false),
+                stdioServer(name = "Local MCP", command = "node", args = listOf("/tmp/server.js"), enabled = true),
             ),
         )
 
+        val savedText = readTextFile(filePath)
+        assertTrue(savedText.contains(""""type": "http""""))
+        assertTrue(savedText.contains(""""type": "stdio""""))
         assertEquals(
             listOf(
-                McpServerConfig(name = "Linear", url = "http://localhost:3000", enabled = false),
-                McpServerConfig(name = "GitHub", url = "http://localhost:3001", enabled = true),
+                httpServer(name = "Linear", url = "http://localhost:3000", enabled = false),
+                stdioServer(name = "Local MCP", command = "node", args = listOf("/tmp/server.js"), enabled = true),
             ),
             store.load(),
         )
     }
+
+    @Test
+    fun saveRewritesLegacyLoadedEntriesIntoExplicitTypeFormat() {
+        val filePath = uniqueMcpConfigFilePath()
+        ensureDirectoryExists(parentDirectory(filePath))
+        writeTextFile(
+            filePath,
+            """
+                {
+                  "servers": [
+                    { "name": "Legacy", "url": "http://localhost:3000", "enabled": true }
+                  ]
+                }
+            """.trimIndent(),
+        )
+
+        val store = JsonFileMcpServerStore(filePath)
+        val loadedServers = store.load()
+
+        store.save(loadedServers)
+
+        assertTrue(readTextFile(filePath).contains(""""type": "http""""))
+        assertEquals(
+            listOf(httpServer(name = "Legacy", url = "http://localhost:3000", enabled = true)),
+            store.load(),
+        )
+    }
+}
+
+private fun httpServer(name: String, url: String, enabled: Boolean): McpServerConfig {
+    return McpServerConfig(
+        name = name,
+        enabled = enabled,
+        transport = McpTransportConfig.Http(url = url),
+    )
+}
+
+private fun stdioServer(name: String, command: String, args: List<String>, enabled: Boolean): McpServerConfig {
+    return McpServerConfig(
+        name = name,
+        enabled = enabled,
+        transport = McpTransportConfig.Stdio(
+            command = command,
+            args = args,
+        ),
+    )
 }
 
 private fun uniqueMcpConfigFilePath(): String {
@@ -137,6 +229,23 @@ private fun writeTextFile(path: String, text: String) {
     try {
         if (fputs(text, file) < 0) {
             error("Unable to write test file '$path'.")
+        }
+    } finally {
+        fclose(file)
+    }
+}
+
+@OptIn(ExperimentalForeignApi::class)
+private fun readTextFile(path: String): String {
+    val file = fopen(path, "r") ?: error("Unable to open test file '$path'.")
+    return try {
+        buildString {
+            memScoped {
+                val buffer = allocArray<ByteVar>(4096)
+                while (fgets(buffer, 4096, file) != null) {
+                    append(buffer.toKString())
+                }
+            }
         }
     } finally {
         fclose(file)

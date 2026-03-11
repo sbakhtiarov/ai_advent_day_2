@@ -1,6 +1,7 @@
 package com.aichallenge.day2.agent.data.local
 
 import com.aichallenge.day2.agent.domain.model.McpServerConfig
+import com.aichallenge.day2.agent.domain.model.McpTransportConfig
 import com.aichallenge.day2.agent.domain.repository.McpServerStore
 import kotlinx.cinterop.ByteVar
 import kotlinx.cinterop.ExperimentalForeignApi
@@ -44,11 +45,7 @@ class JsonFileMcpServerStore(
         val payload = json.encodeToString(
             McpServersSnapshotDto(
                 servers = normalizedServers.map { server ->
-                    McpServerSnapshotDto(
-                        name = server.name,
-                        url = server.url,
-                        enabled = server.enabled,
-                    )
+                    server.toSnapshotDto()
                 },
             ),
         )
@@ -105,6 +102,7 @@ class JsonFileMcpServerStore(
             prettyPrint = true
             encodeDefaults = true
             ignoreUnknownKeys = true
+            allowTrailingComma = true
         }
 
         @OptIn(ExperimentalForeignApi::class)
@@ -151,31 +149,108 @@ private data class McpServersSnapshotDto(
 @Serializable
 private data class McpServerSnapshotDto(
     val name: String = "",
+    val type: String? = null,
     val url: String = "",
+    val command: String = "",
+    val args: List<String> = emptyList(),
     val enabled: Boolean = false,
 ) {
     fun toDomainModelOrNull(): McpServerConfig? {
         val normalizedName = name.trim()
-        val normalizedUrl = url.trim()
-        if (normalizedName.isEmpty() || normalizedUrl.isEmpty()) {
+        if (normalizedName.isEmpty()) {
             return null
         }
+
+        val normalizedTransport = when (type?.trim()?.lowercase()) {
+            null, "" -> url.trim()
+                .takeIf { it.isNotEmpty() }
+                ?.let { normalizedUrl -> McpTransportConfig.Http(url = normalizedUrl) }
+
+            HTTP_TRANSPORT_TYPE -> url.trim()
+                .takeIf { it.isNotEmpty() }
+                ?.let { normalizedUrl -> McpTransportConfig.Http(url = normalizedUrl) }
+
+            STDIO_TRANSPORT_TYPE -> {
+                val normalizedCommand = command.trim()
+                if (normalizedCommand.isEmpty()) {
+                    null
+                } else {
+                    val normalizedArgs = args.map { arg -> arg.trim() }
+                    if (normalizedArgs.any { arg -> arg.isEmpty() }) {
+                        null
+                    } else {
+                        McpTransportConfig.Stdio(
+                            command = normalizedCommand,
+                            args = normalizedArgs,
+                        )
+                    }
+                }
+            }
+
+            else -> null
+        } ?: return null
+
         return McpServerConfig(
             name = normalizedName,
-            url = normalizedUrl,
             enabled = enabled,
+            transport = normalizedTransport,
         )
     }
 }
 
 private fun McpServerConfig.normalizedOrNull(): McpServerConfig? {
     val normalizedName = name.trim()
-    val normalizedUrl = url.trim()
-    if (normalizedName.isEmpty() || normalizedUrl.isEmpty()) {
+    if (normalizedName.isEmpty()) {
         return null
     }
+
+    val normalizedTransport = when (val transport = transport) {
+        is McpTransportConfig.Http -> {
+            val normalizedUrl = transport.url.trim()
+            if (normalizedUrl.isEmpty()) {
+                return null
+            }
+            transport.copy(url = normalizedUrl)
+        }
+
+        is McpTransportConfig.Stdio -> {
+            val normalizedCommand = transport.command.trim()
+            if (normalizedCommand.isEmpty()) {
+                return null
+            }
+            val normalizedArgs = transport.args.map { arg -> arg.trim() }
+            if (normalizedArgs.any { arg -> arg.isEmpty() }) {
+                return null
+            }
+            transport.copy(
+                command = normalizedCommand,
+                args = normalizedArgs,
+            )
+        }
+    }
+
     return copy(
         name = normalizedName,
-        url = normalizedUrl,
+        transport = normalizedTransport,
     )
 }
+
+private fun McpServerConfig.toSnapshotDto(): McpServerSnapshotDto = when (val transport = transport) {
+    is McpTransportConfig.Http -> McpServerSnapshotDto(
+        name = name,
+        type = HTTP_TRANSPORT_TYPE,
+        url = transport.url,
+        enabled = enabled,
+    )
+
+    is McpTransportConfig.Stdio -> McpServerSnapshotDto(
+        name = name,
+        type = STDIO_TRANSPORT_TYPE,
+        command = transport.command,
+        args = transport.args,
+        enabled = enabled,
+    )
+}
+
+private const val HTTP_TRANSPORT_TYPE = "http"
+private const val STDIO_TRANSPORT_TYPE = "stdio"
