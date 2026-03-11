@@ -4,21 +4,16 @@ import com.aichallenge.day2.agent.core.config.AppConfig
 import com.aichallenge.day2.agent.core.config.ModelPricing
 import com.aichallenge.day2.agent.core.config.ModelProperties
 import com.aichallenge.day2.agent.domain.model.ConversationMessage
-import com.aichallenge.day2.agent.domain.model.McpLlmCapabilities
-import com.aichallenge.day2.agent.domain.model.McpPrivateToolBinding
-import com.aichallenge.day2.agent.domain.model.McpPublicServerCapability
+import com.aichallenge.day2.agent.domain.model.LlmToolCapabilities
 import com.aichallenge.day2.agent.domain.model.McpServerConfig
-import com.aichallenge.day2.agent.domain.model.McpToolCallResult
-import com.aichallenge.day2.agent.domain.model.McpToolCatalogState
-import com.aichallenge.day2.agent.domain.model.McpToolCatalogStatus
-import com.aichallenge.day2.agent.domain.model.McpToolDefinition
-import com.aichallenge.day2.agent.domain.model.McpServerRuntimeState
-import com.aichallenge.day2.agent.domain.model.McpRuntimeStatus
 import com.aichallenge.day2.agent.domain.model.McpTransportConfig
 import com.aichallenge.day2.agent.domain.model.PromptRequestData
+import com.aichallenge.day2.agent.domain.model.PrivateToolBinding
+import com.aichallenge.day2.agent.domain.model.PrivateToolResult
+import com.aichallenge.day2.agent.domain.model.PrivateToolTarget
+import com.aichallenge.day2.agent.domain.model.PublicMcpServerCapability
 import com.aichallenge.day2.agent.domain.model.TokenUsage
-import com.aichallenge.day2.agent.domain.service.McpConnectedSession
-import com.aichallenge.day2.agent.domain.service.McpRuntimeService
+import com.aichallenge.day2.agent.domain.service.PrivateToolExecutionService
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
@@ -73,9 +68,9 @@ class OpenAiRemoteDataSourceTest {
             prompt = PromptRequestData(
                 systemPrompt = "System",
                 messages = listOf(ConversationMessage.user("Hi")),
-                mcpCapabilities = McpLlmCapabilities(
-                    publicServers = listOf(
-                        McpPublicServerCapability(
+                toolCapabilities = LlmToolCapabilities(
+                    publicMcpServers = listOf(
+                        PublicMcpServerCapability(
                             serverLabel = "Weather",
                             serverUrl = "https://weather.chukai.io/mcp",
                         ),
@@ -105,10 +100,10 @@ class OpenAiRemoteDataSourceTest {
     @Test
     fun fetchAssistantReplyContinuesWithFunctionCallOutputAndAggregatesUsage() = runSuspendTest {
         val requestBodies = mutableListOf<String>()
-        val runtimeService = RecordingRemoteDataSourceMcpRuntimeService(
-            toolResultsByKey = mapOf(
-                ("Linear" to "search_issues") to Result.success(
-                    McpToolCallResult(
+        val executionService = RecordingPrivateToolExecutionService(
+            toolResultsByName = mapOf(
+                "linear__search_issues" to Result.success(
+                    PrivateToolResult(
                         isError = false,
                         content = buildJsonArray {
                             add(
@@ -161,7 +156,7 @@ class OpenAiRemoteDataSourceTest {
                     }
                 """.trimIndent(),
             ),
-            mcpRuntimeService = runtimeService,
+            privateToolExecutionService = executionService,
         )
 
         val reply = dataSource.fetchAssistantReply(
@@ -179,17 +174,13 @@ class OpenAiRemoteDataSourceTest {
             reply.usage,
         )
         assertEquals(2, requestBodies.size)
+        assertEquals(1, executionService.executeRequests.size)
+        assertEquals(privateToolBinding(), executionService.executeRequests.single().binding)
         assertEquals(
-            listOf(
-                RecordedRemoteToolCall(
-                    server = privateServer(),
-                    toolName = "search_issues",
-                    arguments = buildJsonObject {
-                        put("query", "bug")
-                    },
-                ),
-            ),
-            runtimeService.callToolRequests,
+            buildJsonObject {
+                put("query", "bug")
+            },
+            executionService.executeRequests.single().arguments,
         )
 
         val continuationRequest = json.parseToJsonElement(requestBodies[1]).jsonObject
@@ -201,8 +192,7 @@ class OpenAiRemoteDataSourceTest {
             continuationInput["output"]?.jsonPrimitive?.content ?: error("Missing tool output"),
         ).jsonObject
         assertEquals(true, outputEnvelope["ok"]?.jsonPrimitive?.content?.toBooleanStrict())
-        assertEquals("Linear", outputEnvelope["server"]?.jsonPrimitive?.content)
-        assertEquals("search_issues", outputEnvelope["tool"]?.jsonPrimitive?.content)
+        assertEquals("linear__search_issues", outputEnvelope["tool"]?.jsonPrimitive?.content)
         assertEquals(false, outputEnvelope["is_error"]?.jsonPrimitive?.content?.toBooleanStrict())
         assertEquals(1, outputEnvelope["structured_content"]?.jsonObject?.get("count")?.jsonPrimitive?.content?.toInt())
         assertTrue(outputEnvelope.containsKey("_meta"))
@@ -211,10 +201,10 @@ class OpenAiRemoteDataSourceTest {
     @Test
     fun fetchAssistantReplySupportsMultipleSequentialPrivateToolCalls() = runSuspendTest {
         val requestBodies = mutableListOf<String>()
-        val runtimeService = RecordingRemoteDataSourceMcpRuntimeService(
-            toolResultsByKey = mapOf(
-                ("Linear" to "search_issues") to Result.success(successfulToolCallResult("issue-1")),
-                ("Linear" to "create_issue") to Result.success(successfulToolCallResult("issue-2")),
+        val executionService = RecordingPrivateToolExecutionService(
+            toolResultsByName = mapOf(
+                "linear__search_issues" to Result.success(successfulPrivateToolResult("issue-1")),
+                "linear__create_issue" to Result.success(successfulPrivateToolResult("issue-2")),
             ),
         )
         val dataSource = createDataSource(
@@ -253,7 +243,7 @@ class OpenAiRemoteDataSourceTest {
                     }
                 """.trimIndent(),
             ),
-            mcpRuntimeService = runtimeService,
+            privateToolExecutionService = executionService,
         )
 
         val reply = dataSource.fetchAssistantReply(
@@ -274,13 +264,12 @@ class OpenAiRemoteDataSourceTest {
 
         assertEquals("Created follow-up issue", reply.content)
         assertEquals(3, requestBodies.size)
-        assertEquals(2, runtimeService.callToolRequests.size)
+        assertEquals(2, executionService.executeRequests.size)
     }
 
     @Test
     fun fetchAssistantReplyReturnsToolFailureOutputForInvalidArguments() = runSuspendTest {
         val requestBodies = mutableListOf<String>()
-        val runtimeService = RecordingRemoteDataSourceMcpRuntimeService()
         val dataSource = createDataSource(
             requestBodies = requestBodies,
             responses = listOf(
@@ -304,7 +293,6 @@ class OpenAiRemoteDataSourceTest {
                     }
                 """.trimIndent(),
             ),
-            mcpRuntimeService = runtimeService,
         )
 
         val reply = dataSource.fetchAssistantReply(
@@ -313,7 +301,6 @@ class OpenAiRemoteDataSourceTest {
         )
 
         assertEquals("Recovered", reply.content)
-        assertTrue(runtimeService.callToolRequests.isEmpty())
         val continuationRequest = json.parseToJsonElement(requestBodies[1]).jsonObject
         val outputEnvelope = json.parseToJsonElement(
             continuationRequest["input"]?.jsonArray?.single()?.jsonObject?.get("output")?.jsonPrimitive?.content
@@ -326,9 +313,9 @@ class OpenAiRemoteDataSourceTest {
     @Test
     fun fetchAssistantReplyTreatsBlankPrivateToolArgumentsAsEmptyObject() = runSuspendTest {
         val requestBodies = mutableListOf<String>()
-        val runtimeService = RecordingRemoteDataSourceMcpRuntimeService(
-            toolResultsByKey = mapOf(
-                ("Linear" to "search_issues") to Result.success(successfulToolCallResult("issue-1")),
+        val executionService = RecordingPrivateToolExecutionService(
+            toolResultsByName = mapOf(
+                "linear__search_issues" to Result.success(successfulPrivateToolResult("issue-1")),
             ),
         )
         val dataSource = createDataSource(
@@ -354,7 +341,7 @@ class OpenAiRemoteDataSourceTest {
                     }
                 """.trimIndent(),
             ),
-            mcpRuntimeService = runtimeService,
+            privateToolExecutionService = executionService,
         )
 
         val reply = dataSource.fetchAssistantReply(
@@ -364,23 +351,17 @@ class OpenAiRemoteDataSourceTest {
 
         assertEquals("Recovered", reply.content)
         assertEquals(
-            listOf(
-                RecordedRemoteToolCall(
-                    server = privateServer(),
-                    toolName = "search_issues",
-                    arguments = buildJsonObject {},
-                ),
-            ),
-            runtimeService.callToolRequests,
+            buildJsonObject {},
+            executionService.executeRequests.single().arguments,
         )
     }
 
     @Test
     fun fetchAssistantReplyReturnsToolFailureOutputWhenPrivateToolThrows() = runSuspendTest {
         val requestBodies = mutableListOf<String>()
-        val runtimeService = RecordingRemoteDataSourceMcpRuntimeService(
-            toolResultsByKey = mapOf(
-                ("Linear" to "search_issues") to Result.failure(IllegalStateException("Broken pipe")),
+        val executionService = RecordingPrivateToolExecutionService(
+            toolResultsByName = mapOf(
+                "linear__search_issues" to Result.failure(IllegalStateException("Broken pipe")),
             ),
         )
         val dataSource = createDataSource(
@@ -406,7 +387,7 @@ class OpenAiRemoteDataSourceTest {
                     }
                 """.trimIndent(),
             ),
-            mcpRuntimeService = runtimeService,
+            privateToolExecutionService = executionService,
         )
 
         val reply = dataSource.fetchAssistantReply(
@@ -422,6 +403,129 @@ class OpenAiRemoteDataSourceTest {
         ).jsonObject
         assertEquals(false, outputEnvelope["ok"]?.jsonPrimitive?.content?.toBooleanStrict())
         assertEquals("Broken pipe", outputEnvelope["error"]?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun fetchAssistantReplyExecutesBuiltInNotifyUserTool() = runSuspendTest {
+        val requestBodies = mutableListOf<String>()
+        val executionService = RecordingPrivateToolExecutionService(
+            toolResultsByName = mapOf(
+                "notify_user" to Result.success(
+                    PrivateToolResult(
+                        isError = false,
+                        content = buildJsonArray {
+                            add(
+                                buildJsonObject {
+                                    put("type", "text")
+                                    put("text", "Notification sent")
+                                },
+                            )
+                        },
+                        structuredContent = buildJsonObject {
+                            put("title", "Heads up")
+                            put("message", "Build finished")
+                            put("backend", "osascript")
+                        },
+                    ),
+                ),
+            ),
+        )
+        val dataSource = createDataSource(
+            requestBodies = requestBodies,
+            responses = listOf(
+                """
+                    {
+                      "id": "resp_1",
+                      "output": [
+                        {
+                          "type": "function_call",
+                          "call_id": "call_1",
+                          "name": "notify_user",
+                          "arguments": "{\"message\":\"Build finished\",\"title\":\"Heads up\"}"
+                        }
+                      ]
+                    }
+                """.trimIndent(),
+                """
+                    {
+                      "id": "resp_2",
+                      "output_text": "Notified the user"
+                    }
+                """.trimIndent(),
+            ),
+            privateToolExecutionService = executionService,
+        )
+
+        val reply = dataSource.fetchAssistantReply(
+            prompt = promptWithPrivateTools(
+                privateTools = listOf(notifyUserToolBinding()),
+            ),
+            model = "gpt-4.1-mini",
+        )
+
+        assertEquals("Notified the user", reply.content)
+        val firstRequest = json.parseToJsonElement(requestBodies.first()).jsonObject
+        val tool = firstRequest["tools"]?.jsonArray?.single()?.jsonObject ?: error("Missing tool")
+        assertEquals("function", tool["type"]?.jsonPrimitive?.content)
+        assertEquals("notify_user", tool["name"]?.jsonPrimitive?.content)
+        assertEquals(notifyUserToolBinding(), executionService.executeRequests.single().binding)
+        val outputEnvelope = json.parseToJsonElement(
+            json.parseToJsonElement(requestBodies[1]).jsonObject["input"]?.jsonArray?.single()?.jsonObject?.get("output")?.jsonPrimitive?.content
+                ?: error("Missing tool output"),
+        ).jsonObject
+        assertEquals(true, outputEnvelope["ok"]?.jsonPrimitive?.content?.toBooleanStrict())
+        assertEquals("notify_user", outputEnvelope["tool"]?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun fetchAssistantReplyWrapsBuiltInToolFailureOutputAndContinues() = runSuspendTest {
+        val requestBodies = mutableListOf<String>()
+        val executionService = RecordingPrivateToolExecutionService(
+            toolResultsByName = mapOf(
+                "notify_user" to Result.failure(IllegalStateException("Notification Center unavailable")),
+            ),
+        )
+        val dataSource = createDataSource(
+            requestBodies = requestBodies,
+            responses = listOf(
+                """
+                    {
+                      "id": "resp_1",
+                      "output": [
+                        {
+                          "type": "function_call",
+                          "call_id": "call_1",
+                          "name": "notify_user",
+                          "arguments": "{\"message\":\"Build finished\"}"
+                        }
+                      ]
+                    }
+                """.trimIndent(),
+                """
+                    {
+                      "id": "resp_2",
+                      "output_text": "Could not notify the user"
+                    }
+                """.trimIndent(),
+            ),
+            privateToolExecutionService = executionService,
+        )
+
+        val reply = dataSource.fetchAssistantReply(
+            prompt = promptWithPrivateTools(
+                privateTools = listOf(notifyUserToolBinding()),
+            ),
+            model = "gpt-4.1-mini",
+        )
+
+        assertEquals("Could not notify the user", reply.content)
+        val outputEnvelope = json.parseToJsonElement(
+            json.parseToJsonElement(requestBodies[1]).jsonObject["input"]?.jsonArray?.single()?.jsonObject?.get("output")?.jsonPrimitive?.content
+                ?: error("Missing tool output"),
+        ).jsonObject
+        assertEquals(false, outputEnvelope["ok"]?.jsonPrimitive?.content?.toBooleanStrict())
+        assertEquals("notify_user", outputEnvelope["tool"]?.jsonPrimitive?.content)
+        assertEquals("Notification Center unavailable", outputEnvelope["error"]?.jsonPrimitive?.content)
     }
 
     @Test
@@ -447,9 +551,9 @@ class OpenAiRemoteDataSourceTest {
                     }
                 """.trimIndent(),
             ),
-            mcpRuntimeService = RecordingRemoteDataSourceMcpRuntimeService(
-                toolResultsByKey = mapOf(
-                    ("Linear" to "search_issues") to Result.success(successfulToolCallResult("issue")),
+            privateToolExecutionService = RecordingPrivateToolExecutionService(
+                toolResultsByName = mapOf(
+                    "linear__search_issues" to Result.success(successfulPrivateToolResult("issue")),
                 ),
             ),
         )
@@ -461,14 +565,14 @@ class OpenAiRemoteDataSourceTest {
             )
         }
 
-        assertContains(error.message.orEmpty(), "more than 16 private MCP tool calls")
+        assertContains(error.message.orEmpty(), "more than 16 private")
         assertEquals(1, requestBodies.size)
     }
 
     private fun createDataSource(
         requestBodies: MutableList<String>,
         responses: List<String>,
-        mcpRuntimeService: McpRuntimeService = RecordingRemoteDataSourceMcpRuntimeService(),
+        privateToolExecutionService: PrivateToolExecutionService = RecordingPrivateToolExecutionService(),
     ): OpenAiRemoteDataSource {
         val queuedResponses = ArrayDeque(responses)
         val httpClient = HttpClient(
@@ -511,17 +615,17 @@ class OpenAiRemoteDataSourceTest {
                 apiTrafficLogFilePath = null,
             ),
             json = json,
-            mcpRuntimeService = mcpRuntimeService,
+            privateToolExecutionService = privateToolExecutionService,
         )
     }
 
     private fun promptWithPrivateTools(
-        privateTools: List<McpPrivateToolBinding> = listOf(privateToolBinding()),
+        privateTools: List<PrivateToolBinding> = listOf(privateToolBinding()),
     ): PromptRequestData {
         return PromptRequestData(
             systemPrompt = "System",
             messages = listOf(ConversationMessage.user("Find issues")),
-            mcpCapabilities = McpLlmCapabilities(
+            toolCapabilities = LlmToolCapabilities(
                 privateTools = privateTools,
             ),
         )
@@ -530,12 +634,25 @@ class OpenAiRemoteDataSourceTest {
     private fun privateToolBinding(
         modelToolName: String = "linear__search_issues",
         sourceToolName: String = "search_issues",
-    ): McpPrivateToolBinding {
-        return McpPrivateToolBinding(
+    ): PrivateToolBinding {
+        return PrivateToolBinding(
             modelToolName = modelToolName,
-            server = privateServer(),
-            sourceToolName = sourceToolName,
+            target = PrivateToolTarget.Mcp(
+                server = privateServer(),
+                sourceToolName = sourceToolName,
+            ),
             description = "Search Linear issues",
+            parametersSchema = buildJsonObject {
+                put("type", "object")
+            },
+        )
+    }
+
+    private fun notifyUserToolBinding(): PrivateToolBinding {
+        return PrivateToolBinding(
+            modelToolName = "notify_user",
+            target = PrivateToolTarget.BuiltIn(toolId = "notify_user"),
+            description = "Send a local macOS notification to the user.",
             parametersSchema = buildJsonObject {
                 put("type", "object")
             },
@@ -550,8 +667,8 @@ class OpenAiRemoteDataSourceTest {
         )
     }
 
-    private fun successfulToolCallResult(text: String): McpToolCallResult {
-        return McpToolCallResult(
+    private fun successfulPrivateToolResult(text: String): PrivateToolResult {
+        return PrivateToolResult(
             isError = false,
             content = buildJsonArray {
                 add(
@@ -565,59 +682,24 @@ class OpenAiRemoteDataSourceTest {
     }
 }
 
-private class RecordingRemoteDataSourceMcpRuntimeService(
-    private val toolResultsByKey: Map<Pair<String, String>, Result<McpToolCallResult>> = emptyMap(),
-) : McpRuntimeService {
-    val callToolRequests = mutableListOf<RecordedRemoteToolCall>()
+private class RecordingPrivateToolExecutionService(
+    private val toolResultsByName: Map<String, Result<PrivateToolResult>> = emptyMap(),
+) : PrivateToolExecutionService {
+    val executeRequests = mutableListOf<RecordedPrivateToolExecution>()
 
-    override suspend fun initializeEnabledServers(servers: List<McpServerConfig>): List<McpServerRuntimeState> {
-        return servers.map { server ->
-            McpServerRuntimeState(
-                server = server,
-                status = if (server.enabled) McpRuntimeStatus.READY else McpRuntimeStatus.DISABLED,
-                toolCatalogStatus = if (server.enabled) McpToolCatalogStatus.LOADED else McpToolCatalogStatus.NOT_REQUESTED,
-                tools = emptyList(),
-            )
-        }
-    }
-
-    override suspend fun callTool(server: McpServerConfig, toolName: String, arguments: JsonObject): McpToolCallResult {
-        callToolRequests += RecordedRemoteToolCall(
-            server = server,
-            toolName = toolName,
+    override suspend fun execute(binding: PrivateToolBinding, arguments: JsonObject): PrivateToolResult {
+        executeRequests += RecordedPrivateToolExecution(
+            binding = binding,
             arguments = arguments,
         )
-        return toolResultsByKey[server.name to toolName]
+        return toolResultsByName[binding.modelToolName]
             ?.getOrThrow()
-            ?: error("No prepared MCP tool result for ${server.name}/$toolName")
+            ?: error("No prepared private tool result for ${binding.modelToolName}")
     }
-
-    override fun runtimeStateFor(server: McpServerConfig): McpServerRuntimeState {
-        return McpServerRuntimeState(
-            server = server,
-            status = if (server.enabled) McpRuntimeStatus.READY else McpRuntimeStatus.DISABLED,
-        )
-    }
-
-    override fun toolCatalogFor(server: McpServerConfig): McpToolCatalogState {
-        return McpToolCatalogState(
-            server = server,
-            status = McpToolCatalogStatus.NOT_REQUESTED,
-        )
-    }
-
-    override fun runtimeStates(): List<McpServerRuntimeState> = emptyList()
-
-    override fun connectedSession(serverName: String): McpConnectedSession? = null
-
-    override fun clearFailureState(server: McpServerConfig) = Unit
-
-    override suspend fun close() = Unit
 }
 
-private data class RecordedRemoteToolCall(
-    val server: McpServerConfig,
-    val toolName: String,
+private data class RecordedPrivateToolExecution(
+    val binding: PrivateToolBinding,
     val arguments: JsonObject,
 )
 

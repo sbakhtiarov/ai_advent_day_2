@@ -3,6 +3,8 @@ package com.aichallenge.day2.agent.core.di
 import com.aichallenge.day2.agent.core.config.AppConfig
 import com.aichallenge.day2.agent.core.logging.ApiTrafficFileLogger
 import com.aichallenge.day2.agent.data.mcp.SdkMcpRuntimeService
+import com.aichallenge.day2.agent.data.tools.BuiltInToolRegistry
+import com.aichallenge.day2.agent.data.tools.DefaultPrivateToolExecutionService
 import com.aichallenge.day2.agent.data.remote.OpenAiRemoteDataSource
 import com.aichallenge.day2.agent.data.repository.OpenAiAgentRepository
 import com.aichallenge.day2.agent.domain.service.McpRuntimeService
@@ -43,13 +45,18 @@ class AppContainer(
         }
     }
     val mcpRuntimeService: McpRuntimeService = SdkMcpRuntimeService.create(mcpHttpClient)
+    val builtInToolRegistry = BuiltInToolRegistry.createDefault()
+    private val privateToolExecutionService = DefaultPrivateToolExecutionService(
+        mcpRuntimeService = mcpRuntimeService,
+        builtInToolRegistry = builtInToolRegistry,
+    )
 
     private val remoteDataSource = OpenAiRemoteDataSource(
         httpClient = openAiHttpClient,
         config = config,
         json = json,
         apiTrafficLogger = apiTrafficLogger,
-        mcpRuntimeService = mcpRuntimeService,
+        privateToolExecutionService = privateToolExecutionService,
     )
 
     private val repository = OpenAiAgentRepository(remoteDataSource)

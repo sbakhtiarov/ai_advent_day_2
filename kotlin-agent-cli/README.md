@@ -75,6 +75,10 @@ In interactive mode, `/mcp` still opens the MCP server menu. You can also invoke
 
 `server-index` is 1-based and follows the configured server order from `mcp-servers.json`. `json-object-args` must be a raw JSON object; if omitted, the CLI sends `{}`.
 
+The agent also exposes a built-in private tool named `notify_user` to the model on macOS turns.
+It sends a local macOS notification through `/usr/bin/osascript` with schema `{ "message": string, "title"?: string }`.
+This tool is always available to the LLM in interactive mode, workflow turns, and one-shot `--prompt`, but it is not shown in `/mcp` and is not manually invokable from the CLI in v1.
+
 Interactive mode:
 
 ```bash

@@ -3,12 +3,12 @@ package com.aichallenge.day2.agent.data.remote
 import com.aichallenge.day2.agent.core.config.AppConfig
 import com.aichallenge.day2.agent.core.logging.ApiTrafficFileLogger
 import com.aichallenge.day2.agent.domain.model.MessageRole
-import com.aichallenge.day2.agent.domain.model.McpLlmCapabilities
-import com.aichallenge.day2.agent.domain.model.McpPrivateToolBinding
+import com.aichallenge.day2.agent.domain.model.LlmToolCapabilities
 import com.aichallenge.day2.agent.domain.model.PromptRequestData
+import com.aichallenge.day2.agent.domain.model.PrivateToolBinding
+import com.aichallenge.day2.agent.domain.model.PrivateToolResult
 import com.aichallenge.day2.agent.domain.model.TokenUsage
-import com.aichallenge.day2.agent.domain.service.McpRuntimeService
-import com.aichallenge.day2.agent.domain.service.NoOpMcpRuntimeService
+import com.aichallenge.day2.agent.domain.service.PrivateToolExecutionService
 import io.ktor.client.HttpClient
 import io.ktor.client.request.header
 import io.ktor.client.request.post
@@ -30,7 +30,7 @@ class OpenAiRemoteDataSource(
     private val config: AppConfig,
     private val json: Json,
     private val apiTrafficLogger: ApiTrafficFileLogger? = null,
-    private val mcpRuntimeService: McpRuntimeService = NoOpMcpRuntimeService,
+    private val privateToolExecutionService: PrivateToolExecutionService,
 ) {
     data class AssistantReply(
         val content: String,
@@ -52,8 +52,8 @@ class OpenAiRemoteDataSource(
             .joinToString(separator = "\n\n")
             .ifBlank { null }
         val requestUrl = "${config.baseUrl}/responses"
-        val responseTools = buildResponseTools(prompt.mcpCapabilities)
-        val privateToolBindings = prompt.mcpCapabilities.privateTools.associateBy(McpPrivateToolBinding::modelToolName)
+        val responseTools = buildResponseTools(prompt.toolCapabilities)
+        val privateToolBindings = prompt.toolCapabilities.privateTools.associateBy(PrivateToolBinding::modelToolName)
         var totalUsage: TokenUsage? = null
         var executedPrivateToolCalls = 0
         var requestPayload = ResponsesApiRequest(
@@ -137,8 +137,8 @@ class OpenAiRemoteDataSource(
             .joinToString(separator = "\n")
     }
 
-    private fun buildResponseTools(capabilities: McpLlmCapabilities): List<ResponseTool> {
-        val publicTools = capabilities.publicServers.map { server ->
+    private fun buildResponseTools(capabilities: LlmToolCapabilities): List<ResponseTool> {
+        val publicTools = capabilities.publicMcpServers.map { server ->
             ResponseTool(
                 type = "mcp",
                 serverLabel = server.serverLabel,
@@ -231,16 +231,12 @@ class OpenAiRemoteDataSource(
     }
 
     private suspend fun buildFunctionCallOutput(
-        binding: McpPrivateToolBinding,
+        binding: PrivateToolBinding,
         functionCall: PendingFunctionCall,
     ): ResponsesApiFunctionCallOutput {
         val output = runCatching {
             val arguments = parseFunctionCallArguments(functionCall.arguments)
-            val result = mcpRuntimeService.callTool(
-                server = binding.server,
-                toolName = binding.sourceToolName,
-                arguments = arguments,
-            )
+            val result = privateToolExecutionService.execute(binding, arguments)
             serializeSuccessfulFunctionOutput(
                 binding = binding,
                 result = result,
@@ -272,13 +268,12 @@ class OpenAiRemoteDataSource(
     }
 
     private fun serializeSuccessfulFunctionOutput(
-        binding: McpPrivateToolBinding,
-        result: com.aichallenge.day2.agent.domain.model.McpToolCallResult,
+        binding: PrivateToolBinding,
+        result: PrivateToolResult,
     ): String {
         val payload = buildJsonObject {
             put("ok", true)
-            put("server", binding.server.name)
-            put("tool", binding.sourceToolName)
+            put("tool", binding.modelToolName)
             put("is_error", result.isError)
             if (result.structuredContent != null) {
                 put("structured_content", result.structuredContent)
@@ -294,13 +289,12 @@ class OpenAiRemoteDataSource(
     }
 
     private fun serializeFailedFunctionOutput(
-        binding: McpPrivateToolBinding,
+        binding: PrivateToolBinding,
         throwable: Throwable,
     ): String {
         val payload = buildJsonObject {
             put("ok", false)
-            put("server", binding.server.name)
-            put("tool", binding.sourceToolName)
+            put("tool", binding.modelToolName)
             put("error", throwable.message?.trim().takeUnless { it.isNullOrEmpty() } ?: "Unexpected error")
         }
         return json.encodeToString(JsonObject.serializer(), payload)

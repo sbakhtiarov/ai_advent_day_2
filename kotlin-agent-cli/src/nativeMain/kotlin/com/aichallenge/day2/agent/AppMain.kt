@@ -3,6 +3,7 @@ package com.aichallenge.day2.agent
 import com.aichallenge.day2.agent.core.config.AppConfig
 import com.aichallenge.day2.agent.core.config.ProfileEnvironmentFactsProvider
 import com.aichallenge.day2.agent.core.di.AppContainer
+import com.aichallenge.day2.agent.data.tools.BuiltInPrivateToolProvider
 import com.aichallenge.day2.agent.data.local.JsonFileProfileMemoryStore
 import com.aichallenge.day2.agent.data.local.JsonFileSessionMemoryStore
 import com.aichallenge.day2.agent.data.local.JsonFileInvariantConstraintStore
@@ -123,6 +124,7 @@ private suspend fun runApp(args: Array<String>): Int {
         invariantConstraintStore = invariantConstraintStore,
         mcpServerStore = mcpServerStore,
         mcpRuntimeService = container.mcpRuntimeService,
+        builtInPrivateToolProvider = BuiltInPrivateToolProvider(container.builtInToolRegistry),
         workingMemoryDistillationUseCase = workingMemoryDistillationUseCase,
         profileMemoryDistillationUseCase = profileMemoryDistillationUseCase,
         profileEnvironmentFactsProvider = ProfileEnvironmentFactsProvider(),

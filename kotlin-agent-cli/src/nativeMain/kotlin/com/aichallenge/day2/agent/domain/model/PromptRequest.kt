@@ -4,7 +4,7 @@ data class PromptRequestData(
     val systemPrompt: String,
     val contextSystemMessages: List<String> = emptyList(),
     val messages: List<ConversationMessage> = emptyList(),
-    val mcpCapabilities: McpLlmCapabilities = McpLlmCapabilities(),
+    val toolCapabilities: LlmToolCapabilities = LlmToolCapabilities(),
 ) {
     init {
         require(systemPrompt.isNotBlank()) {
