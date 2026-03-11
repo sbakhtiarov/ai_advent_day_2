@@ -42,19 +42,20 @@ class AppContainer(
             socketTimeoutMillis = HttpTimeoutConfig.INFINITE_TIMEOUT_MS
         }
     }
+    val mcpRuntimeService: McpRuntimeService = SdkMcpRuntimeService.create(mcpHttpClient)
 
     private val remoteDataSource = OpenAiRemoteDataSource(
         httpClient = openAiHttpClient,
         config = config,
         json = json,
         apiTrafficLogger = apiTrafficLogger,
+        mcpRuntimeService = mcpRuntimeService,
     )
 
     private val repository = OpenAiAgentRepository(remoteDataSource)
 
     val buildPromptUseCase = BuildPromptUseCase()
     val sendPromptUseCase = SendPromptUseCase(repository)
-    val mcpRuntimeService: McpRuntimeService = SdkMcpRuntimeService.create(mcpHttpClient)
 
     suspend fun close() {
         mcpRuntimeService.close()

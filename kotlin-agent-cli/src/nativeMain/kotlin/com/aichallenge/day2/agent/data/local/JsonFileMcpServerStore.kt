@@ -9,6 +9,7 @@ import kotlinx.cinterop.allocArray
 import kotlinx.cinterop.convert
 import kotlinx.cinterop.memScoped
 import kotlinx.cinterop.toKString
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
@@ -154,6 +155,8 @@ private data class McpServerSnapshotDto(
     val command: String = "",
     val args: List<String> = emptyList(),
     val enabled: Boolean = false,
+    @SerialName("public")
+    val isPublic: Boolean = false,
 ) {
     fun toDomainModelOrNull(): McpServerConfig? {
         val normalizedName = name.trim()
@@ -193,6 +196,7 @@ private data class McpServerSnapshotDto(
         return McpServerConfig(
             name = normalizedName,
             enabled = enabled,
+            isPublic = isPublic,
             transport = normalizedTransport,
         )
     }
@@ -241,6 +245,7 @@ private fun McpServerConfig.toSnapshotDto(): McpServerSnapshotDto = when (val tr
         type = HTTP_TRANSPORT_TYPE,
         url = transport.url,
         enabled = enabled,
+        isPublic = isPublic,
     )
 
     is McpTransportConfig.Stdio -> McpServerSnapshotDto(
@@ -249,6 +254,7 @@ private fun McpServerConfig.toSnapshotDto(): McpServerSnapshotDto = when (val tr
         command = transport.command,
         args = transport.args,
         enabled = enabled,
+        isPublic = isPublic,
     )
 }
 

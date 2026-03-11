@@ -31,13 +31,20 @@ class JsonFileMcpServerStoreTest {
             """
                 {
                   "servers": [
-                    { "name": "Linear", "type": "http", "url": "http://localhost:3000", "enabled": true },
+                    {
+                      "name": "Linear",
+                      "type": "http",
+                      "url": "http://localhost:3000",
+                      "enabled": true,
+                      "public": true
+                    },
                     {
                       "name": "Local MCP",
                       "type": "stdio",
                       "command": "node",
                       "args": ["/tmp/server.js"],
-                      "enabled": false
+                      "enabled": false,
+                      "public": false
                     }
                   ]
                 }
@@ -48,8 +55,33 @@ class JsonFileMcpServerStoreTest {
 
         assertEquals(
             listOf(
-                httpServer(name = "Linear", url = "http://localhost:3000", enabled = true),
+                httpServer(name = "Linear", url = "http://localhost:3000", enabled = true, isPublic = true),
                 stdioServer(name = "Local MCP", command = "node", args = listOf("/tmp/server.js"), enabled = false),
+            ),
+            store.load(),
+        )
+    }
+
+    @Test
+    fun loadDefaultsPublicToFalseWhenFieldMissing() {
+        val filePath = uniqueMcpConfigFilePath()
+        ensureDirectoryExists(parentDirectory(filePath))
+        writeTextFile(
+            filePath,
+            """
+                {
+                  "servers": [
+                    { "name": "Weather", "type": "http", "url": "https://weather.chukai.io/mcp", "enabled": true }
+                  ]
+                }
+            """.trimIndent(),
+        )
+
+        val store = JsonFileMcpServerStore(filePath)
+
+        assertEquals(
+            listOf(
+                httpServer(name = "Weather", url = "https://weather.chukai.io/mcp", enabled = true, isPublic = false),
             ),
             store.load(),
         )
@@ -135,17 +167,19 @@ class JsonFileMcpServerStoreTest {
         store.save(
             listOf(
                 httpServer(name = "Linear", url = "http://localhost:3000", enabled = false),
-                stdioServer(name = "Local MCP", command = "node", args = listOf("/tmp/server.js"), enabled = true),
+                stdioServer(name = "Local MCP", command = "node", args = listOf("/tmp/server.js"), enabled = true, isPublic = true),
             ),
         )
 
         val savedText = readTextFile(filePath)
-        assertTrue(savedText.contains(""""type": "http""""))
-        assertTrue(savedText.contains(""""type": "stdio""""))
+        assertTrue(savedText.contains("\"type\": \"http\""))
+        assertTrue(savedText.contains("\"type\": \"stdio\""))
+        assertTrue(savedText.contains("\"public\": false"))
+        assertTrue(savedText.contains("\"public\": true"))
         assertEquals(
             listOf(
                 httpServer(name = "Linear", url = "http://localhost:3000", enabled = false),
-                stdioServer(name = "Local MCP", command = "node", args = listOf("/tmp/server.js"), enabled = true),
+                stdioServer(name = "Local MCP", command = "node", args = listOf("/tmp/server.js"), enabled = true, isPublic = true),
             ),
             store.load(),
         )
@@ -171,26 +205,35 @@ class JsonFileMcpServerStoreTest {
 
         store.save(loadedServers)
 
-        assertTrue(readTextFile(filePath).contains(""""type": "http""""))
+        assertTrue(readTextFile(filePath).contains("\"type\": \"http\""))
+        assertTrue(readTextFile(filePath).contains("\"public\": false"))
         assertEquals(
-            listOf(httpServer(name = "Legacy", url = "http://localhost:3000", enabled = true)),
+            listOf(httpServer(name = "Legacy", url = "http://localhost:3000", enabled = true, isPublic = false)),
             store.load(),
         )
     }
 }
 
-private fun httpServer(name: String, url: String, enabled: Boolean): McpServerConfig {
+private fun httpServer(name: String, url: String, enabled: Boolean, isPublic: Boolean = false): McpServerConfig {
     return McpServerConfig(
         name = name,
         enabled = enabled,
+        isPublic = isPublic,
         transport = McpTransportConfig.Http(url = url),
     )
 }
 
-private fun stdioServer(name: String, command: String, args: List<String>, enabled: Boolean): McpServerConfig {
+private fun stdioServer(
+    name: String,
+    command: String,
+    args: List<String>,
+    enabled: Boolean,
+    isPublic: Boolean = false,
+): McpServerConfig {
     return McpServerConfig(
         name = name,
         enabled = enabled,
+        isPublic = isPublic,
         transport = McpTransportConfig.Stdio(
             command = command,
             args = args,

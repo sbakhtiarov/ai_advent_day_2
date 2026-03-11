@@ -1,6 +1,7 @@
 package com.aichallenge.day2.agent.domain.usecase
 
 import com.aichallenge.day2.agent.domain.model.ConversationMessage
+import com.aichallenge.day2.agent.domain.model.McpLlmCapabilities
 import com.aichallenge.day2.agent.domain.model.MessageRole
 import com.aichallenge.day2.agent.domain.model.ProfileMemoryState
 import com.aichallenge.day2.agent.domain.model.PromptRequestData
@@ -21,6 +22,7 @@ data class BuildPromptRequest(
     val userPrompt: String,
     val workingTaskState: WorkingTaskState? = null,
     val profileMemoryState: ProfileMemoryState? = null,
+    val mcpCapabilities: McpLlmCapabilities = McpLlmCapabilities(),
 )
 
 class BuildPromptUseCase {
@@ -70,6 +72,7 @@ class BuildPromptUseCase {
             systemPrompt = context.systemPrompt,
             contextSystemMessages = context.contextSystemMessages,
             messages = context.messages + ConversationMessage.user(request.userPrompt),
+            mcpCapabilities = request.mcpCapabilities,
         )
     }
 

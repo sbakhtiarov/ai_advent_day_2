@@ -48,6 +48,9 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlin.test.Test
 import kotlin.test.assertContains
@@ -2948,24 +2951,116 @@ class ConsoleChatControllerSessionMemoryTest {
     }
 
     @Test
-    fun runSinglePromptDoesNotInitializeMcpServers() = runBlocking {
+    fun interactiveStartupSkipsPublicMcpServersInitialization() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val publicServer = httpMcpServer(
+            name = "Weather",
+            url = "https://weather.chukai.io/mcp",
+            enabled = true,
+            isPublic = true,
+        )
+        val privateServer = httpMcpServer(
+            name = "Linear",
+            url = "http://localhost:3000",
+            enabled = true,
+        )
+        val runtimeService = RecordingMcpRuntimeService()
+        val controller = createController(
+            repository = repository,
+            io = FakeCliIO(inputs = listOf("/exit")),
+            mcpServerStore = RecordingMcpServerStore(
+                loadedServers = listOf(publicServer, privateServer),
+            ),
+            mcpRuntimeService = runtimeService,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(1, runtimeService.initializeCalls)
+        assertEquals(listOf(listOf(privateServer)), runtimeService.initializeRequests)
+    }
+
+    @Test
+    fun interactiveMainTurnAttachesMcpCapabilitiesButInvariantValidationRemainsToolFree() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "assistant answer")),
+                Result.success(
+                    AgentResponse(
+                        content = """{"status":"PASS","failed_constraints":[]}""",
+                    ),
+                ),
+            ),
+        )
+        val privateServer = httpMcpServer(name = "Linear", url = "http://localhost:3000", enabled = true)
+        val runtimeService = RecordingMcpRuntimeService(
+            runtimeStates = mapOf(
+                "Linear" to McpServerRuntimeState(
+                    server = privateServer,
+                    status = McpRuntimeStatus.READY,
+                    toolCatalogStatus = McpToolCatalogStatus.LOADED,
+                    tools = listOf(
+                        McpToolDefinition(
+                            name = "search_issues",
+                            description = "Search Linear issues",
+                            inputSchemaJson = """{"type":"object"}""",
+                        ),
+                    ),
+                ),
+            ),
+        )
+        val controller = createController(
+            repository = repository,
+            io = FakeCliIO(inputs = listOf("Find bugs", "/exit")),
+            invariantConstraintStore = RecordingInvariantConstraintStore(
+                loadedConstraints = listOf("Always mention test evidence"),
+            ),
+            mcpServerStore = RecordingMcpServerStore(loadedServers = listOf(privateServer)),
+            mcpRuntimeService = runtimeService,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(2, repository.prompts.size)
+        assertEquals(1, repository.prompts[0].mcpCapabilities.privateTools.size)
+        assertTrue(repository.prompts[0].mcpCapabilities.publicServers.isEmpty())
+        assertTrue(repository.prompts[1].mcpCapabilities.isEmpty())
+    }
+
+    @Test
+    fun runSinglePromptAttachesMcpCapabilitiesForMainTurn() = runBlocking {
         val repository = RecordingAgentRepository(
             responses = listOf(
                 Result.success(AgentResponse(content = "one-shot answer")),
             ),
         )
         val io = FakeCliIO(inputs = emptyList())
+        val publicServer = httpMcpServer(
+            name = "Weather",
+            url = "https://weather.chukai.io/mcp",
+            enabled = true,
+            isPublic = true,
+        )
+        val privateServer = httpMcpServer(name = "Linear", url = "http://localhost:3000", enabled = true)
         val mcpStore = RecordingMcpServerStore(
             loadedServers = listOf(
-                httpMcpServer(name = "Linear", url = "http://localhost:3000", enabled = true),
+                publicServer,
+                privateServer,
             ),
         )
         val runtimeService = RecordingMcpRuntimeService(
             runtimeStates = mapOf(
                 "Linear" to McpServerRuntimeState(
-                    server = httpMcpServer(name = "Linear", url = "http://localhost:3000", enabled = true),
-                    status = McpRuntimeStatus.FAILED,
-                    failureMessage = "Connection refused",
+                    server = privateServer,
+                    status = McpRuntimeStatus.READY,
+                    toolCatalogStatus = McpToolCatalogStatus.LOADED,
+                    tools = listOf(
+                        McpToolDefinition(
+                            name = "search_issues",
+                            description = "Search Linear issues",
+                            inputSchemaJson = """{"type":"object"}""",
+                        ),
+                    ),
                 ),
             ),
         )
@@ -2979,10 +3074,151 @@ class ConsoleChatControllerSessionMemoryTest {
         val exitCode = controller.runSinglePrompt("one-shot question")
 
         assertEquals(0, exitCode)
-        assertEquals(0, mcpStore.loadCalls)
-        assertEquals(0, runtimeService.initializeCalls)
+        assertEquals(1, mcpStore.loadCalls)
+        assertEquals(1, runtimeService.initializeCalls)
+        assertEquals(1, repository.prompts.size)
+        assertEquals(1, repository.prompts.single().mcpCapabilities.publicServers.size)
+        assertEquals(1, repository.prompts.single().mcpCapabilities.privateTools.size)
         assertContains(io.outputText(), "one-shot answer")
-        assertFalse(io.outputText().contains("MCP server 'Linear' initialization failed"))
+    }
+
+    @Test
+    fun driveListFilesPrivateToolAddsDriveQueryGuidanceToSchemaAndDescription() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "one-shot answer")),
+            ),
+        )
+        val driveServer = httpMcpServer(name = "Google Drive", url = "http://localhost:3000", enabled = true)
+        val runtimeService = RecordingMcpRuntimeService(
+            runtimeStates = mapOf(
+                "Google Drive" to McpServerRuntimeState(
+                    server = driveServer,
+                    status = McpRuntimeStatus.READY,
+                    toolCatalogStatus = McpToolCatalogStatus.LOADED,
+                    tools = listOf(
+                        McpToolDefinition(
+                            name = "drive_list_files",
+                            description = "List Google Drive files using Google Drive's native `q` search syntax.",
+                            inputSchemaJson = """
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "q": {
+                                      "type": "string"
+                                    }
+                                  }
+                                }
+                            """.trimIndent(),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        val controller = createController(
+            repository = repository,
+            io = FakeCliIO(inputs = emptyList()),
+            mcpServerStore = RecordingMcpServerStore(loadedServers = listOf(driveServer)),
+            mcpRuntimeService = runtimeService,
+        )
+
+        val exitCode = controller.runSinglePrompt("find my reports")
+
+        assertEquals(0, exitCode)
+        val privateTool = repository.prompts.single().mcpCapabilities.privateTools.single()
+        assertContains(privateTool.description.orEmpty(), "call this tool with `{}` and no arguments")
+        val qDescription = privateTool.parametersSchema["properties"]
+            ?.jsonObject
+            ?.get("q")
+            ?.jsonObject
+            ?.get("description")
+            ?.jsonPrimitive
+            ?.contentOrNull
+        assertNotNull(qDescription)
+        assertContains(qDescription, "Omit this field to list recent non-trashed Drive files")
+        assertContains(qDescription, "trashed = false and name contains 'report'")
+    }
+
+    @Test
+    fun interactiveMainTurnLazilyInitializesPrivateServersForLlmExposure() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "assistant answer")),
+            ),
+        )
+        val privateServer = httpMcpServer(name = "Linear", url = "http://localhost:3000", enabled = true)
+        val runtimeService = RecordingMcpRuntimeService(
+            runtimeStates = mapOf(
+                "Linear" to McpServerRuntimeState(
+                    server = privateServer,
+                    status = McpRuntimeStatus.READY,
+                    toolCatalogStatus = McpToolCatalogStatus.LOADED,
+                    tools = listOf(
+                        McpToolDefinition(
+                            name = "search_issues",
+                            description = "Search Linear issues",
+                            inputSchemaJson = """{"type":"object"}""",
+                        ),
+                    ),
+                ),
+            ),
+        )
+        val controller = createController(
+            repository = repository,
+            io = FakeCliIO(inputs = listOf("Find bugs", "/exit")),
+            mcpServerStore = RecordingMcpServerStore(loadedServers = listOf(privateServer)),
+            mcpRuntimeService = runtimeService,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(2, runtimeService.initializeCalls)
+        assertEquals(listOf(privateServer), runtimeService.initializeRequests[1])
+        assertEquals(1, repository.prompts.single().mcpCapabilities.privateTools.size)
+    }
+
+    @Test
+    fun newlyEnabledPrivateServerBecomesAvailableForLlmWithoutRestart() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "assistant answer")),
+            ),
+        )
+        val disabledServer = httpMcpServer(name = "Linear", url = "http://localhost:3000", enabled = false)
+        val enabledServer = disabledServer.copy(enabled = true)
+        val runtimeService = RecordingMcpRuntimeService(
+            runtimeStates = mapOf(
+                "Linear" to McpServerRuntimeState(
+                    server = enabledServer,
+                    status = McpRuntimeStatus.READY,
+                    toolCatalogStatus = McpToolCatalogStatus.LOADED,
+                    tools = listOf(
+                        McpToolDefinition(
+                            name = "search_issues",
+                            description = "Search Linear issues",
+                            inputSchemaJson = """{"type":"object"}""",
+                        ),
+                    ),
+                ),
+            ),
+        )
+        val controller = createController(
+            repository = repository,
+            io = FakeCliIO(
+                inputs = listOf("/mcp", "Find bugs", "/exit"),
+                mcpSelections = listOf(
+                    McpMenuResult(action = McpMenuAction.TOGGLE, selectedIndex = 0),
+                    null,
+                ),
+            ),
+            mcpServerStore = RecordingMcpServerStore(loadedServers = listOf(disabledServer)),
+            mcpRuntimeService = runtimeService,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(listOf(enabledServer), runtimeService.initializeRequests.last())
+        assertEquals(1, repository.prompts.single().mcpCapabilities.privateTools.size)
     }
 
     @Test
@@ -4027,6 +4263,7 @@ private class RecordingAgentRepository(
     responses: List<Result<AgentResponse>>,
 ) : AgentRepository {
     private val queuedResponses = ArrayDeque(responses)
+    val prompts = mutableListOf<PromptRequestData>()
     val conversations = mutableListOf<List<ConversationMessage>>()
 
     override suspend fun complete(
@@ -4034,6 +4271,7 @@ private class RecordingAgentRepository(
         temperature: Double?,
         model: String?,
     ): AgentResponse {
+        prompts += prompt
         conversations += prompt.toConversation()
         val response = queuedResponses.removeFirstOrNull()
             ?: error("No prepared response for conversation #${conversations.size}")
@@ -4041,10 +4279,11 @@ private class RecordingAgentRepository(
     }
 }
 
-private fun httpMcpServer(name: String, url: String, enabled: Boolean): McpServerConfig {
+private fun httpMcpServer(name: String, url: String, enabled: Boolean, isPublic: Boolean = false): McpServerConfig {
     return McpServerConfig(
         name = name,
         enabled = enabled,
+        isPublic = isPublic,
         transport = McpTransportConfig.Http(url = url),
     )
 }
@@ -4198,10 +4437,12 @@ private class RecordingMcpRuntimeService(
 ) : McpRuntimeService {
     var initializeCalls: Int = 0
         private set
+    val initializeRequests = mutableListOf<List<McpServerConfig>>()
     val callToolRequests = mutableListOf<RecordedMcpToolCall>()
 
     override suspend fun initializeEnabledServers(servers: List<McpServerConfig>): List<McpServerRuntimeState> {
         initializeCalls += 1
+        initializeRequests += servers.map { server -> server.copy() }
         return servers.map(::runtimeStateFor)
     }
 

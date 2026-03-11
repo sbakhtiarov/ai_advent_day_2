@@ -1,12 +1,13 @@
 {
   "servers": [
-    { "name": "Linear", "type": "http", "url": "http://localhost:3000", "enabled": true },
+    { "name": "Linear", "type": "http", "url": "http://localhost:3000", "enabled": true, "public": false },
     {
       "name": "Local MCP",
       "type": "stdio",
       "command": "node",
       "args": ["/Users/you/path/to/server/dist/cli.js"],
-      "enabled": false
+      "enabled": false,
+      "public": false
     }
   ]
 }

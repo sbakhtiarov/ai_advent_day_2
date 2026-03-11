@@ -47,6 +47,7 @@ kotlin {
         val nativeTest by getting {
             dependencies {
                 implementation(kotlin("test"))
+                implementation("io.ktor:ktor-client-mock:$ktorVersion")
             }
         }
     }

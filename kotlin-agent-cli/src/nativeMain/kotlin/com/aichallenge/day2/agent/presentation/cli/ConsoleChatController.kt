@@ -7,12 +7,16 @@ import com.aichallenge.day2.agent.domain.model.BranchingSessionMemory
 import com.aichallenge.day2.agent.domain.model.ConversationMessage
 import com.aichallenge.day2.agent.domain.model.MemoryEstimateSource
 import com.aichallenge.day2.agent.domain.model.MemoryUsageSnapshot
+import com.aichallenge.day2.agent.domain.model.McpLlmCapabilities
+import com.aichallenge.day2.agent.domain.model.McpPrivateToolBinding
+import com.aichallenge.day2.agent.domain.model.McpPublicServerCapability
 import com.aichallenge.day2.agent.domain.model.McpServerConfig
 import com.aichallenge.day2.agent.domain.model.McpRuntimeStatus
 import com.aichallenge.day2.agent.domain.model.McpServerRuntimeState
 import com.aichallenge.day2.agent.domain.model.McpToolCallResult
 import com.aichallenge.day2.agent.domain.model.McpToolCatalogStatus
 import com.aichallenge.day2.agent.domain.model.McpToolDefinition
+import com.aichallenge.day2.agent.domain.model.McpTransportConfig
 import com.aichallenge.day2.agent.domain.model.ProfileMemoryState
 import com.aichallenge.day2.agent.domain.model.ProfilePreferenceState
 import com.aichallenge.day2.agent.domain.model.SessionCompactionMode
@@ -128,7 +132,8 @@ class ConsoleChatController(
     private var userDefinedProfileInitialized = false
     private var userDefinedWorkflowInitialized = false
     private var invariantConstraintsInitialized = false
-    private var mcpServersInitialized = false
+    private var mcpServersLoaded = false
+    private var mcpStartupInitialized = false
     private var invariantConstraints = mutableListOf<String>()
     private var mcpServers = mutableListOf<McpServerConfig>()
     private val pendingMcpStartupMessages = mutableListOf<String>()
@@ -212,11 +217,14 @@ class ConsoleChatController(
         initializeInvariantConstraints()
 
         return runCatching {
+            val mcpContext = prepareMainTurnMcpContext()
+            mcpContext.systemMessages.forEach(io::writeLine)
             val startedAt = TimeSource.Monotonic.markNow()
             val response = executeAssistantTurnWithInvariantValidation(
                 requestPrompt = prompt,
                 effectiveSystemPrompt = systemPrompt,
                 validateInvariantConstraints = true,
+                mcpCapabilities = mcpContext.capabilities,
             )
             val elapsedSeconds = startedAt.elapsedNow().inWholeMilliseconds / 1000.0
             io.writeLine(formatAssistantResponse(response.content, response.usage, elapsedSeconds))
@@ -279,6 +287,10 @@ class ConsoleChatController(
 
         var result: TurnExecutionResult? = null
         try {
+            val mcpContext = prepareMainTurnMcpContext()
+            mcpContext.systemMessages.forEach { systemMessage ->
+                dialogBlocks += systemMessage
+            }
             coroutineScope {
                 val progressJob = launch {
                     var frameIndex = 1
@@ -302,6 +314,7 @@ class ConsoleChatController(
                             requestPrompt = requestPrompt,
                             effectiveSystemPrompt = effectiveSystemPrompt,
                             validateInvariantConstraints = validateInvariantConstraints,
+                            mcpCapabilities = mcpContext.capabilities,
                         )
                         val sideEffects = applyAcceptedTurnSideEffects(
                             requestPrompt = requestPrompt,
@@ -1239,6 +1252,7 @@ class ConsoleChatController(
     private suspend fun executeLinearTurn(
         requestPrompt: String,
         effectiveSystemPrompt: String,
+        mcpCapabilities: McpLlmCapabilities,
     ): AgentResponse {
         val effectivePromptWithInvariants = augmentSystemPromptWithInvariants(effectiveSystemPrompt)
         val promptRequest = buildPromptUseCase.execute(
@@ -1248,6 +1262,7 @@ class ConsoleChatController(
                 userPrompt = requestPrompt,
                 workingTaskState = workingMemoryState?.taskState,
                 profileMemoryState = effectiveProfileMemoryState(),
+                mcpCapabilities = mcpCapabilities,
             ),
         )
         val response = sendPromptUseCase.execute(
@@ -1260,6 +1275,7 @@ class ConsoleChatController(
     private suspend fun executeBranchingTurn(
         requestPrompt: String,
         effectiveSystemPrompt: String,
+        mcpCapabilities: McpLlmCapabilities,
     ): AgentResponse {
         val effectivePromptWithInvariants = augmentSystemPromptWithInvariants(effectiveSystemPrompt)
         val contextWindow = modelById[currentModel]?.contextWindowTokens
@@ -1273,6 +1289,7 @@ class ConsoleChatController(
                         userPrompt = requestPrompt,
                         workingTaskState = workingMemoryState?.taskState,
                         profileMemoryState = effectiveProfileMemoryState(),
+                        mcpCapabilities = mcpCapabilities,
                     ),
                 )
                 estimateSessionTokensHeuristically(promptRequest.toConversation())
@@ -1285,6 +1302,7 @@ class ConsoleChatController(
                 userPrompt = requestPrompt,
                 workingTaskState = workingMemoryState?.taskState,
                 profileMemoryState = effectiveProfileMemoryState(),
+                mcpCapabilities = mcpCapabilities,
             ),
         )
         val response = sendPromptUseCase.execute(
@@ -1298,6 +1316,7 @@ class ConsoleChatController(
         requestPrompt: String,
         effectiveSystemPrompt: String,
         validateInvariantConstraints: Boolean,
+        mcpCapabilities: McpLlmCapabilities = McpLlmCapabilities(),
     ): AgentResponse {
         val maxAttempts = if (validateInvariantConstraints) {
             INVARIANT_VALIDATION_MAX_RETRIES + 1
@@ -1312,11 +1331,13 @@ class ConsoleChatController(
                 executeBranchingTurn(
                     requestPrompt = currentPrompt,
                     effectiveSystemPrompt = effectiveSystemPrompt,
+                    mcpCapabilities = mcpCapabilities,
                 )
             } else {
                 executeLinearTurn(
                     requestPrompt = currentPrompt,
                     effectiveSystemPrompt = effectiveSystemPrompt,
+                    mcpCapabilities = mcpCapabilities,
                 )
             }
 
@@ -1898,37 +1919,22 @@ class ConsoleChatController(
     }
 
     private suspend fun initializeMcpServers() {
-        if (mcpServersInitialized) {
+        if (mcpStartupInitialized) {
             return
         }
 
-        mcpServersInitialized = true
-        mcpServers = runCatching {
-            mcpServerStore?.load()
-        }.getOrNull().orEmpty().toMutableList()
-        mcpMenuSelection = mcpMenuSelection.coerceIn(0, mcpServers.lastIndex.coerceAtLeast(0))
+        mcpStartupInitialized = true
+        ensureMcpServersLoaded()
         if (mcpServers.isEmpty()) {
             return
         }
 
-        val runtimeStates = runCatching {
-            mcpRuntimeService.initializeEnabledServers(mcpServers.toList())
-        }.getOrElse { throwable ->
-            mcpServers.map { server ->
-                if (server.enabled) {
-                    McpServerRuntimeState(
-                        server = server,
-                        status = McpRuntimeStatus.FAILED,
-                        failureMessage = throwable.message?.trim().takeUnless { it.isNullOrEmpty() } ?: "Unexpected error",
-                    )
-                } else {
-                    McpServerRuntimeState(
-                        server = server,
-                        status = McpRuntimeStatus.DISABLED,
-                    )
-                }
-            }
+        val startupServers = mcpServers.filterNot(McpServerConfig::isPublic)
+        if (startupServers.isEmpty()) {
+            return
         }
+
+        val runtimeStates = initializeEnabledServersSafely(startupServers)
         pendingMcpStartupMessages += runtimeStates.flatMap { state ->
             buildList {
                 if (state.status == McpRuntimeStatus.FAILED) {
@@ -1943,6 +1949,397 @@ class ConsoleChatController(
                 }
             }
         }
+    }
+
+    private fun ensureMcpServersLoaded() {
+        if (mcpServersLoaded) {
+            return
+        }
+
+        mcpServersLoaded = true
+        mcpServers = runCatching {
+            mcpServerStore?.load()
+        }.getOrNull().orEmpty().toMutableList()
+        mcpMenuSelection = mcpMenuSelection.coerceIn(0, mcpServers.lastIndex.coerceAtLeast(0))
+    }
+
+    private suspend fun prepareMainTurnMcpContext(): PreparedMainTurnMcpContext {
+        ensureMcpServersLoaded()
+        if (mcpServers.isEmpty()) {
+            return PreparedMainTurnMcpContext()
+        }
+
+        val publicServers = mcpServers.mapNotNull { server ->
+            if (!server.enabled || !server.isPublic) {
+                return@mapNotNull null
+            }
+
+            val transport = server.transport as? McpTransportConfig.Http ?: return@mapNotNull null
+            McpPublicServerCapability(
+                serverLabel = server.name,
+                serverUrl = transport.url,
+            )
+        }
+
+        val privateServers = mcpServers.filter { server ->
+            server.enabled && !server.isPublic
+        }
+        if (privateServers.isEmpty()) {
+            return PreparedMainTurnMcpContext(
+                capabilities = McpLlmCapabilities(
+                    publicServers = publicServers,
+                ),
+            )
+        }
+
+        val runtimeStates = initializeEnabledServersSafely(privateServers)
+        val preparedPrivateTools = buildPrivateMcpCapabilities(runtimeStates)
+        return PreparedMainTurnMcpContext(
+            capabilities = McpLlmCapabilities(
+                publicServers = publicServers,
+                privateTools = preparedPrivateTools.privateTools,
+            ),
+            systemMessages = preparedPrivateTools.systemMessages,
+        )
+    }
+
+    private suspend fun initializeEnabledServersSafely(servers: List<McpServerConfig>): List<McpServerRuntimeState> {
+        if (servers.isEmpty()) {
+            return emptyList()
+        }
+
+        return runCatching {
+            mcpRuntimeService.initializeEnabledServers(servers)
+        }.getOrElse { throwable ->
+            servers.map { server ->
+                McpServerRuntimeState(
+                    server = server,
+                    status = if (server.enabled) McpRuntimeStatus.FAILED else McpRuntimeStatus.DISABLED,
+                    failureMessage = if (server.enabled) {
+                        throwable.message?.trim().takeUnless { it.isNullOrEmpty() } ?: "Unexpected error"
+                    } else {
+                        null
+                    },
+                )
+            }
+        }
+    }
+
+    private fun buildPrivateMcpCapabilities(runtimeStates: List<McpServerRuntimeState>): PreparedPrivateMcpCapabilities {
+        val privateTools = mutableListOf<McpPrivateToolBinding>()
+        val usedToolNames = linkedSetOf<String>()
+        val skippedReasonsByServer = linkedMapOf<String, MutableList<String>>()
+
+        runtimeStates.forEach { state ->
+            when (state.status) {
+                McpRuntimeStatus.READY -> {
+                    when (state.toolCatalogStatus) {
+                        McpToolCatalogStatus.LOADED -> {
+                            var invalidSchemaCount = 0
+                            state.tools.forEach { tool ->
+                                val parametersSchema = parseMcpToolParametersSchema(tool.inputSchemaJson)
+                                if (parametersSchema == null) {
+                                    invalidSchemaCount += 1
+                                    return@forEach
+                                }
+
+                                val normalizedParametersSchema = normalizePrivateToolParametersSchema(
+                                    tool = tool,
+                                    parametersSchema = parametersSchema,
+                                )
+
+                                privateTools += McpPrivateToolBinding(
+                                    modelToolName = allocatePrivateToolName(
+                                        serverName = state.server.name,
+                                        toolName = tool.name,
+                                        usedNames = usedToolNames,
+                                    ),
+                                    server = state.server,
+                                    sourceToolName = tool.name,
+                                    description = buildPrivateToolDescription(
+                                        serverName = state.server.name,
+                                        tool = tool,
+                                        parametersSchema = normalizedParametersSchema,
+                                    ),
+                                    parametersSchema = normalizedParametersSchema,
+                                )
+                            }
+
+                            if (invalidSchemaCount > 0) {
+                                appendMcpSkipReason(
+                                    skippedReasonsByServer = skippedReasonsByServer,
+                                    serverName = state.server.name,
+                                    reason = "$invalidSchemaCount tool input schema${if (invalidSchemaCount == 1) "" else "s"} could not be parsed",
+                                )
+                            }
+                        }
+
+                        McpToolCatalogStatus.FAILED -> {
+                            appendMcpSkipReason(
+                                skippedReasonsByServer = skippedReasonsByServer,
+                                serverName = state.server.name,
+                                reason = "tool loading failed: ${state.toolCatalogFailureMessage ?: "Unexpected error"}",
+                            )
+                        }
+
+                        else -> {
+                            appendMcpSkipReason(
+                                skippedReasonsByServer = skippedReasonsByServer,
+                                serverName = state.server.name,
+                                reason = "tools are not available",
+                            )
+                        }
+                    }
+                }
+
+                McpRuntimeStatus.FAILED -> {
+                    appendMcpSkipReason(
+                        skippedReasonsByServer = skippedReasonsByServer,
+                        serverName = state.server.name,
+                        reason = "initialization failed: ${state.failureMessage ?: "Unexpected error"}",
+                    )
+                }
+
+                else -> {
+                    appendMcpSkipReason(
+                        skippedReasonsByServer = skippedReasonsByServer,
+                        serverName = state.server.name,
+                        reason = "server is not ready",
+                    )
+                }
+            }
+        }
+
+        return PreparedPrivateMcpCapabilities(
+            privateTools = privateTools,
+            systemMessages = skippedReasonsByServer.map { (serverName, reasons) ->
+                "system> MCP server '$serverName' was skipped for LLM tool exposure: ${reasons.joinToString(separator = "; ")}"
+            },
+        )
+    }
+
+    private fun parseMcpToolParametersSchema(rawSchema: String): JsonObject? {
+        return runCatching {
+            mcpCommandJson.parseToJsonElement(rawSchema).jsonObject
+        }.getOrNull()
+    }
+
+    private fun buildPrivateToolDescription(
+        serverName: String,
+        tool: McpToolDefinition,
+        parametersSchema: JsonObject,
+    ): String {
+        val baseDescription = tool.description?.trim().takeUnless { it.isNullOrEmpty() }
+        val parameterGuidance = buildPrivateToolParameterGuidance(
+            tool = tool,
+            parametersSchema = parametersSchema,
+        )
+        val sourceDescription = "Private MCP tool from server '$serverName'. Original MCP tool name: '${tool.name}'."
+        return listOfNotNull(
+            baseDescription,
+            parameterGuidance,
+            sourceDescription,
+        ).joinToString(separator = "\n\n")
+    }
+
+    private fun normalizePrivateToolParametersSchema(
+        tool: McpToolDefinition,
+        parametersSchema: JsonObject,
+    ): JsonObject {
+        return when (tool.name) {
+            "drive_list_files" -> appendJsonSchemaPropertyDescription(
+                schema = parametersSchema,
+                propertyName = "q",
+                appendedDescription = "Optional. Omit this field to list recent non-trashed Drive files with the default query `trashed = false`. If you provide `q`, use raw Google Drive `q` syntax, not natural-language search text. Example: `trashed = false and name contains 'report'`.",
+            )
+
+            else -> parametersSchema
+        }
+    }
+
+    private fun buildPrivateToolParameterGuidance(
+        tool: McpToolDefinition,
+        parametersSchema: JsonObject,
+    ): String? {
+        val properties = runCatching { parametersSchema["properties"]?.jsonObject }.getOrNull()
+            ?: return driveSpecificPrivateToolGuidance(tool)
+        val required = runCatching {
+            parametersSchema["required"]?.jsonArray?.mapNotNull { element ->
+                element.jsonPrimitive.contentOrNull?.trim()?.takeIf { value -> value.isNotEmpty() }
+            }?.toSet()
+        }.getOrNull().orEmpty()
+
+        val propertyLines = properties.entries.mapNotNull { (name, definitionElement) ->
+            val definition = runCatching { definitionElement.jsonObject }.getOrNull() ?: return@mapNotNull null
+            val type = definition["type"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty().ifEmpty { "value" }
+            val description = definition["description"]?.jsonPrimitive?.contentOrNull?.trim()
+            val enumValues = runCatching {
+                definition["enum"]?.jsonArray?.mapNotNull { element ->
+                    element.jsonPrimitive.contentOrNull?.trim()
+                }?.filter { value -> value.isNotEmpty() }
+            }.getOrNull().orEmpty()
+            val defaultValue = definition["default"]?.toString()?.trim()?.takeIf { value -> value.isNotEmpty() }
+            buildString {
+                append("- `")
+                append(name)
+                append("`: ")
+                append(type)
+                if (name in required) {
+                    append(" (required)")
+                } else {
+                    append(" (optional)")
+                }
+                description?.takeIf { it.isNotEmpty() }?.let { normalizedDescription ->
+                    append(" - ")
+                    append(normalizedDescription)
+                }
+                if (enumValues.isNotEmpty()) {
+                    append(" Allowed values: ")
+                    append(enumValues.joinToString(separator = ", "))
+                    append('.')
+                }
+                if (defaultValue != null) {
+                    append(" Default: ")
+                    append(defaultValue)
+                    append('.')
+                }
+            }.trim()
+        }
+
+        val guidanceSections = buildList {
+            if (propertyLines.isNotEmpty()) {
+                add(
+                    buildString {
+                        appendLine("Arguments:")
+                        propertyLines.forEach { line ->
+                            appendLine(line)
+                        }
+                    }.trimEnd(),
+                )
+            }
+            driveSpecificPrivateToolGuidance(tool)?.let(::add)
+        }
+
+        return guidanceSections.takeIf { it.isNotEmpty() }?.joinToString(separator = "\n\n")
+    }
+
+    private fun driveSpecificPrivateToolGuidance(tool: McpToolDefinition): String? {
+        if (tool.name != "drive_list_files") {
+            return null
+        }
+
+        return "You can call this tool with `{}` and no arguments to list recent non-trashed Drive files. Only set `q` when you can write raw Google Drive `q` syntax. Never put natural-language search text in `q`. Example: `trashed = false and name contains 'report'`."
+    }
+
+    private fun appendJsonSchemaPropertyDescription(
+        schema: JsonObject,
+        propertyName: String,
+        appendedDescription: String,
+    ): JsonObject {
+        val properties = runCatching { schema["properties"]?.jsonObject }.getOrNull() ?: return schema
+        val propertyDefinition = runCatching { properties[propertyName]?.jsonObject }.getOrNull() ?: return schema
+        val normalizedDescription = appendedDescription.trim()
+        if (normalizedDescription.isEmpty()) {
+            return schema
+        }
+
+        val currentDescription = propertyDefinition["description"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+        val mergedDescription = when {
+            currentDescription.isEmpty() -> normalizedDescription
+            currentDescription.contains(normalizedDescription) -> currentDescription
+            else -> "$currentDescription $normalizedDescription"
+        }
+
+        val updatedPropertyDefinition = buildJsonObject {
+            propertyDefinition.forEach { (key, value) ->
+                if (key != "description") {
+                    put(key, value)
+                }
+            }
+            put("description", mergedDescription)
+        }
+        val updatedProperties = buildJsonObject {
+            properties.forEach { (key, value) ->
+                put(
+                    key,
+                    if (key == propertyName) {
+                        updatedPropertyDefinition
+                    } else {
+                        value
+                    },
+                )
+            }
+        }
+
+        return buildJsonObject {
+            schema.forEach { (key, value) ->
+                put(
+                    key,
+                    if (key == "properties") {
+                        updatedProperties
+                    } else {
+                        value
+                    },
+                )
+            }
+        }
+    }
+
+    private fun allocatePrivateToolName(
+        serverName: String,
+        toolName: String,
+        usedNames: MutableSet<String>,
+    ): String {
+        val baseName = buildString {
+            append(sanitizePrivateToolNamePart(serverName, "server"))
+            append("__")
+            append(sanitizePrivateToolNamePart(toolName, "tool"))
+        }
+        var candidate = truncatePrivateToolName(baseName)
+        if (usedNames.add(candidate)) {
+            return candidate
+        }
+
+        val hash = stablePrivateToolHash(baseName)
+        var collisionIndex = 2
+        while (true) {
+            val suffix = "_${hash}_$collisionIndex"
+            candidate = truncatePrivateToolName(baseName, suffix)
+            if (usedNames.add(candidate)) {
+                return candidate
+            }
+            collisionIndex += 1
+        }
+    }
+
+    private fun sanitizePrivateToolNamePart(value: String, fallback: String): String {
+        val sanitized = buildString {
+            value.lowercase().forEach { character ->
+                append(if (character.isLetterOrDigit()) character else '_')
+            }
+        }.replace(MULTIPLE_UNDERSCORES_REGEX, "_")
+            .trim('_')
+
+        return sanitized.ifEmpty { fallback }
+    }
+
+    private fun truncatePrivateToolName(baseName: String, suffix: String = ""): String {
+        val allowedBaseLength = (MCP_FUNCTION_TOOL_NAME_MAX_LENGTH - suffix.length).coerceAtLeast(1)
+        return baseName.take(allowedBaseLength) + suffix
+    }
+
+    private fun stablePrivateToolHash(value: String): String = value.hashCode().toUInt().toString(radix = 16)
+
+    private fun appendMcpSkipReason(
+        skippedReasonsByServer: MutableMap<String, MutableList<String>>,
+        serverName: String,
+        reason: String,
+    ) {
+        val normalizedReason = reason.trim()
+        if (normalizedReason.isEmpty()) {
+            return
+        }
+        skippedReasonsByServer.getOrPut(serverName) { mutableListOf() } += normalizedReason
     }
 
     private fun consumePendingMcpStartupMessages(): List<String> {
@@ -3079,7 +3476,9 @@ class ConsoleChatController(
         private val THINKING_SPINNER_FRAMES = charArrayOf('|', '/', '-', '\\')
         private val INVARIANT_STRICT_PREFIX_REGEX = Regex("^\\[\\s*strict\\s*\\]\\s*", RegexOption.IGNORE_CASE)
         private val FENCED_CODE_BLOCK_REGEX = Regex("```(?:json)?\\s*([\\s\\S]*?)```", RegexOption.IGNORE_CASE)
+        private val MULTIPLE_UNDERSCORES_REGEX = Regex("_+")
         private val TRAILING_REFERENCE_DELIMITERS = setOf('.', ',', ';', ':', '!', '?', ')', ']', '}')
+        private const val MCP_FUNCTION_TOOL_NAME_MAX_LENGTH = 64
         private val KNOWN_FILE_EXTENSIONS = setOf(
             "kt",
             "kts",
@@ -3147,5 +3546,15 @@ class ConsoleChatController(
         val serverIndexRaw: String,
         val toolName: String,
         val arguments: JsonObject,
+    )
+
+    private data class PreparedMainTurnMcpContext(
+        val capabilities: McpLlmCapabilities = McpLlmCapabilities(),
+        val systemMessages: List<String> = emptyList(),
+    )
+
+    private data class PreparedPrivateMcpCapabilities(
+        val privateTools: List<McpPrivateToolBinding> = emptyList(),
+        val systemMessages: List<String> = emptyList(),
     )
 }

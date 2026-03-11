@@ -52,17 +52,20 @@ Example:
 ```json
 {
   "servers": [
-    { "name": "Linear", "type": "http", "url": "http://localhost:3000", "enabled": true },
+    { "name": "Linear", "type": "http", "url": "http://localhost:3000", "enabled": true, "public": false },
     {
       "name": "Local MCP",
       "type": "stdio",
       "command": "node",
       "args": ["/Users/you/path/to/server/dist/cli.js"],
-      "enabled": false
+      "enabled": false,
+      "public": false
     }
   ]
 }
 ```
+
+`public` is loaded and persisted as part of MCP server configuration. It is currently schema-only and does not change runtime behavior yet.
 
 In interactive mode, `/mcp` still opens the MCP server menu. You can also invoke a tool directly for connectivity checks:
 

@@ -3,8 +3,12 @@ package com.aichallenge.day2.agent.data.remote
 import com.aichallenge.day2.agent.core.config.AppConfig
 import com.aichallenge.day2.agent.core.logging.ApiTrafficFileLogger
 import com.aichallenge.day2.agent.domain.model.MessageRole
+import com.aichallenge.day2.agent.domain.model.McpLlmCapabilities
+import com.aichallenge.day2.agent.domain.model.McpPrivateToolBinding
 import com.aichallenge.day2.agent.domain.model.PromptRequestData
 import com.aichallenge.day2.agent.domain.model.TokenUsage
+import com.aichallenge.day2.agent.domain.service.McpRuntimeService
+import com.aichallenge.day2.agent.domain.service.NoOpMcpRuntimeService
 import io.ktor.client.HttpClient
 import io.ktor.client.request.header
 import io.ktor.client.request.post
@@ -16,12 +20,17 @@ import io.ktor.http.contentType
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.put
 
 class OpenAiRemoteDataSource(
     private val httpClient: HttpClient,
     private val config: AppConfig,
     private val json: Json,
     private val apiTrafficLogger: ApiTrafficFileLogger? = null,
+    private val mcpRuntimeService: McpRuntimeService = NoOpMcpRuntimeService,
 ) {
     data class AssistantReply(
         val content: String,
@@ -42,13 +51,17 @@ class OpenAiRemoteDataSource(
             .filter { it.isNotEmpty() }
             .joinToString(separator = "\n\n")
             .ifBlank { null }
-        val inputMessages = prompt.messages
-        val requestPayload = ResponsesApiRequest(
+        val requestUrl = "${config.baseUrl}/responses"
+        val responseTools = buildResponseTools(prompt.mcpCapabilities)
+        val privateToolBindings = prompt.mcpCapabilities.privateTools.associateBy(McpPrivateToolBinding::modelToolName)
+        var totalUsage: TokenUsage? = null
+        var executedPrivateToolCalls = 0
+        var requestPayload = ResponsesApiRequest(
             model = model ?: config.model,
             instructions = instructions,
             temperature = temperature,
-            input = inputMessages.map { message ->
-                RequestMessage(
+            input = prompt.messages.map { message ->
+                ResponseInputItem(
                     role = message.role.toApiRole(),
                     content = listOf(
                         RequestContent(
@@ -58,10 +71,98 @@ class OpenAiRemoteDataSource(
                     ),
                 )
             },
+            tools = responseTools.takeUnless(List<ResponseTool>::isEmpty),
+            parallelToolCalls = responseTools.takeUnless(List<ResponseTool>::isEmpty)?.let { false },
         )
+
+        while (true) {
+            val payload = executeRequest(
+                requestUrl = requestUrl,
+                requestPayload = requestPayload,
+            )
+            totalUsage = mergeUsage(totalUsage, extractUsage(payload))
+
+            val pendingFunctionCalls = extractPendingFunctionCalls(payload)
+            if (pendingFunctionCalls.isEmpty()) {
+                val output = extractOutput(payload)
+                if (output.isBlank()) {
+                    throw IllegalStateException("OpenAI returned an empty response.")
+                }
+                return AssistantReply(
+                    content = output,
+                    usage = totalUsage,
+                )
+            }
+
+            val responseId = payload.id?.trim().takeUnless { it.isNullOrEmpty() }
+                ?: throw IllegalStateException("OpenAI returned function calls without a response id.")
+            val functionOutputs = pendingFunctionCalls.map { functionCall ->
+                executedPrivateToolCalls += 1
+                if (executedPrivateToolCalls > MAX_PRIVATE_TOOL_CALLS_PER_TURN) {
+                    throw IllegalStateException(
+                        "OpenAI requested more than $MAX_PRIVATE_TOOL_CALLS_PER_TURN private MCP tool calls in one turn.",
+                    )
+                }
+                val binding = privateToolBindings[functionCall.name]
+                    ?: throw IllegalStateException("OpenAI requested unknown private MCP tool '${functionCall.name}'.")
+                buildFunctionCallOutput(binding, functionCall)
+            }
+
+            requestPayload = ResponsesApiRequest(
+                model = model ?: config.model,
+                instructions = instructions,
+                temperature = temperature,
+                input = functionOutputs.map { output ->
+                    ResponseInputItem(
+                        type = output.type,
+                        callId = output.callId,
+                        output = output.output,
+                    )
+                },
+                tools = responseTools.takeUnless(List<ResponseTool>::isEmpty),
+                parallelToolCalls = responseTools.takeUnless(List<ResponseTool>::isEmpty)?.let { false },
+                previousResponseId = responseId,
+            )
+        }
+    }
+
+    private fun extractOutput(payload: ResponsesApiEnvelope): String {
+        payload.outputText?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
+
+        return payload.output
+            .asSequence()
+            .flatMap { it.content.asSequence() }
+            .mapNotNull { it.text?.trim() }
+            .filter { it.isNotEmpty() }
+            .joinToString(separator = "\n")
+    }
+
+    private fun buildResponseTools(capabilities: McpLlmCapabilities): List<ResponseTool> {
+        val publicTools = capabilities.publicServers.map { server ->
+            ResponseTool(
+                type = "mcp",
+                serverLabel = server.serverLabel,
+                serverUrl = server.serverUrl,
+                requireApproval = "never",
+            )
+        }
+        val privateTools = capabilities.privateTools.map { tool ->
+            ResponseTool(
+                type = "function",
+                name = tool.modelToolName,
+                description = tool.description,
+                parameters = tool.parametersSchema,
+            )
+        }
+        return publicTools + privateTools
+    }
+
+    private suspend fun executeRequest(
+        requestUrl: String,
+        requestPayload: ResponsesApiRequest,
+    ): ResponsesApiEnvelope {
         val rawRequestBody = json.encodeToString(requestPayload)
         val exchangeId = apiTrafficLogger?.reserveExchangeId() ?: 0L
-        val requestUrl = "${config.baseUrl}/responses"
 
         apiTrafficLogger?.logRequest(
             exchangeId = exchangeId,
@@ -107,27 +208,102 @@ class OpenAiRemoteDataSource(
             )
         }
 
-        val payload = json.decodeFromString<ResponsesApiEnvelope>(rawResponseBody)
-        val output = extractOutput(payload)
-        if (output.isBlank()) {
-            throw IllegalStateException("OpenAI returned an empty response.")
+        return json.decodeFromString(rawResponseBody)
+    }
+
+    private fun extractPendingFunctionCalls(payload: ResponsesApiEnvelope): List<PendingFunctionCall> {
+        return payload.output.mapNotNull { item ->
+            if (item.type != "function_call") {
+                return@mapNotNull null
+            }
+
+            val callId = item.callId?.trim().takeUnless { it.isNullOrEmpty() }
+                ?: throw IllegalStateException("OpenAI returned a function call without call_id.")
+            val name = item.name?.trim().takeUnless { it.isNullOrEmpty() }
+                ?: throw IllegalStateException("OpenAI returned a function call without name.")
+
+            PendingFunctionCall(
+                callId = callId,
+                name = name,
+                arguments = item.arguments.orEmpty(),
+            )
+        }
+    }
+
+    private suspend fun buildFunctionCallOutput(
+        binding: McpPrivateToolBinding,
+        functionCall: PendingFunctionCall,
+    ): ResponsesApiFunctionCallOutput {
+        val output = runCatching {
+            val arguments = parseFunctionCallArguments(functionCall.arguments)
+            val result = mcpRuntimeService.callTool(
+                server = binding.server,
+                toolName = binding.sourceToolName,
+                arguments = arguments,
+            )
+            serializeSuccessfulFunctionOutput(
+                binding = binding,
+                result = result,
+            )
+        }.getOrElse { throwable ->
+            serializeFailedFunctionOutput(
+                binding = binding,
+                throwable = throwable,
+            )
         }
 
-        return AssistantReply(
-            content = output,
-            usage = extractUsage(payload),
+        return ResponsesApiFunctionCallOutput(
+            callId = functionCall.callId,
+            output = output,
         )
     }
 
-    private fun extractOutput(payload: ResponsesApiEnvelope): String {
-        payload.outputText?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
+    private fun parseFunctionCallArguments(rawArguments: String): JsonObject {
+        if (rawArguments.isBlank()) {
+            return buildJsonObject {}
+        }
+        val parsedElement = runCatching {
+            json.parseToJsonElement(rawArguments)
+        }.getOrElse {
+            throw IllegalArgumentException("Private MCP tool arguments must be valid JSON.")
+        }
+        return parsedElement as? JsonObject
+            ?: throw IllegalArgumentException("Private MCP tool arguments must be a JSON object.")
+    }
 
-        return payload.output
-            .asSequence()
-            .flatMap { it.content.asSequence() }
-            .mapNotNull { it.text?.trim() }
-            .filter { it.isNotEmpty() }
-            .joinToString(separator = "\n")
+    private fun serializeSuccessfulFunctionOutput(
+        binding: McpPrivateToolBinding,
+        result: com.aichallenge.day2.agent.domain.model.McpToolCallResult,
+    ): String {
+        val payload = buildJsonObject {
+            put("ok", true)
+            put("server", binding.server.name)
+            put("tool", binding.sourceToolName)
+            put("is_error", result.isError)
+            if (result.structuredContent != null) {
+                put("structured_content", result.structuredContent)
+            }
+            if (result.content.isNotEmpty()) {
+                put("content", result.content)
+            }
+            if (result.meta != null) {
+                put("_meta", result.meta)
+            }
+        }
+        return json.encodeToString(JsonObject.serializer(), payload)
+    }
+
+    private fun serializeFailedFunctionOutput(
+        binding: McpPrivateToolBinding,
+        throwable: Throwable,
+    ): String {
+        val payload = buildJsonObject {
+            put("ok", false)
+            put("server", binding.server.name)
+            put("tool", binding.sourceToolName)
+            put("error", throwable.message?.trim().takeUnless { it.isNullOrEmpty() } ?: "Unexpected error")
+        }
+        return json.encodeToString(JsonObject.serializer(), payload)
     }
 
     private fun extractUsage(payload: ResponsesApiEnvelope): TokenUsage? {
@@ -143,6 +319,24 @@ class OpenAiRemoteDataSource(
             inputTokens = inputTokens,
             outputTokens = outputTokens,
         )
+    }
+
+    private fun mergeUsage(current: TokenUsage?, next: TokenUsage?): TokenUsage? {
+        if (current == null) {
+            return next
+        }
+        if (next == null) {
+            return current
+        }
+        return TokenUsage(
+            totalTokens = current.totalTokens + next.totalTokens,
+            inputTokens = current.inputTokens + next.inputTokens,
+            outputTokens = current.outputTokens + next.outputTokens,
+        )
+    }
+
+    companion object {
+        private const val MAX_PRIVATE_TOOL_CALLS_PER_TURN = 16
     }
 }
 
