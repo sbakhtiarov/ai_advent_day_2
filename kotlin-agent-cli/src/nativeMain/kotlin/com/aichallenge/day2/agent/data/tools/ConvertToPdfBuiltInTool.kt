@@ -498,10 +498,11 @@ class ConvertToPdfBuiltInToolExecutor(
             REPORTLAB_MISSING_MARKER = "__REPORTLAB_MISSING__"
 
             try:
+                from reportlab.lib import colors
                 from reportlab.lib.pagesizes import LETTER
                 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
                 from reportlab.lib.units import inch
-                from reportlab.platypus import Paragraph, Preformatted, SimpleDocTemplate, Spacer
+                from reportlab.platypus import Paragraph, Preformatted, SimpleDocTemplate, Spacer, Table, TableStyle
             except ModuleNotFoundError:
                 sys.stderr.write(REPORTLAB_MISSING_MARKER + "\n")
                 raise SystemExit(3)
@@ -567,6 +568,72 @@ class ConvertToPdfBuiltInToolExecutor(
                 story.append(Paragraph(escaped, style))
                 story.append(Spacer(1, 0.07 * inch))
 
+            def parse_table_cells(line):
+                stripped = line.strip()
+                if "|" not in stripped:
+                    return None
+                parts = stripped.split("|")
+                if stripped.startswith("|"):
+                    parts = parts[1:]
+                if stripped.endswith("|"):
+                    parts = parts[:-1]
+                if len(parts) < 2:
+                    return None
+                return [part.strip() for part in parts]
+
+            def is_table_separator_row(cells):
+                if not cells:
+                    return False
+                for cell in cells:
+                    compact = cell.replace(" ", "")
+                    if compact.startswith(":"):
+                        compact = compact[1:]
+                    if compact.endswith(":"):
+                        compact = compact[:-1]
+                    if len(compact) < 3:
+                        return False
+                    if any(ch != "-" for ch in compact):
+                        return False
+                return True
+
+            def append_table(rows):
+                if not rows:
+                    return
+                usable_width = LETTER[0] - (1.5 * inch)
+                column_count = max(1, len(rows[0]))
+                column_width = usable_width / column_count
+                table_rows = []
+                for row in rows:
+                    table_rows.append(
+                        [
+                            Paragraph((html.escape(cell) if cell.strip() else "&nbsp;"), body)
+                            for cell in row
+                        ]
+                    )
+                table = Table(
+                    table_rows,
+                    colWidths=[column_width] * column_count,
+                    repeatRows=1,
+                    hAlign="LEFT",
+                )
+                table.setStyle(
+                    TableStyle(
+                        [
+                            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f2f2f2")),
+                            ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
+                            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#d0d0d0")),
+                            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                            ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                            ("TOPPADDING", (0, 0), (-1, -1), 4),
+                            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                        ]
+                    )
+                )
+                story.append(table)
+                story.append(Spacer(1, 0.12 * inch))
+
             if render_mode == "markdown":
                 lines = text.splitlines()
                 in_code_block = False
@@ -586,7 +653,9 @@ class ConvertToPdfBuiltInToolExecutor(
                     story.append(Spacer(1, 0.10 * inch))
                     code_lines.clear()
 
-                for line in lines:
+                index = 0
+                while index < len(lines):
+                    line = lines[index]
                     if line.strip().startswith("```"):
                         flush_paragraph()
                         if in_code_block:
@@ -594,17 +663,42 @@ class ConvertToPdfBuiltInToolExecutor(
                             in_code_block = False
                         else:
                             in_code_block = True
+                        index += 1
                         continue
 
                     if in_code_block:
                         code_lines.append(line)
+                        index += 1
                         continue
 
                     stripped = line.strip()
                     if stripped == "":
                         flush_paragraph()
                         story.append(Spacer(1, 0.10 * inch))
+                        index += 1
                         continue
+
+                    header_cells = parse_table_cells(line)
+                    if header_cells is not None and (index + 1) < len(lines):
+                        separator_cells = parse_table_cells(lines[index + 1])
+                        if (
+                            separator_cells is not None
+                            and len(separator_cells) == len(header_cells)
+                            and is_table_separator_row(separator_cells)
+                        ):
+                            flush_paragraph()
+                            table_rows = [header_cells]
+                            index += 2
+                            while index < len(lines):
+                                next_cells = parse_table_cells(lines[index])
+                                if next_cells is None or len(next_cells) != len(header_cells):
+                                    break
+                                if is_table_separator_row(next_cells):
+                                    break
+                                table_rows.append(next_cells)
+                                index += 1
+                            append_table(table_rows)
+                            continue
 
                     heading_match = re.match(r"^\s*(#{1,6})\s+(.+)", line)
                     if heading_match:
@@ -617,21 +711,25 @@ class ConvertToPdfBuiltInToolExecutor(
                             append_paragraph(heading_text, heading_two)
                         else:
                             append_paragraph(heading_text, heading_three)
+                        index += 1
                         continue
 
                     unordered_match = re.match(r"^\s*[-*+]\s+(.+)", line)
                     if unordered_match:
                         flush_paragraph()
                         append_paragraph("- " + unordered_match.group(1).strip(), body)
+                        index += 1
                         continue
 
                     ordered_match = re.match(r"^\s*(\d+)\.\s+(.+)", line)
                     if ordered_match:
                         flush_paragraph()
                         append_paragraph(ordered_match.group(1) + ". " + ordered_match.group(2).strip(), body)
+                        index += 1
                         continue
 
                     paragraph_lines.append(stripped)
+                    index += 1
 
                 flush_paragraph()
                 if in_code_block:

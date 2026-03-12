@@ -367,6 +367,44 @@ class ConvertToPdfBuiltInToolTest {
         val outputBytes = readBytesFile("$workspaceRoot/out.pdf")
         assertContains(outputBytes.decodeToString(startIndex = 0, endIndex = 8), "%PDF-1.")
     }
+
+    @Test
+    fun executeConvertsMarkdownTableWhenReportLabAvailable() = runBlocking {
+        if (!isReportLabAvailable()) {
+            return@runBlocking
+        }
+
+        val workspaceRoot = uniqueWorkspaceRoot()
+        ensureDirectoryExists(workspaceRoot)
+        writeTextFile(
+            "$workspaceRoot/table.md",
+            """
+            # Quarterly Revenue
+
+            | Quarter | Revenue | Growth |
+            | --- | ---: | ---: |
+            | Q1 | 120000 | 5% |
+            | Q2 | 145000 | 21% |
+            | Q3 | 151000 | 4% |
+            """.trimIndent(),
+        )
+        val executor = ConvertToPdfBuiltInToolExecutor(
+            commandExecutor = PosixCommandExecutor(),
+            runtimeEnvironment = PdfToolTestRuntimeEnvironment(workspaceRoot),
+        )
+
+        executor.execute(
+            buildJsonObject {
+                put("input_file", "table.md")
+                put("output_file", "table.pdf")
+                put("overwrite", true)
+            },
+        )
+
+        val outputBytes = readBytesFile("$workspaceRoot/table.pdf")
+        assertContains(outputBytes.decodeToString(startIndex = 0, endIndex = 8), "%PDF-1.")
+        assertTrue(outputBytes.size > 512)
+    }
 }
 
 private data class CommandCall(
@@ -510,6 +548,14 @@ private fun readBytesFile(path: String): ByteArray {
     } finally {
         close(fd)
     }
+}
+
+private fun isReportLabAvailable(): Boolean {
+    val result = PosixCommandExecutor().execute(
+        command = "python3",
+        args = listOf("-c", "import reportlab"),
+    )
+    return result.exitCode == 0
 }
 
 @OptIn(ExperimentalForeignApi::class)

@@ -94,7 +94,7 @@ Like `notify_user` and `scheduler`, this tool is model-only: it is not shown in 
 
 The agent also exposes a built-in private tool named `convert_to_pdf` to the model on macOS turns.
 It converts a workspace file to PDF with schema `{ "input_file": string, "output_file": string, "overwrite"?: boolean }`.
-Both paths are required to resolve inside the current workspace; `input_file` must exist and be valid UTF-8 text, and markdown files (`.md`/`.markdown`) are rendered with basic heading/list/code-block support.
+Both paths are required to resolve inside the current workspace; `input_file` must exist and be valid UTF-8 text, and markdown files (`.md`/`.markdown`) are rendered with basic heading/list/code-block/table support.
 The tool fails by default when `output_file` exists and overwrites only when `overwrite: true`; output directories are created automatically.
 Conversion backend is `python3` + `reportlab`, so `python3` and the Python package `reportlab` must be installed (`python3 -m pip install reportlab`).
 Like `notify_user`, `scheduler`, and `save_to_file`, this tool is model-only: it is not shown in `/mcp` and is not manually invokable from the interactive CLI in v1.
