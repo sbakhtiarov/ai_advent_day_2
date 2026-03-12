@@ -86,6 +86,12 @@ All scheduler timestamps use RFC3339 with an explicit UTC offset; repeating jobs
 Scheduled runs are backed by macOS `launchd`, survive app exit/reboot, write to per-job log files, and send completion/failure notifications through the same local notification backend as `notify_user`.
 Like `notify_user`, this tool is model-only: it is not shown in `/mcp` and is not manually invokable from the interactive CLI in v1.
 
+The agent also exposes a built-in private tool named `save_to_file` to the model on macOS turns.
+It writes text content to disk with schema `{ "file_name": string, "content": string, "overwrite"?: boolean }`.
+`file_name` is required and must resolve inside the current workspace root; relative paths are resolved from the current working directory and paths outside the workspace are rejected.
+The tool auto-creates missing parent directories, fails by default when the target file already exists, and overwrites only when `overwrite: true`.
+Like `notify_user` and `scheduler`, this tool is model-only: it is not shown in `/mcp` and is not manually invokable from the interactive CLI in v1.
+
 Interactive mode:
 
 ```bash

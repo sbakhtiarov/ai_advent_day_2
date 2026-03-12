@@ -2,6 +2,8 @@
 
 package com.aichallenge.day2.agent.data.tools
 
+import com.aichallenge.day2.agent.core.config.AppRuntimeEnvironment
+import com.aichallenge.day2.agent.core.config.DefaultAppRuntimeEnvironment
 import com.aichallenge.day2.agent.domain.model.PrivateToolBinding
 import com.aichallenge.day2.agent.domain.model.PrivateToolResult
 import com.aichallenge.day2.agent.domain.model.PrivateToolTarget
@@ -58,16 +60,19 @@ class BuiltInToolRegistry(
     companion object {
         fun createDefault(
             commandExecutor: CommandExecutor = PosixCommandExecutor(),
+            runtimeEnvironment: AppRuntimeEnvironment = DefaultAppRuntimeEnvironment(),
         ): BuiltInToolRegistry {
             val notificationService = MacOsNotificationService(commandExecutor)
             val schedulerService = LaunchdSchedulerService.createDefault(
                 commandExecutor = commandExecutor,
                 notificationService = notificationService,
+                runtimeEnvironment = runtimeEnvironment,
             )
             return BuiltInToolRegistry(
                 registrations = listOf(
                     notifyUserToolRegistration(notificationService),
                     schedulerToolRegistration(schedulerService),
+                    saveToFileToolRegistration(runtimeEnvironment),
                 ),
             )
         }
