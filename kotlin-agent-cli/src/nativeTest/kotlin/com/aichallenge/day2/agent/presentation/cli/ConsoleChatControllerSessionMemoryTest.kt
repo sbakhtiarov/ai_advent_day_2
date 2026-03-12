@@ -3159,6 +3159,56 @@ class ConsoleChatControllerSessionMemoryTest {
     }
 
     @Test
+    fun runSinglePromptDoesNotInjectResolvedCurrentTimeForRelativeSchedulePrompt() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "one-shot answer")),
+            ),
+        )
+        val schedulerRecorder = RecordingCurrentTimeBuiltInTool()
+        val builtInPrivateToolProvider = BuiltInPrivateToolProvider(
+            BuiltInToolRegistry(
+                registrations = listOf(
+                    BuiltInToolRegistration(
+                        definition = BuiltInToolDefinition(
+                            toolId = "scheduler",
+                            modelToolName = "scheduler",
+                            description = "Scheduler test tool",
+                            parametersSchema = buildJsonObject {
+                                put("type", "object")
+                            },
+                        ),
+                        executor = schedulerRecorder::execute,
+                    ),
+                ),
+            ),
+        )
+        val controller = createController(
+            repository = repository,
+            io = FakeCliIO(inputs = emptyList()),
+            builtInPrivateToolProvider = builtInPrivateToolProvider,
+        )
+
+        val exitCode = controller.runSinglePrompt("Schedule notification in 5 minutes.")
+
+        assertEquals(0, exitCode)
+        assertEquals(0, schedulerRecorder.currentTimeCalls)
+        val promptConversation = repository.conversations.single()
+        val resolvedTimeMessage = promptConversation.firstOrNull { message ->
+            message.role == MessageRole.SYSTEM &&
+                message.content.contains("Resolved current local time for this turn")
+        }
+        assertNull(resolvedTimeMessage)
+        val relativeDelayPolicyMessage = promptConversation.firstOrNull { message ->
+            message.role == MessageRole.SYSTEM &&
+                message.content.contains("Relative scheduling policy for this turn")
+        } ?: error("Missing relative scheduling policy system message.")
+        assertContains(relativeDelayPolicyMessage.content, "MUST call `scheduler` with `action: \"delay\"`")
+        assertContains(relativeDelayPolicyMessage.content, "Omit `schedule_type`")
+        assertContains(relativeDelayPolicyMessage.content, "do NOT reject the request as a past time")
+    }
+
+    @Test
     fun driveListFilesPrivateToolAddsDriveQueryGuidanceToSchemaAndDescription() = runBlocking {
         val repository = RecordingAgentRepository(
             responses = listOf(

@@ -1414,11 +1414,39 @@ class ConsoleChatController(
         requestPrompt: String,
         toolCapabilities: LlmToolCapabilities,
     ): List<String> {
+        val relativeDelayPolicyMessage = buildRelativeDelayPolicySystemMessage(
+            requestPrompt = requestPrompt,
+            toolCapabilities = toolCapabilities,
+        )
         val resolvedCurrentTimeMessage = resolveCurrentTimeSystemMessage(
             requestPrompt = requestPrompt,
             toolCapabilities = toolCapabilities,
         )
-        return listOfNotNull(resolvedCurrentTimeMessage)
+        return listOfNotNull(relativeDelayPolicyMessage, resolvedCurrentTimeMessage)
+    }
+
+    private fun buildRelativeDelayPolicySystemMessage(
+        requestPrompt: String,
+        toolCapabilities: LlmToolCapabilities,
+    ): String? {
+        val schedulerAvailable = toolCapabilities.privateTools.any { tool ->
+            tool.modelToolName == SCHEDULER_MODEL_TOOL_NAME
+        }
+        if (!schedulerAvailable || requestPrompt.isBlank()) {
+            return null
+        }
+        val normalizedPrompt = requestPrompt.lowercase()
+        if (!relativeDelayPromptRegex.containsMatchIn(normalizedPrompt)) {
+            return null
+        }
+        return """
+            Relative scheduling policy for this turn:
+            - The user requested a delay from now.
+            - You MUST call `scheduler` with `action: "delay"` and provide `prompt`, `delay_amount`, and `delay_unit` (`minute|minutes|hour|hours`).
+            - Omit `schedule_type` for this `delay` request (legacy placeholder `schedule_type: "once"` is tolerated, but do not send it).
+            - Do NOT call `scheduler` with `action: "current_time"` for this request.
+            - Do NOT infer or restate current local time and do NOT reject the request as a past time; delay is computed from execution time.
+        """.trimIndent()
     }
 
     private suspend fun resolveCurrentTimeSystemMessage(
@@ -1481,7 +1509,7 @@ class ConsoleChatController(
             return true
         }
 
-        return relativeSchedulePromptRegex.containsMatchIn(normalizedPrompt)
+        return false
     }
 
     private suspend fun applyAcceptedTurnSideEffects(
@@ -3310,7 +3338,7 @@ class ConsoleChatController(
             "send me",
             "update",
         )
-        private val relativeSchedulePromptRegex = Regex("""\bin\s+\d+\s+(minute|minutes|hour|hours)\b""")
+        private val relativeDelayPromptRegex = Regex("""\bin\s+\d+\s+(minute|minutes|hour|hours)\b""")
         private val localWallClockTimeRegex = Regex("""\b(?:at\s+)?\d{1,2}:\d{2}\b""")
         private val explicitTimeZoneRegex = Regex(
             """\b(?:utc|gmt|cet|cest|eet|eest|pst|pdt|mst|mdt|cst|cdt|est|edt|[a-z_]+/[a-z_]+)\b|[+-]\d{2}:\d{2}\b|\bz\b""",

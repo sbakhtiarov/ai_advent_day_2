@@ -151,6 +151,37 @@ class LaunchdSchedulerService(
         )
     }
 
+    fun createDelayedOneShotJob(
+        prompt: String,
+        label: String?,
+        delayAmount: Int,
+        delayUnit: String,
+    ): ScheduledAgentJob {
+        if (delayAmount <= 0) {
+            throw IllegalArgumentException("delay_amount must be positive.")
+        }
+        val delayMinutes = when (delayUnit.trim().lowercase()) {
+            "minute",
+            "minutes",
+            -> delayAmount.toLong()
+            "hour",
+            "hours",
+            -> delayAmount.toLong() * 60L
+            else -> throw IllegalArgumentException("delay_unit must be one of: minute, minutes, hour, hours.")
+        }
+        val runAt = Instant.fromEpochMilliseconds(
+            nowProvider().toEpochMilliseconds() + (delayMinutes * ONE_MINUTE_MS),
+        )
+        return createJob(
+            CreateScheduledJobRequest(
+                prompt = prompt,
+                label = label,
+                scheduleType = ScheduledJobScheduleType.ONCE,
+                runAt = runAt,
+            ),
+        )
+    }
+
     fun createJob(request: CreateScheduledJobRequest): ScheduledAgentJob {
         val store = requireScheduledJobStore()
         val now = nowProvider()

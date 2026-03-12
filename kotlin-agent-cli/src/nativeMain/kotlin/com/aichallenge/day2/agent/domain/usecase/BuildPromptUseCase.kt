@@ -346,6 +346,8 @@ class BuildPromptUseCase {
             Time handling policy:
             - Exact current-time readings are volatile and may be stale in summaries or memory.
             - When the user asks for the current time, local time, or what time it is, call the `scheduler` tool with `action: "current_time"`.
+            - When the user asks for relative scheduling from now (for example, `in 5 minutes` or `in 2 hours`), call `scheduler` with `action: "delay"` and provide `delay_amount` + `delay_unit` (`minute|minutes|hour|hours`); omit `schedule_type`.
+            - For relative scheduling requests, do not infer or compare wall-clock times yourself, and never reject the request as "already passed"; use the `delay` action.
             - When the user gives a local wall-clock time without an explicit timezone or date, such as `at 07:55`, call `scheduler` with `action: "current_time"` first to resolve the user's local date and timezone before scheduling.
             - Never answer a current-time question from prior messages, summaries, or working memory.
             - Do not ask the user for timezone if `current_time` can provide it.

@@ -26,7 +26,7 @@ import kotlin.test.assertTrue
 
 class SchedulerBuiltInToolTest {
     @Test
-    fun schedulerSchemaIncludesCurrentTimeAction() {
+    fun schedulerSchemaIncludesCurrentTimeAndDelayActions() {
         val fixture = createToolFixture(
             nowInstants = listOf(Instant.parse("2026-03-11T09:00:00Z")),
         )
@@ -34,6 +34,8 @@ class SchedulerBuiltInToolTest {
         val registration = schedulerToolRegistration(fixture.service)
         assertContains(registration.definition.description, "current local time")
         assertContains(registration.definition.description, "current_time")
+        assertContains(registration.definition.description, "delay")
+        assertContains(registration.definition.description, "in 5 minutes")
         assertContains(registration.definition.description, "at 07:55")
         assertContains(registration.definition.description, "Do not ask the user for timezone")
         val enumValues = registration.definition.parametersSchema["properties"]
@@ -51,11 +53,29 @@ class SchedulerBuiltInToolTest {
             ?.jsonPrimitive
             ?.content
             .orEmpty()
+        val delayUnitValues = registration.definition.parametersSchema["properties"]
+            ?.jsonObject
+            ?.get("delay_unit")
+            ?.jsonObject
+            ?.get("enum")
+            ?.jsonArray
+            ?.map { value -> value.jsonPrimitive.content }
+        val delayAmountDescription = registration.definition.parametersSchema["properties"]
+            ?.jsonObject
+            ?.get("delay_amount")
+            ?.jsonObject
+            ?.get("description")
+            ?.jsonPrimitive
+            ?.content
+            .orEmpty()
 
-        assertEquals(listOf("create", "list", "cancel", "current_time"), enumValues)
+        assertEquals(listOf("create", "delay", "list", "cancel", "current_time"), enumValues)
+        assertEquals(listOf("minute", "minutes", "hour", "hours"), delayUnitValues)
         assertContains(actionDescription, "current time")
         assertContains(actionDescription, "current_time")
+        assertContains(actionDescription, "delay")
         assertContains(actionDescription, "at 07:55")
+        assertContains(delayAmountDescription, "Positive integer")
     }
 
     @Test
@@ -161,6 +181,131 @@ class SchedulerBuiltInToolTest {
         val job = result.structuredContent?.get("job")?.jsonObject ?: error("Missing job payload")
         assertEquals("once", job["schedule_type"]?.jsonPrimitive?.content)
         assertEquals("2026-03-11T10:00:00Z", job["run_at"]?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun delayActionCreatesOneShotJobForMinuteDelayAndReturnsStructuredContent() = runBlocking {
+        val fixture = createToolFixture(
+            nowInstants = listOf(Instant.parse("2026-03-11T09:00:00Z")),
+        )
+        val executor = SchedulerBuiltInToolExecutor(fixture.service)
+
+        val result = executor.execute(
+            buildJsonObject {
+                put("action", "delay")
+                put("prompt", "Send me a reminder")
+                put("label", "Reminder")
+                put("delay_amount", 5)
+                put("delay_unit", "minutes")
+            },
+        )
+
+        assertContains(result.content.single().jsonObject["text"]?.jsonPrimitive?.content.orEmpty(), "Scheduled")
+        assertEquals("delay", result.structuredContent?.get("action")?.jsonPrimitive?.content)
+        val job = result.structuredContent?.get("job")?.jsonObject ?: error("Missing job payload")
+        assertEquals("once", job["schedule_type"]?.jsonPrimitive?.content)
+        assertEquals("2026-03-11T09:05:00Z", job["run_at"]?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun delayActionCreatesOneShotJobForHourDelay() = runBlocking {
+        val fixture = createToolFixture(
+            nowInstants = listOf(Instant.parse("2026-03-11T09:00:00Z")),
+        )
+        val executor = SchedulerBuiltInToolExecutor(fixture.service)
+
+        val result = executor.execute(
+            buildJsonObject {
+                put("action", "delay")
+                put("prompt", "Send me a reminder")
+                put("delay_amount", 2)
+                put("delay_unit", "hour")
+            },
+        )
+
+        val job = result.structuredContent?.get("job")?.jsonObject ?: error("Missing job payload")
+        assertEquals("2026-03-11T11:00:00Z", job["run_at"]?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun delayActionAllowsScheduleTypeOncePlaceholder() = runBlocking {
+        val fixture = createToolFixture(
+            nowInstants = listOf(Instant.parse("2026-03-11T09:00:00Z")),
+        )
+        val executor = SchedulerBuiltInToolExecutor(fixture.service)
+
+        val result = executor.execute(
+            buildJsonObject {
+                put("action", "delay")
+                put("prompt", "Send me a reminder")
+                put("schedule_type", "once")
+                put("delay_amount", 5)
+                put("delay_unit", "minutes")
+            },
+        )
+
+        val job = result.structuredContent?.get("job")?.jsonObject ?: error("Missing job payload")
+        assertEquals("2026-03-11T09:05:00Z", job["run_at"]?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun delayActionRejectsInvalidAmountUnitAndMixedFields() = runBlocking {
+        val fixture = createToolFixture(
+            nowInstants = listOf(Instant.parse("2026-03-11T09:00:00Z")),
+        )
+        val executor = SchedulerBuiltInToolExecutor(fixture.service)
+
+        val nonPositiveAmount = assertFailsWith<IllegalArgumentException> {
+            executor.execute(
+                buildJsonObject {
+                    put("action", "delay")
+                    put("prompt", "Send me a reminder")
+                    put("delay_amount", 0)
+                    put("delay_unit", "minutes")
+                },
+            )
+        }
+        assertContains(nonPositiveAmount.message.orEmpty(), "positive")
+
+        val invalidUnit = assertFailsWith<IllegalArgumentException> {
+            executor.execute(
+                buildJsonObject {
+                    put("action", "delay")
+                    put("prompt", "Send me a reminder")
+                    put("delay_amount", 5)
+                    put("delay_unit", "day")
+                },
+            )
+        }
+        assertContains(invalidUnit.message.orEmpty(), "minute")
+
+        val invalidScheduleType = assertFailsWith<IllegalArgumentException> {
+            executor.execute(
+                buildJsonObject {
+                    put("action", "delay")
+                    put("prompt", "Send me a reminder")
+                    put("schedule_type", "repeat")
+                    put("delay_amount", 5)
+                    put("delay_unit", "minutes")
+                },
+            )
+        }
+        assertContains(invalidScheduleType.message.orEmpty(), "one-shot")
+
+        val mixedFields = assertFailsWith<IllegalArgumentException> {
+            executor.execute(
+                buildJsonObject {
+                    put("action", "delay")
+                    put("prompt", "Send me a reminder")
+                    put("delay_amount", 5)
+                    put("delay_unit", "minutes")
+                    put("run_at", "2026-03-11T10:00:00Z")
+                    put("interval_minutes", 15)
+                    put("schedule_id", "abc")
+                },
+            )
+        }
+        assertContains(mixedFields.message.orEmpty(), "does not accept")
     }
 
     @Test

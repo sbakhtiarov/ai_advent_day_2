@@ -197,6 +197,9 @@ class BuildPromptUseCaseTest {
         assertContains(result.contextSystemMessages[2], "Time handling policy:")
         assertContains(result.contextSystemMessages[2], "`scheduler` tool")
         assertContains(result.contextSystemMessages[2], "\"current_time\"")
+        assertContains(result.contextSystemMessages[2], "\"delay\"")
+        assertContains(result.contextSystemMessages[2], "delay_amount")
+        assertContains(result.contextSystemMessages[2], "delay_unit")
     }
 
     @Test
@@ -224,6 +227,37 @@ class BuildPromptUseCaseTest {
         assertContains(result.contextSystemMessages.single(), "Time handling policy:")
         assertContains(result.contextSystemMessages.single(), "at 07:55")
         assertContains(result.contextSystemMessages.single(), "Do not ask the user for timezone")
+    }
+
+    @Test
+    fun executeAddsSchedulerTimePolicyForRelativeSchedulePrompt() {
+        val result = useCase.execute(
+            request = BuildPromptRequest(
+                systemPrompt = "system prompt",
+                session = SessionPromptData(
+                    messages = emptyList(),
+                ),
+                userPrompt = "Schedule notification in 5 minutes.",
+                toolCapabilities = LlmToolCapabilities(
+                    privateTools = listOf(
+                        PrivateToolBinding(
+                            modelToolName = "scheduler",
+                            target = PrivateToolTarget.BuiltIn(toolId = "scheduler"),
+                            parametersSchema = buildJsonObject {},
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        assertEquals(1, result.contextSystemMessages.size)
+        assertContains(result.contextSystemMessages.single(), "Time handling policy:")
+        assertContains(result.contextSystemMessages.single(), "in 5 minutes")
+        assertContains(result.contextSystemMessages.single(), "\"delay\"")
+        assertContains(result.contextSystemMessages.single(), "delay_amount")
+        assertContains(result.contextSystemMessages.single(), "delay_unit")
+        assertContains(result.contextSystemMessages.single(), "omit `schedule_type`")
+        assertContains(result.contextSystemMessages.single(), "never reject the request as \"already passed\"")
     }
 
     @Test

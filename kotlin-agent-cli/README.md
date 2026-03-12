@@ -80,7 +80,8 @@ It sends a local macOS notification through `/usr/bin/osascript` with schema `{ 
 This tool is always available to the LLM in interactive mode, workflow turns, and one-shot `--prompt`, but it is not shown in `/mcp` and is not manually invokable from the CLI in v1.
 
 The agent also exposes a built-in private tool named `scheduler` to the model on macOS turns.
-It supports `action: "create" | "list" | "cancel" | "current_time"`, can schedule one-shot prompts with `run_at` or repeating prompts with `starts_at` + `interval_minutes`, and can report the current local user time with timezone-aware structured output.
+It supports `action: "create" | "delay" | "list" | "cancel" | "current_time"`, can schedule one-shot prompts with `run_at`, one-shot prompts relative to now with `delay_amount` + `delay_unit`, or repeating prompts with `starts_at` + `interval_minutes`, and can report the current local user time with timezone-aware structured output.
+The `delay` action is one-shot only and accepts `delay_unit` values `minute|minutes|hour|hours`.
 All scheduler timestamps use RFC3339 with an explicit UTC offset; repeating jobs schedule the first run at `starts_at` and then reschedule one future `launchd` trigger at a time without backfilling missed intervals.
 Scheduled runs are backed by macOS `launchd`, survive app exit/reboot, write to per-job log files, and send completion/failure notifications through the same local notification backend as `notify_user`.
 Like `notify_user`, this tool is model-only: it is not shown in `/mcp` and is not manually invokable from the interactive CLI in v1.

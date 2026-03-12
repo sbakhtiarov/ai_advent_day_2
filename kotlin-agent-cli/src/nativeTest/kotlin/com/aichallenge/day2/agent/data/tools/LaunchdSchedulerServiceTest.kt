@@ -28,6 +28,7 @@ import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -94,6 +95,61 @@ class LaunchdSchedulerServiceTest {
         assertEquals(ScheduledJobScheduleType.REPEAT, job.scheduleType)
         assertEquals(30, job.intervalMinutes)
         assertEquals(Instant.parse("2026-03-11T10:01:00Z"), job.nextRunAt)
+    }
+
+    @Test
+    fun createDelayedOneShotConvertsMinutesAndHoursAndDelegatesToOneShotFlow() {
+        val minuteFixture = createSchedulerFixture(
+            nowInstants = listOf(Instant.parse("2026-03-11T09:00:00Z")),
+        )
+        val minuteJob = minuteFixture.service.createDelayedOneShotJob(
+            prompt = "Notify me",
+            label = "In five",
+            delayAmount = 5,
+            delayUnit = "minutes",
+        )
+        assertEquals(ScheduledJobScheduleType.ONCE, minuteJob.scheduleType)
+        assertEquals(Instant.parse("2026-03-11T09:05:00Z"), minuteJob.runAt)
+        assertEquals(listOf(minuteJob.plistPath), minuteFixture.launchd.bootstrapPaths)
+        assertEquals(minuteJob, minuteFixture.store.jobs.single())
+
+        val hourFixture = createSchedulerFixture(
+            nowInstants = listOf(Instant.parse("2026-03-11T09:00:00Z")),
+        )
+        val hourJob = hourFixture.service.createDelayedOneShotJob(
+            prompt = "Notify me",
+            label = null,
+            delayAmount = 2,
+            delayUnit = "hour",
+        )
+        assertEquals(Instant.parse("2026-03-11T11:00:00Z"), hourJob.runAt)
+    }
+
+    @Test
+    fun createDelayedOneShotRejectsInvalidAmountAndUnit() {
+        val fixture = createSchedulerFixture(
+            nowInstants = listOf(Instant.parse("2026-03-11T09:00:00Z")),
+        )
+
+        val invalidAmount = assertFailsWith<IllegalArgumentException> {
+            fixture.service.createDelayedOneShotJob(
+                prompt = "Notify me",
+                label = null,
+                delayAmount = 0,
+                delayUnit = "minutes",
+            )
+        }
+        assertContains(invalidAmount.message.orEmpty(), "delay_amount")
+
+        val invalidUnit = assertFailsWith<IllegalArgumentException> {
+            fixture.service.createDelayedOneShotJob(
+                prompt = "Notify me",
+                label = null,
+                delayAmount = 5,
+                delayUnit = "days",
+            )
+        }
+        assertContains(invalidUnit.message.orEmpty(), "delay_unit")
     }
 
     @Test
