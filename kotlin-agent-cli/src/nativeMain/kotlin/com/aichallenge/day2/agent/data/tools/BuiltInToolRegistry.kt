@@ -73,6 +73,10 @@ class BuiltInToolRegistry(
                     notifyUserToolRegistration(notificationService),
                     schedulerToolRegistration(schedulerService),
                     saveToFileToolRegistration(runtimeEnvironment),
+                    convertToPdfToolRegistration(
+                        commandExecutor = commandExecutor,
+                        runtimeEnvironment = runtimeEnvironment,
+                    ),
                 ),
             )
         }

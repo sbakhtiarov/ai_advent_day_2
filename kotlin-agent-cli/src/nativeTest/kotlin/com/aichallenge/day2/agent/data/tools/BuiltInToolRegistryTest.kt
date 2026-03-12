@@ -12,7 +12,7 @@ class BuiltInToolRegistryTest {
         val bindings = BuiltInToolRegistry.createDefault().listPrivateToolBindings()
 
         assertEquals(
-            listOf("notify_user", "scheduler", "save_to_file"),
+            listOf("notify_user", "scheduler", "save_to_file", "convert_to_pdf"),
             bindings.map { binding -> binding.modelToolName },
         )
         assertEquals(bindings.size, bindings.map { binding -> binding.target }.distinct().size)
