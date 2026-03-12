@@ -1,9 +1,10 @@
+@file:OptIn(kotlin.time.ExperimentalTime::class)
+
 package com.aichallenge.day2.agent
 
 import com.aichallenge.day2.agent.core.config.AppConfig
 import com.aichallenge.day2.agent.core.config.ProfileEnvironmentFactsProvider
 import com.aichallenge.day2.agent.core.di.AppContainer
-import com.aichallenge.day2.agent.data.tools.BuiltInPrivateToolProvider
 import com.aichallenge.day2.agent.data.local.JsonFileProfileMemoryStore
 import com.aichallenge.day2.agent.data.local.JsonFileSessionMemoryStore
 import com.aichallenge.day2.agent.data.local.JsonFileInvariantConstraintStore
@@ -11,6 +12,10 @@ import com.aichallenge.day2.agent.data.local.JsonFileMcpServerStore
 import com.aichallenge.day2.agent.data.local.JsonFileUserDefinedProfileStore
 import com.aichallenge.day2.agent.data.local.JsonFileUserDefinedWorkflowStore
 import com.aichallenge.day2.agent.data.local.JsonFileWorkingMemoryStore
+import com.aichallenge.day2.agent.data.tools.BuiltInPrivateToolProvider
+import com.aichallenge.day2.agent.data.tools.LaunchdSchedulerService
+import com.aichallenge.day2.agent.data.tools.ScheduledJobRunnerResult
+import com.aichallenge.day2.agent.domain.model.AgentResponse
 import com.aichallenge.day2.agent.domain.model.RollingWindowCompactionStartPolicy
 import com.aichallenge.day2.agent.domain.model.SessionCompactionMode
 import com.aichallenge.day2.agent.domain.model.SlidingWindowCompactionStartPolicy
@@ -38,6 +43,11 @@ private suspend fun runApp(args: Array<String>): Int {
         return 0
     }
 
+    val scheduledJobId = parseScheduledJobArgument(args)
+    if (scheduledJobId != null) {
+        return runScheduledJobMode(scheduledJobId)
+    }
+
     val config = runCatching { AppConfig.fromEnvironment() }
         .getOrElse { error ->
             println("Configuration error: ${error.message}")
@@ -51,6 +61,44 @@ private suspend fun runApp(args: Array<String>): Int {
         return 1
     }
 
+    return runConfiguredApp(
+        config = config,
+        prompt = prompt,
+    )
+}
+
+private suspend fun runScheduledJobMode(scheduleId: String): Int {
+    val schedulerService = LaunchdSchedulerService.createDefault()
+    return runCatching {
+        schedulerService.runScheduledJob(scheduleId) { job ->
+            var responseText: String? = null
+            val config = runCatching { AppConfig.fromEnvironment() }
+                .getOrElse { error ->
+                    println("Configuration error: ${error.message}")
+                    printEnvironmentHelp()
+                    return@runScheduledJob ScheduledJobRunnerResult(exitCode = 1)
+                }
+            val exitCode = runConfiguredApp(
+                config = config,
+                prompt = job.prompt,
+                onSinglePromptSuccess = { response -> responseText = response.content },
+            )
+            ScheduledJobRunnerResult(
+                exitCode = exitCode,
+                assistantResponse = responseText,
+            )
+        }.exitCode
+    }.getOrElse { throwable ->
+        println("error> ${throwable.message ?: "Unexpected error"}")
+        1
+    }
+}
+
+private suspend fun runConfiguredApp(
+    config: AppConfig,
+    prompt: String?,
+    onSinglePromptSuccess: ((AgentResponse) -> Unit)? = null,
+): Int {
     val container = AppContainer(config)
     val sessionMemoryCompactionCoordinators = mapOf(
         SessionCompactionMode.ROLLING_SUMMARY to SessionMemoryCompactionCoordinator(
@@ -137,7 +185,10 @@ private suspend fun runApp(args: Array<String>): Int {
 
     return try {
         if (prompt != null) {
-            controller.runSinglePrompt(prompt)
+            controller.runSinglePrompt(
+                prompt = prompt,
+                onSuccess = onSinglePromptSuccess,
+            )
         } else {
             controller.runInteractive()
             0
@@ -153,6 +204,14 @@ private fun parsePromptArgument(args: Array<String>): String? {
         return null
     }
     return args.drop(index + 1).joinToString(separator = " ").trim()
+}
+
+private fun parseScheduledJobArgument(args: Array<String>): String? {
+    val index = args.indexOf("--run-scheduled-job")
+    if (index == -1) {
+        return null
+    }
+    return args.getOrNull(index + 1)?.trim()?.takeIf { value -> value.isNotEmpty() }
 }
 
 private fun printUsage() {

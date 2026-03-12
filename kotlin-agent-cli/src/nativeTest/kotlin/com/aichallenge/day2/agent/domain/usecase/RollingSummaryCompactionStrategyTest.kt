@@ -38,6 +38,8 @@ class RollingSummaryCompactionStrategyTest {
         assertEquals(2, conversation.size)
         assertEquals(MessageRole.SYSTEM, conversation[0].role)
         assertEquals(MessageRole.USER, conversation[1].role)
+        assertContains(conversation[0].content, "excludes volatile readouts that become stale quickly")
+        assertContains(conversation[0].content, "do not retain the exact clock reading")
 
         val userPrompt = conversation[1].content
         assertContains(userPrompt, "Previous summary:")

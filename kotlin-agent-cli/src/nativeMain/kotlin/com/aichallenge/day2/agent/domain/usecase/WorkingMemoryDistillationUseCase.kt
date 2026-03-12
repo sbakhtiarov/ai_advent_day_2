@@ -166,6 +166,8 @@ class WorkingMemoryDistillationUseCase(
             - All other keys must be arrays of strings.
             - Keep items concise and factual.
             - Remove duplicates, obsolete details, and empty strings.
+            - Do not store volatile readouts that become stale quickly, especially exact current-time answers.
+            - If the user asked for the current time, keep only durable context such as that time lookup was needed; do not retain the exact returned clock reading.
             - Do not invent facts.
         """.trimIndent()
     }

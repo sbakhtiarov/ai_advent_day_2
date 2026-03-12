@@ -12,10 +12,9 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.put
 
 private const val NOTIFY_USER_TOOL_ID = "notify_user"
-private const val OSASCRIPT_COMMAND = "/usr/bin/osascript"
 
 fun notifyUserToolRegistration(
-    commandExecutor: CommandExecutor,
+    notificationService: NotificationService,
 ): BuiltInToolRegistration {
     return BuiltInToolRegistration(
         definition = BuiltInToolDefinition(
@@ -47,48 +46,25 @@ fun notifyUserToolRegistration(
                 put("additionalProperties", false)
             },
         ),
-        executor = NotifyUserBuiltInToolExecutor(commandExecutor),
+        executor = NotifyUserBuiltInToolExecutor(notificationService),
     )
 }
 
 class NotifyUserBuiltInToolExecutor(
-    private val commandExecutor: CommandExecutor,
+    private val notificationService: NotificationService,
 ) : BuiltInToolExecutor {
     override suspend fun execute(arguments: JsonObject): PrivateToolResult {
         val message = requireStringArgument(arguments, "message")
         val title = optionalStringArgument(arguments, "title") ?: AppRuntimeInfo.APP_NAME
-        val result = commandExecutor.execute(
-            command = OSASCRIPT_COMMAND,
-            args = listOf(
-                "-e",
-                "on run argv",
-                "-e",
-                "set notificationMessage to item 1 of argv",
-                "-e",
-                "set notificationTitle to item 2 of argv",
-                "-e",
-                "display notification notificationMessage with title notificationTitle",
-                "-e",
-                "return \"Notification sent\"",
-                "-e",
-                "end run",
-                message,
-                title,
-            ),
-        )
-        if (result.exitCode != 0) {
-            val details = result.stderr.trim().ifEmpty { result.stdout.trim() }
-            val suffix = details.takeIf { it.isNotEmpty() }?.let { ": $it" }.orEmpty()
-            throw IllegalStateException("notify_user failed with exit code ${result.exitCode}$suffix")
-        }
+        val delivery = notificationService.send(message = message, title = title)
 
         return PrivateToolResult(
             isError = false,
             content = textContent("Notification sent"),
             structuredContent = buildJsonObject {
-                put("title", title)
-                put("message", message)
-                put("backend", "osascript")
+                put("title", delivery.title)
+                put("message", delivery.message)
+                put("backend", delivery.backend)
             },
         )
     }

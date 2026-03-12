@@ -2,6 +2,10 @@ package com.aichallenge.day2.agent.presentation.cli
 
 import com.aichallenge.day2.agent.core.config.ModelPricing
 import com.aichallenge.day2.agent.core.config.ModelProperties
+import com.aichallenge.day2.agent.data.tools.BuiltInPrivateToolProvider
+import com.aichallenge.day2.agent.data.tools.BuiltInToolDefinition
+import com.aichallenge.day2.agent.data.tools.BuiltInToolRegistration
+import com.aichallenge.day2.agent.data.tools.BuiltInToolRegistry
 import com.aichallenge.day2.agent.domain.model.AgentResponse
 import com.aichallenge.day2.agent.domain.model.BranchingMemoryState
 import com.aichallenge.day2.agent.domain.model.CompactedSessionSummary
@@ -17,6 +21,7 @@ import com.aichallenge.day2.agent.domain.model.McpToolCatalogState
 import com.aichallenge.day2.agent.domain.model.McpToolCatalogStatus
 import com.aichallenge.day2.agent.domain.model.McpToolDefinition
 import com.aichallenge.day2.agent.domain.model.McpTransportConfig
+import com.aichallenge.day2.agent.domain.model.PrivateToolResult
 import com.aichallenge.day2.agent.domain.model.PromptRequestData
 import com.aichallenge.day2.agent.domain.model.ProfilePreferenceState
 import com.aichallenge.day2.agent.domain.model.RollingWindowCompactionStartPolicy
@@ -45,6 +50,7 @@ import com.aichallenge.day2.agent.domain.usecase.SessionMemoryCompactionCoordina
 import com.aichallenge.day2.agent.domain.usecase.SendPromptUseCase
 import com.aichallenge.day2.agent.domain.usecase.SlidingWindowCompactionStrategy
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -3022,9 +3028,10 @@ class ConsoleChatControllerSessionMemoryTest {
         controller.runInteractive()
 
         assertEquals(2, repository.prompts.size)
-        assertEquals(2, repository.prompts[0].toolCapabilities.privateTools.size)
+        assertEquals(3, repository.prompts[0].toolCapabilities.privateTools.size)
         assertTrue(repository.prompts[0].toolCapabilities.publicMcpServers.isEmpty())
         assertTrue(repository.prompts[0].toolCapabilities.privateTools.any { tool -> tool.modelToolName == "notify_user" })
+        assertTrue(repository.prompts[0].toolCapabilities.privateTools.any { tool -> tool.modelToolName == "scheduler" })
         assertTrue(repository.prompts[1].toolCapabilities.isEmpty())
     }
 
@@ -3079,8 +3086,9 @@ class ConsoleChatControllerSessionMemoryTest {
         assertEquals(1, runtimeService.initializeCalls)
         assertEquals(1, repository.prompts.size)
         assertEquals(1, repository.prompts.single().toolCapabilities.publicMcpServers.size)
-        assertEquals(2, repository.prompts.single().toolCapabilities.privateTools.size)
+        assertEquals(3, repository.prompts.single().toolCapabilities.privateTools.size)
         assertTrue(repository.prompts.single().toolCapabilities.privateTools.any { tool -> tool.modelToolName == "notify_user" })
+        assertTrue(repository.prompts.single().toolCapabilities.privateTools.any { tool -> tool.modelToolName == "scheduler" })
         assertContains(io.outputText(), "one-shot answer")
     }
 
@@ -3099,8 +3107,55 @@ class ConsoleChatControllerSessionMemoryTest {
         val exitCode = controller.runSinglePrompt("notify me when this is done")
 
         assertEquals(0, exitCode)
-        assertEquals(listOf("notify_user"), repository.prompts.single().toolCapabilities.privateTools.map { tool -> tool.modelToolName })
+        assertEquals(
+            listOf("notify_user", "scheduler"),
+            repository.prompts.single().toolCapabilities.privateTools.map { tool -> tool.modelToolName },
+        )
         assertTrue(repository.prompts.single().toolCapabilities.publicMcpServers.isEmpty())
+    }
+
+    @Test
+    fun runSinglePromptInjectsResolvedCurrentTimeForLocalSchedulePrompt() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "one-shot answer")),
+            ),
+        )
+        val schedulerRecorder = RecordingCurrentTimeBuiltInTool()
+        val builtInPrivateToolProvider = BuiltInPrivateToolProvider(
+            BuiltInToolRegistry(
+                registrations = listOf(
+                    BuiltInToolRegistration(
+                        definition = BuiltInToolDefinition(
+                            toolId = "scheduler",
+                            modelToolName = "scheduler",
+                            description = "Scheduler test tool",
+                            parametersSchema = buildJsonObject {
+                                put("type", "object")
+                            },
+                        ),
+                        executor = schedulerRecorder::execute,
+                    ),
+                ),
+            ),
+        )
+        val controller = createController(
+            repository = repository,
+            io = FakeCliIO(inputs = emptyList()),
+            builtInPrivateToolProvider = builtInPrivateToolProvider,
+        )
+
+        val exitCode = controller.runSinglePrompt("Show me test notification at 07:55.")
+
+        assertEquals(0, exitCode)
+        assertEquals(1, schedulerRecorder.currentTimeCalls)
+        val promptConversation = repository.conversations.single()
+        val resolvedTimeMessage = promptConversation.firstOrNull { message ->
+            message.role == MessageRole.SYSTEM &&
+                message.content.contains("Resolved current local time for this turn")
+        } ?: error("Missing resolved current time system message.")
+        assertContains(resolvedTimeMessage.content, "2026-03-12T07:54:00+01:00")
+        assertContains(resolvedTimeMessage.content, "Europe/Berlin")
     }
 
     @Test
@@ -3197,8 +3252,9 @@ class ConsoleChatControllerSessionMemoryTest {
 
         assertEquals(2, runtimeService.initializeCalls)
         assertEquals(listOf(privateServer), runtimeService.initializeRequests[1])
-        assertEquals(2, repository.prompts.single().toolCapabilities.privateTools.size)
+        assertEquals(3, repository.prompts.single().toolCapabilities.privateTools.size)
         assertTrue(repository.prompts.single().toolCapabilities.privateTools.any { tool -> tool.modelToolName == "notify_user" })
+        assertTrue(repository.prompts.single().toolCapabilities.privateTools.any { tool -> tool.modelToolName == "scheduler" })
     }
 
     @Test
@@ -3242,8 +3298,9 @@ class ConsoleChatControllerSessionMemoryTest {
         controller.runInteractive()
 
         assertEquals(listOf(enabledServer), runtimeService.initializeRequests.last())
-        assertEquals(2, repository.prompts.single().toolCapabilities.privateTools.size)
+        assertEquals(3, repository.prompts.single().toolCapabilities.privateTools.size)
         assertTrue(repository.prompts.single().toolCapabilities.privateTools.any { tool -> tool.modelToolName == "notify_user" })
+        assertTrue(repository.prompts.single().toolCapabilities.privateTools.any { tool -> tool.modelToolName == "scheduler" })
     }
 
     @Test
@@ -4248,6 +4305,7 @@ class ConsoleChatControllerSessionMemoryTest {
         invariantConstraintStore: InvariantConstraintStore? = null,
         mcpServerStore: McpServerStore? = null,
         mcpRuntimeService: McpRuntimeService = RecordingMcpRuntimeService(),
+        builtInPrivateToolProvider: BuiltInPrivateToolProvider = BuiltInPrivateToolProvider(BuiltInToolRegistry.createDefault()),
         persistentMemoryEnabled: Boolean = true,
         fileReferenceReader: FileReferenceReader = RecordingFileReferenceReader(emptyMap()),
         compactionCoordinators: Map<SessionCompactionMode, SessionMemoryCompactionCoordinator> = mapOf(
@@ -4276,6 +4334,7 @@ class ConsoleChatControllerSessionMemoryTest {
             invariantConstraintStore = invariantConstraintStore,
             mcpServerStore = mcpServerStore,
             mcpRuntimeService = mcpRuntimeService,
+            builtInPrivateToolProvider = builtInPrivateToolProvider,
             persistentMemoryEnabled = persistentMemoryEnabled,
             fileReferenceReader = fileReferenceReader,
             compactionCoordinators = compactionCoordinators,
@@ -4301,6 +4360,42 @@ private class RecordingAgentRepository(
         val response = queuedResponses.removeFirstOrNull()
             ?: error("No prepared response for conversation #${conversations.size}")
         return response.getOrThrow()
+    }
+}
+
+private class RecordingCurrentTimeBuiltInTool {
+    var currentTimeCalls: Int = 0
+        private set
+
+    suspend fun execute(arguments: JsonObject): PrivateToolResult {
+        if (arguments["action"]?.jsonPrimitive?.content == "current_time") {
+            currentTimeCalls += 1
+        }
+        return PrivateToolResult(
+            isError = false,
+            content = JsonArray(
+                buildJsonArray {
+                    add(
+                        buildJsonObject {
+                            put("type", "text")
+                            put("text", "Current local time is 2026-03-12T07:54:00+01:00 in Europe/Berlin.")
+                        },
+                    )
+                },
+            ),
+            structuredContent = buildJsonObject {
+                put("action", "current_time")
+                put(
+                    "current_time",
+                    buildJsonObject {
+                        put("local_time", "2026-03-12T07:54:00+01:00")
+                        put("timezone", "Europe/Berlin")
+                        put("utc_time", "2026-03-12T06:54:00Z")
+                        put("unix_epoch_seconds", 1773298440)
+                    },
+                )
+            },
+        )
     }
 }
 

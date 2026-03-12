@@ -23,6 +23,7 @@ data class BuildPromptRequest(
     val workingTaskState: WorkingTaskState? = null,
     val profileMemoryState: ProfileMemoryState? = null,
     val toolCapabilities: LlmToolCapabilities = LlmToolCapabilities(),
+    val additionalContextSystemMessages: List<String> = emptyList(),
 )
 
 class BuildPromptUseCase {
@@ -37,10 +38,10 @@ class BuildPromptUseCase {
         }
         validateSessionMessages(session.messages)
 
-        val summaryContextMessage = session.summarySystemMessage
-            ?.trim()
-            ?.takeIf { summary -> summary.isNotEmpty() }
-        val workingMemoryContextMessage = buildWorkingMemorySystemMessage(workingTaskState)
+        val summaryContextMessage = sanitizeSummarySystemMessage(session.summarySystemMessage)
+        val workingMemoryContextMessage = buildWorkingMemorySystemMessage(
+            sanitizeWorkingTaskState(workingTaskState),
+        )
         val profileMemoryPolicyContextMessage = buildProfileMemoryPolicySystemMessage(profileMemoryState)
         val profileMemoryContextMessage = buildProfileMemorySystemMessage(profileMemoryState)
         val contextSystemMessages = buildList {
@@ -68,9 +69,17 @@ class BuildPromptUseCase {
             workingTaskState = request.workingTaskState,
             profileMemoryState = request.profileMemoryState,
         )
+        val timeToolPolicyContextMessage = buildTimeToolPolicySystemMessage(
+            toolCapabilities = request.toolCapabilities,
+            userPrompt = request.userPrompt,
+        )
         return PromptRequestData(
             systemPrompt = context.systemPrompt,
-            contextSystemMessages = context.contextSystemMessages,
+            contextSystemMessages = buildList {
+                addAll(context.contextSystemMessages)
+                addAll(request.additionalContextSystemMessages.map { message -> message.trim() }.filter { message -> message.isNotEmpty() })
+                timeToolPolicyContextMessage?.let { policy -> add(policy) }
+            },
             messages = context.messages + ConversationMessage.user(request.userPrompt),
             toolCapabilities = request.toolCapabilities,
         )
@@ -267,6 +276,121 @@ class BuildPromptUseCase {
         """.trimIndent()
     }
 
+    private fun sanitizeSummarySystemMessage(summarySystemMessage: String?): String? {
+        val trimmed = summarySystemMessage?.trim().orEmpty()
+        if (trimmed.isEmpty()) {
+            return null
+        }
+
+        val prefix = "Conversation summary from previous compacted turns:"
+        if (!trimmed.startsWith(prefix)) {
+            return trimmed.takeIf { !containsVolatileCurrentTimeFact(it) }
+        }
+
+        val summaryBody = trimmed.removePrefix(prefix).trim()
+        val sanitizedBody = summarySentenceBoundaryRegex.split(summaryBody)
+            .map { sentence -> sentence.trim() }
+            .filter { sentence -> sentence.isNotEmpty() }
+            .filterNot(::containsVolatileCurrentTimeFact)
+            .joinToString(separator = " ")
+            .trim()
+
+        return when {
+            sanitizedBody.isEmpty() -> null
+            else -> "$prefix\n$sanitizedBody"
+        }
+    }
+
+    private fun sanitizeWorkingTaskState(workingTaskState: WorkingTaskState?): WorkingTaskState? {
+        if (workingTaskState == null) {
+            return null
+        }
+
+        return WorkingTaskState(
+            goal = sanitizeWorkingMemoryValue(workingTaskState.goal),
+            constraints = sanitizeWorkingMemoryValues(workingTaskState.constraints),
+            decisions = sanitizeWorkingMemoryValues(workingTaskState.decisions),
+            assumptions = sanitizeWorkingMemoryValues(workingTaskState.assumptions),
+            openQuestions = sanitizeWorkingMemoryValues(workingTaskState.openQuestions),
+            nextSteps = sanitizeWorkingMemoryValues(workingTaskState.nextSteps),
+            artifacts = sanitizeWorkingMemoryValues(workingTaskState.artifacts),
+        )
+    }
+
+    private fun sanitizeWorkingMemoryValue(value: String): String {
+        val normalized = value.trim()
+        return if (containsVolatileCurrentTimeFact(normalized)) {
+            ""
+        } else {
+            normalized
+        }
+    }
+
+    private fun sanitizeWorkingMemoryValues(values: List<String>): List<String> {
+        return normalizeNonEmptyDistinct(values)
+            .filterNot(::containsVolatileCurrentTimeFact)
+    }
+
+    private fun buildTimeToolPolicySystemMessage(
+        toolCapabilities: LlmToolCapabilities,
+        userPrompt: String,
+    ): String? {
+        val schedulerAvailable = toolCapabilities.privateTools.any { tool ->
+            tool.modelToolName == SCHEDULER_TOOL_NAME
+        }
+        if (!schedulerAvailable || !isTimeSensitivePrompt(userPrompt)) {
+            return null
+        }
+
+        return """
+            Time handling policy:
+            - Exact current-time readings are volatile and may be stale in summaries or memory.
+            - When the user asks for the current time, local time, or what time it is, call the `scheduler` tool with `action: "current_time"`.
+            - When the user gives a local wall-clock time without an explicit timezone or date, such as `at 07:55`, call `scheduler` with `action: "current_time"` first to resolve the user's local date and timezone before scheduling.
+            - Never answer a current-time question from prior messages, summaries, or working memory.
+            - Do not ask the user for timezone if `current_time` can provide it.
+            - Use previously mentioned timestamps only as historical context or explicit schedule targets.
+        """.trimIndent()
+    }
+
+    private fun containsVolatileCurrentTimeFact(value: String): Boolean {
+        if (value.isBlank()) {
+            return false
+        }
+
+        val mentionsCurrentTime = currentTimeMarkers.any { marker ->
+            value.contains(marker, ignoreCase = true)
+        }
+        return mentionsCurrentTime && timestampLikeRegex.containsMatchIn(value)
+    }
+
+    private fun isTimeSensitivePrompt(userPrompt: String): Boolean {
+        if (userPrompt.isBlank()) {
+            return false
+        }
+
+        val normalized = userPrompt.lowercase()
+        return timeSensitivePromptMarkers.any { marker ->
+            marker in normalized
+        } || relativeScheduleRegex.containsMatchIn(normalized) || requiresLocalScheduleResolution(normalized)
+    }
+
+    private fun requiresLocalScheduleResolution(userPrompt: String): Boolean {
+        val hasLocalClockTime = localWallClockTimeRegex.containsMatchIn(userPrompt)
+        if (!hasLocalClockTime) {
+            return false
+        }
+
+        val hasExplicitTimeZone = explicitTimeZoneRegex.containsMatchIn(userPrompt)
+        if (hasExplicitTimeZone) {
+            return false
+        }
+
+        return scheduleIntentMarkers.any { marker ->
+            marker in userPrompt
+        }
+    }
+
     private fun normalizeNonEmptyDistinct(values: List<String>): List<String> {
         return values.map { value -> value.trim() }
             .filter { value -> value.isNotEmpty() }
@@ -274,9 +398,45 @@ class BuildPromptUseCase {
     }
 
     companion object {
+        private const val SCHEDULER_TOOL_NAME = "scheduler"
         private val json: Json = Json {
             prettyPrint = false
             encodeDefaults = false
         }
+        private val summarySentenceBoundaryRegex = Regex("(?<=[.!?])\\s+")
+        private val currentTimeMarkers = listOf(
+            "current local time",
+            "current time",
+            "what time it is",
+        )
+        private val timeSensitivePromptMarkers = listOf(
+            "current local time",
+            "current time",
+            "local time",
+            "what time is it",
+            "what is my time",
+            "what time",
+            "from now",
+        )
+        private val scheduleIntentMarkers = listOf(
+            "notify",
+            "notification",
+            "schedule",
+            "remind",
+            "reminder",
+            "show me",
+            "send me",
+            "update",
+        )
+        private val relativeScheduleRegex = Regex("""\bin\s+\d+\s+(minute|minutes|hour|hours)\b""")
+        private val localWallClockTimeRegex = Regex("""\b(?:at\s+)?\d{1,2}:\d{2}\b""")
+        private val explicitTimeZoneRegex = Regex(
+            """\b(?:utc|gmt|cet|cest|eet|eest|pst|pdt|mst|mdt|cst|cdt|est|edt|[a-z_]+/[a-z_]+)\b|[+-]\d{2}:\d{2}\b|\bz\b""",
+            RegexOption.IGNORE_CASE,
+        )
+        private val timestampLikeRegex = Regex(
+            pattern = """\b\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?(?:[A-Za-z_./+-]+)?\b|\b\d{1,2}:\d{2}(?::\d{2})?\b""",
+            option = RegexOption.IGNORE_CASE,
+        )
     }
 }

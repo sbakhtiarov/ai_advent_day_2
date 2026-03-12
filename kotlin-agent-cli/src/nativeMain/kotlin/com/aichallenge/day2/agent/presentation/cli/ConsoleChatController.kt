@@ -212,7 +212,10 @@ class ConsoleChatController(
         io.writeLine("bye")
     }
 
-    suspend fun runSinglePrompt(prompt: String): Int {
+    suspend fun runSinglePrompt(
+        prompt: String,
+        onSuccess: ((AgentResponse) -> Unit)? = null,
+    ): Int {
         if (prompt.isBlank()) {
             io.writeLine("error> --prompt must not be empty")
             return 1
@@ -231,6 +234,7 @@ class ConsoleChatController(
                 validateInvariantConstraints = true,
                 toolCapabilities = toolContext.capabilities,
             )
+            onSuccess?.invoke(response)
             val elapsedSeconds = startedAt.elapsedNow().inWholeMilliseconds / 1000.0
             io.writeLine(formatAssistantResponse(response.content, response.usage, elapsedSeconds))
             0
@@ -1258,6 +1262,7 @@ class ConsoleChatController(
         requestPrompt: String,
         effectiveSystemPrompt: String,
         toolCapabilities: LlmToolCapabilities,
+        additionalContextSystemMessages: List<String> = emptyList(),
     ): AgentResponse {
         val effectivePromptWithInvariants = augmentSystemPromptWithInvariants(effectiveSystemPrompt)
         val promptRequest = buildPromptUseCase.execute(
@@ -1268,6 +1273,7 @@ class ConsoleChatController(
                 workingTaskState = workingMemoryState?.taskState,
                 profileMemoryState = effectiveProfileMemoryState(),
                 toolCapabilities = toolCapabilities,
+                additionalContextSystemMessages = additionalContextSystemMessages,
             ),
         )
         val response = sendPromptUseCase.execute(
@@ -1281,6 +1287,7 @@ class ConsoleChatController(
         requestPrompt: String,
         effectiveSystemPrompt: String,
         toolCapabilities: LlmToolCapabilities,
+        additionalContextSystemMessages: List<String> = emptyList(),
     ): AgentResponse {
         val effectivePromptWithInvariants = augmentSystemPromptWithInvariants(effectiveSystemPrompt)
         val contextWindow = modelById[currentModel]?.contextWindowTokens
@@ -1295,6 +1302,7 @@ class ConsoleChatController(
                         workingTaskState = workingMemoryState?.taskState,
                         profileMemoryState = effectiveProfileMemoryState(),
                         toolCapabilities = toolCapabilities,
+                        additionalContextSystemMessages = additionalContextSystemMessages,
                     ),
                 )
                 estimateSessionTokensHeuristically(promptRequest.toConversation())
@@ -1308,6 +1316,7 @@ class ConsoleChatController(
                 workingTaskState = workingMemoryState?.taskState,
                 profileMemoryState = effectiveProfileMemoryState(),
                 toolCapabilities = toolCapabilities,
+                additionalContextSystemMessages = additionalContextSystemMessages,
             ),
         )
         val response = sendPromptUseCase.execute(
@@ -1323,6 +1332,10 @@ class ConsoleChatController(
         validateInvariantConstraints: Boolean,
         toolCapabilities: LlmToolCapabilities = LlmToolCapabilities(),
     ): AgentResponse {
+        val additionalContextSystemMessages = buildPromptSpecificSystemMessages(
+            requestPrompt = requestPrompt,
+            toolCapabilities = toolCapabilities,
+        )
         val maxAttempts = if (validateInvariantConstraints) {
             INVARIANT_VALIDATION_MAX_RETRIES + 1
         } else {
@@ -1337,12 +1350,14 @@ class ConsoleChatController(
                     requestPrompt = currentPrompt,
                     effectiveSystemPrompt = effectiveSystemPrompt,
                     toolCapabilities = toolCapabilities,
+                    additionalContextSystemMessages = additionalContextSystemMessages,
                 )
             } else {
                 executeLinearTurn(
                     requestPrompt = currentPrompt,
                     effectiveSystemPrompt = effectiveSystemPrompt,
                     toolCapabilities = toolCapabilities,
+                    additionalContextSystemMessages = additionalContextSystemMessages,
                 )
             }
 
@@ -1393,6 +1408,80 @@ class ConsoleChatController(
                 stoppedOnUserViolation = false,
             ),
         )
+    }
+
+    private suspend fun buildPromptSpecificSystemMessages(
+        requestPrompt: String,
+        toolCapabilities: LlmToolCapabilities,
+    ): List<String> {
+        val resolvedCurrentTimeMessage = resolveCurrentTimeSystemMessage(
+            requestPrompt = requestPrompt,
+            toolCapabilities = toolCapabilities,
+        )
+        return listOfNotNull(resolvedCurrentTimeMessage)
+    }
+
+    private suspend fun resolveCurrentTimeSystemMessage(
+        requestPrompt: String,
+        toolCapabilities: LlmToolCapabilities,
+    ): String? {
+        if (!shouldResolveCurrentTimeForPrompt(requestPrompt, toolCapabilities)) {
+            return null
+        }
+
+        val result = runCatching {
+            builtInPrivateToolProvider.execute(
+                toolId = SCHEDULER_TOOL_ID,
+                arguments = buildJsonObject {
+                    put("action", "current_time")
+                },
+            )
+        }.getOrNull() ?: return null
+        val currentTime = result.structuredContent
+            ?.get("current_time")
+            ?.jsonObject
+            ?: return null
+        val localTime = currentTime["local_time"]?.jsonPrimitive?.contentOrNull ?: return null
+        val timeZone = currentTime["timezone"]?.jsonPrimitive?.contentOrNull ?: return null
+        val utcTime = currentTime["utc_time"]?.jsonPrimitive?.contentOrNull ?: return null
+
+        return """
+            Resolved current local time for this turn (live scheduler lookup):
+            - local_time: $localTime
+            - timezone: $timeZone
+            - utc_time: $utcTime
+            Use this live time to interpret current-time questions and local wall-clock scheduling requests in this turn.
+        """.trimIndent()
+    }
+
+    private fun shouldResolveCurrentTimeForPrompt(
+        requestPrompt: String,
+        toolCapabilities: LlmToolCapabilities,
+    ): Boolean {
+        val schedulerAvailable = toolCapabilities.privateTools.any { tool ->
+            tool.modelToolName == SCHEDULER_MODEL_TOOL_NAME
+        }
+        if (!schedulerAvailable || requestPrompt.isBlank()) {
+            return false
+        }
+
+        val normalizedPrompt = requestPrompt.lowercase()
+        val asksForCurrentTime = currentTimePromptMarkers.any { marker ->
+            marker in normalizedPrompt
+        }
+        if (asksForCurrentTime) {
+            return true
+        }
+
+        val hasLocalClockTime = localWallClockTimeRegex.containsMatchIn(normalizedPrompt)
+        val hasScheduleIntent = scheduleIntentPromptMarkers.any { marker ->
+            marker in normalizedPrompt
+        }
+        if (hasLocalClockTime && hasScheduleIntent && !explicitTimeZoneRegex.containsMatchIn(normalizedPrompt)) {
+            return true
+        }
+
+        return relativeSchedulePromptRegex.containsMatchIn(normalizedPrompt)
     }
 
     private suspend fun applyAcceptedTurnSideEffects(
@@ -3200,7 +3289,33 @@ class ConsoleChatController(
             prettyPrint = true
         }
         private val EMPTY_JSON_OBJECT = buildJsonObject {}
+        private const val SCHEDULER_TOOL_ID = "scheduler"
+        private const val SCHEDULER_MODEL_TOOL_NAME = "scheduler"
         private const val MCP_TOOL_COMMAND_USAGE = "system> usage: /mcp <server-index> <tool-name> [json-object-args]"
+        private val currentTimePromptMarkers = listOf(
+            "current local time",
+            "current time",
+            "local time",
+            "what time is it",
+            "what is my time",
+            "what time",
+        )
+        private val scheduleIntentPromptMarkers = listOf(
+            "notify",
+            "notification",
+            "schedule",
+            "remind",
+            "reminder",
+            "show me",
+            "send me",
+            "update",
+        )
+        private val relativeSchedulePromptRegex = Regex("""\bin\s+\d+\s+(minute|minutes|hour|hours)\b""")
+        private val localWallClockTimeRegex = Regex("""\b(?:at\s+)?\d{1,2}:\d{2}\b""")
+        private val explicitTimeZoneRegex = Regex(
+            """\b(?:utc|gmt|cet|cest|eet|eest|pst|pdt|mst|mdt|cst|cdt|est|edt|[a-z_]+/[a-z_]+)\b|[+-]\d{2}:\d{2}\b|\bz\b""",
+            RegexOption.IGNORE_CASE,
+        )
         private val WORKFLOW_STEP_RESPONSE_CONTRACT_PROMPT = """
             Response format contract:
             - Return only valid JSON object with keys:

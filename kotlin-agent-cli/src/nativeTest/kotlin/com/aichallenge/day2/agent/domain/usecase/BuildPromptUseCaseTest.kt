@@ -1,11 +1,15 @@
 package com.aichallenge.day2.agent.domain.usecase
 
 import com.aichallenge.day2.agent.domain.model.ConversationMessage
+import com.aichallenge.day2.agent.domain.model.LlmToolCapabilities
 import com.aichallenge.day2.agent.domain.model.ProfileEnvironmentFacts
 import com.aichallenge.day2.agent.domain.model.ProfileMemoryState
 import com.aichallenge.day2.agent.domain.model.ProfilePreferenceState
+import com.aichallenge.day2.agent.domain.model.PrivateToolBinding
+import com.aichallenge.day2.agent.domain.model.PrivateToolTarget
 import com.aichallenge.day2.agent.domain.model.PromptRequestData
 import com.aichallenge.day2.agent.domain.model.WorkingTaskState
+import kotlinx.serialization.json.buildJsonObject
 import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
@@ -134,6 +138,92 @@ class BuildPromptUseCaseTest {
         )
 
         assertEquals(listOf("summary block"), result.contextSystemMessages)
+    }
+
+    @Test
+    fun executeStripsVolatileCurrentTimeFactsAndAddsSchedulerTimePolicy() {
+        val result = useCase.execute(
+            request = BuildPromptRequest(
+                systemPrompt = "system prompt",
+                session = SessionPromptData(
+                    messages = listOf(
+                        ConversationMessage.user("What time is it?"),
+                        ConversationMessage.assistant("The current local time is 2026-03-12 00:34:14 Europe/Berlin."),
+                    ),
+                    summarySystemMessage = """
+                        Conversation summary from previous compacted turns:
+                        User requested the current time, which is 2026-03-12 00:34:14 Europe/Berlin. User scheduled a Berlin weather update for 01:06 Europe/Berlin time.
+                    """.trimIndent(),
+                ),
+                userPrompt = "What is my current local time?",
+                workingTaskState = WorkingTaskState(
+                    goal = "Provide accurate current time and weather information upon request",
+                    decisions = listOf(
+                        "Scheduled Berlin weather update notification for 01:06 Europe/Berlin time",
+                        "Provided current local time response: 2026-03-12 00:34:14 Europe/Berlin",
+                    ),
+                    artifacts = listOf(
+                        "Current local time response: 2026-03-12 00:34:14 Europe/Berlin",
+                        "Scheduled Berlin weather update notification for 01:06 Europe/Berlin time",
+                    ),
+                ),
+                toolCapabilities = LlmToolCapabilities(
+                    privateTools = listOf(
+                        PrivateToolBinding(
+                            modelToolName = "scheduler",
+                            target = PrivateToolTarget.BuiltIn(toolId = "scheduler"),
+                            parametersSchema = buildJsonObject {},
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        assertEquals(3, result.contextSystemMessages.size)
+        assertContains(
+            result.contextSystemMessages[0],
+            "User scheduled a Berlin weather update for 01:06 Europe/Berlin time.",
+        )
+        assertFalse(result.contextSystemMessages[0].contains("00:34:14"))
+        assertContains(
+            result.contextSystemMessages[1],
+            "\"decisions\":[\"Scheduled Berlin weather update notification for 01:06 Europe/Berlin time\"]",
+        )
+        assertContains(
+            result.contextSystemMessages[1],
+            "\"artifacts\":[\"Scheduled Berlin weather update notification for 01:06 Europe/Berlin time\"]",
+        )
+        assertFalse(result.contextSystemMessages[1].contains("00:34:14"))
+        assertContains(result.contextSystemMessages[2], "Time handling policy:")
+        assertContains(result.contextSystemMessages[2], "`scheduler` tool")
+        assertContains(result.contextSystemMessages[2], "\"current_time\"")
+    }
+
+    @Test
+    fun executeAddsSchedulerTimePolicyForLocalScheduleTimeWithoutTimezone() {
+        val result = useCase.execute(
+            request = BuildPromptRequest(
+                systemPrompt = "system prompt",
+                session = SessionPromptData(
+                    messages = emptyList(),
+                ),
+                userPrompt = "Show me test notification at 07:55.",
+                toolCapabilities = LlmToolCapabilities(
+                    privateTools = listOf(
+                        PrivateToolBinding(
+                            modelToolName = "scheduler",
+                            target = PrivateToolTarget.BuiltIn(toolId = "scheduler"),
+                            parametersSchema = buildJsonObject {},
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        assertEquals(1, result.contextSystemMessages.size)
+        assertContains(result.contextSystemMessages.single(), "Time handling policy:")
+        assertContains(result.contextSystemMessages.single(), "at 07:55")
+        assertContains(result.contextSystemMessages.single(), "Do not ask the user for timezone")
     }
 
     @Test

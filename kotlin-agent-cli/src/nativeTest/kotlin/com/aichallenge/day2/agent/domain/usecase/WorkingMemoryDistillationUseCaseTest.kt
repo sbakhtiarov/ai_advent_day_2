@@ -64,6 +64,9 @@ class WorkingMemoryDistillationUseCaseTest {
         assertContains(promptMessage, "Recent messages:")
         assertContains(promptMessage, "USER: User asks to add a memory layer")
         assertContains(promptMessage, "ASSISTANT: Assistant confirms implementation path")
+        val systemPrompt = repository.conversations.single()[0].content
+        assertContains(systemPrompt, "Do not store volatile readouts that become stale quickly")
+        assertContains(systemPrompt, "do not retain the exact returned clock reading")
     }
 
     @Test

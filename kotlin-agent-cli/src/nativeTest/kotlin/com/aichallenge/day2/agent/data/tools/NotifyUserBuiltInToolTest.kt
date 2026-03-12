@@ -13,7 +13,9 @@ import kotlin.test.assertFailsWith
 class NotifyUserBuiltInToolTest {
     @Test
     fun executeRequiresNonBlankMessage() = runBlocking {
-        val executor = NotifyUserBuiltInToolExecutor(FakeCommandExecutor())
+        val executor = NotifyUserBuiltInToolExecutor(
+            MacOsNotificationService(FakeCommandExecutor()),
+        )
 
         val error = assertFailsWith<IllegalArgumentException> {
             executor.execute(
@@ -29,7 +31,9 @@ class NotifyUserBuiltInToolTest {
     @Test
     fun executeDefaultsTitleWhenMissingOrBlank() = runBlocking {
         val commandExecutor = FakeCommandExecutor()
-        val executor = NotifyUserBuiltInToolExecutor(commandExecutor)
+        val executor = NotifyUserBuiltInToolExecutor(
+            MacOsNotificationService(commandExecutor),
+        )
 
         val result = executor.execute(
             buildJsonObject {
@@ -47,7 +51,9 @@ class NotifyUserBuiltInToolTest {
     @Test
     fun executePassesMessageAndTitleAsRawArguments() = runBlocking {
         val commandExecutor = FakeCommandExecutor()
-        val executor = NotifyUserBuiltInToolExecutor(commandExecutor)
+        val executor = NotifyUserBuiltInToolExecutor(
+            MacOsNotificationService(commandExecutor),
+        )
         val message = "Line 1 \"quoted\"\nLine 2 \\slash"
         val title = "Heads \"up\""
 
@@ -67,11 +73,13 @@ class NotifyUserBuiltInToolTest {
     @Test
     fun executeSurfacesNonZeroExit() = runBlocking {
         val executor = NotifyUserBuiltInToolExecutor(
-            FakeCommandExecutor(
-                result = CommandExecutionResult(
-                    exitCode = 1,
-                    stdout = "",
-                    stderr = "execution error",
+            MacOsNotificationService(
+                FakeCommandExecutor(
+                    result = CommandExecutionResult(
+                        exitCode = 1,
+                        stdout = "",
+                        stderr = "execution error",
+                    ),
                 ),
             ),
         )

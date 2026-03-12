@@ -79,6 +79,12 @@ The agent also exposes a built-in private tool named `notify_user` to the model 
 It sends a local macOS notification through `/usr/bin/osascript` with schema `{ "message": string, "title"?: string }`.
 This tool is always available to the LLM in interactive mode, workflow turns, and one-shot `--prompt`, but it is not shown in `/mcp` and is not manually invokable from the CLI in v1.
 
+The agent also exposes a built-in private tool named `scheduler` to the model on macOS turns.
+It supports `action: "create" | "list" | "cancel" | "current_time"`, can schedule one-shot prompts with `run_at` or repeating prompts with `starts_at` + `interval_minutes`, and can report the current local user time with timezone-aware structured output.
+All scheduler timestamps use RFC3339 with an explicit UTC offset; repeating jobs schedule the first run at `starts_at` and then reschedule one future `launchd` trigger at a time without backfilling missed intervals.
+Scheduled runs are backed by macOS `launchd`, survive app exit/reboot, write to per-job log files, and send completion/failure notifications through the same local notification backend as `notify_user`.
+Like `notify_user`, this tool is model-only: it is not shown in `/mcp` and is not manually invokable from the interactive CLI in v1.
+
 Interactive mode:
 
 ```bash
@@ -90,6 +96,8 @@ One-shot mode:
 ```bash
 ./build/bin/native/releaseExecutable/agent-cli.kexe --prompt "Summarize this architecture"
 ```
+
+Internal scheduled runs reuse the same one-shot pipeline through a hidden `--run-scheduled-job <schedule-id>` mode that is intended for `launchd`, not for interactive use.
 
 Each assistant reply includes token usage in this format:
 
@@ -115,6 +123,9 @@ time> <seconds> s
 - MCP server configuration is loaded from `~/.kotlin-agent-cli/mcp-servers.json`.
 - MCP server entries use explicit transport types: `http` (`url`) or `stdio` (`command` + `args`).
 - Legacy URL-only MCP entries are still accepted on load and are rewritten to the explicit `type` format on the next save.
+- Scheduled jobs are persisted in `~/.kotlin-agent-cli/scheduled-jobs.json`.
+- Scheduler run logs are written to `~/.kotlin-agent-cli/scheduler-logs/<schedule-id>.log`.
+- Scheduler `launchd` definitions are written to `~/Library/LaunchAgents/com.aichallenge.day2.agent.scheduler.<schedule-id>.plist`.
 - Invariant constraints are persisted independently in `~/.kotlin-agent-cli/invariant-constraints.json`.
 - All user-visible assistant responses (interactive, workflow planning/execution, and one-shot `--prompt`) are validated against invariant constraints when configured.
 - Invariant constraints are also injected into each model prompt as strict system-level requirements (normalized to `[Strict] ...` entries).

@@ -1,3 +1,5 @@
+@file:OptIn(kotlin.time.ExperimentalTime::class)
+
 package com.aichallenge.day2.agent.data.tools
 
 import com.aichallenge.day2.agent.domain.model.PrivateToolBinding
@@ -57,9 +59,15 @@ class BuiltInToolRegistry(
         fun createDefault(
             commandExecutor: CommandExecutor = PosixCommandExecutor(),
         ): BuiltInToolRegistry {
+            val notificationService = MacOsNotificationService(commandExecutor)
+            val schedulerService = LaunchdSchedulerService.createDefault(
+                commandExecutor = commandExecutor,
+                notificationService = notificationService,
+            )
             return BuiltInToolRegistry(
                 registrations = listOf(
-                    notifyUserToolRegistration(commandExecutor),
+                    notifyUserToolRegistration(notificationService),
+                    schedulerToolRegistration(schedulerService),
                 ),
             )
         }
@@ -70,4 +78,8 @@ class BuiltInPrivateToolProvider(
     private val registry: BuiltInToolRegistry,
 ) {
     fun loadTools(): List<PrivateToolBinding> = registry.listPrivateToolBindings()
+
+    suspend fun execute(toolId: String, arguments: JsonObject): PrivateToolResult {
+        return registry.execute(toolId, arguments)
+    }
 }

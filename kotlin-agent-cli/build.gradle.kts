@@ -13,6 +13,7 @@ repositories {
 val ktorVersion = "3.3.3"
 val coroutinesVersion = "1.10.2"
 val serializationVersion = "1.9.0"
+val datetimeVersion = "0.7.1"
 val mcpSdkVersion = "0.8.4"
 
 kotlin {
@@ -41,6 +42,7 @@ kotlin {
                 implementation("io.modelcontextprotocol:kotlin-sdk-client:$mcpSdkVersion")
                 implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:$coroutinesVersion")
                 implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:$serializationVersion")
+                implementation("org.jetbrains.kotlinx:kotlinx-datetime:$datetimeVersion")
             }
         }
 

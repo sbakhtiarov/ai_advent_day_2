@@ -74,7 +74,9 @@ class RollingSummaryCompactionStrategy(
             - preserves key facts, decisions, and user preferences,
             - preserves unresolved questions and next steps,
             - removes repetition and obsolete details,
+            - excludes volatile readouts that become stale quickly, especially exact "current time" answers,
             - stays concise and factual.
+            If the conversation includes a current-time answer, summarize only that the user asked about the time or that time-sensitive scheduling happened; do not retain the exact clock reading.
             Output only the updated summary text.
         """.trimIndent()
     }
