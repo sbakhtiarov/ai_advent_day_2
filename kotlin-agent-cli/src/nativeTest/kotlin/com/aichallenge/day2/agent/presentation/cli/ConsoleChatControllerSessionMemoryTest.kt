@@ -34,6 +34,8 @@ import com.aichallenge.day2.agent.domain.model.SlidingWindowCompactionStartPolic
 import com.aichallenge.day2.agent.domain.model.SubtopicBranchState
 import com.aichallenge.day2.agent.domain.model.TokenUsage
 import com.aichallenge.day2.agent.domain.model.TopicBranchState
+import com.aichallenge.day2.agent.domain.model.ToolCallTraceEvent
+import com.aichallenge.day2.agent.domain.model.ToolCallTraceObserver
 import com.aichallenge.day2.agent.domain.model.UserProfileOption
 import com.aichallenge.day2.agent.domain.model.UserWorkflowDefinition
 import com.aichallenge.day2.agent.domain.model.UserWorkflowOption
@@ -198,6 +200,65 @@ class ConsoleChatControllerSessionMemoryTest {
         assertEquals(1, io.hideThinkingIndicatorCalls)
         assertTrue(io.updateThinkingIndicatorCalls >= 1)
         assertContains(io.lastThinkingProgressText.orEmpty(), "s")
+    }
+
+    @Test
+    fun llmToolCallsAreShownLiveAndPersistedBeforeAssistantResponse() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "answer one")),
+            ),
+            toolTraceEvents = listOf(
+                listOf(
+                    ToolCallTraceEvent.Started(toolLabel = "built-in 'scheduler'"),
+                ),
+            ),
+        )
+        val io = FakeCliIO(inputs = listOf("prompt one", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(
+            listOf("system> tool call: built-in 'scheduler'"),
+            io.liveDialogLines,
+        )
+        val output = io.outputText()
+        assertContains(output, "system> tool call: built-in 'scheduler'")
+        assertTrue(output.indexOf("system> tool call: built-in 'scheduler'") < output.indexOf("⏺ answer one"))
+    }
+
+    @Test
+    fun sequentialLlmToolCallsAreShownInOrder() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "answer one")),
+            ),
+            toolTraceEvents = listOf(
+                listOf(
+                    ToolCallTraceEvent.Started(toolLabel = "MCP 'Linear/search_issues'"),
+                    ToolCallTraceEvent.Started(toolLabel = "built-in 'save_to_file'"),
+                ),
+            ),
+        )
+        val io = FakeCliIO(inputs = listOf("prompt one", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(
+            listOf(
+                "system> tool call: MCP 'Linear/search_issues'",
+                "system> tool call: built-in 'save_to_file'",
+            ),
+            io.liveDialogLines,
+        )
     }
 
     @Test
@@ -3029,7 +3090,7 @@ class ConsoleChatControllerSessionMemoryTest {
         controller.runInteractive()
 
         assertEquals(2, repository.prompts.size)
-        assertEquals(4, repository.prompts[0].toolCapabilities.privateTools.size)
+        assertEquals(5, repository.prompts[0].toolCapabilities.privateTools.size)
         assertTrue(repository.prompts[0].toolCapabilities.publicMcpServers.isEmpty())
         assertTrue(repository.prompts[0].toolCapabilities.privateTools.any { tool -> tool.modelToolName == "notify_user" })
         assertTrue(repository.prompts[0].toolCapabilities.privateTools.any { tool -> tool.modelToolName == "scheduler" })
@@ -3087,7 +3148,7 @@ class ConsoleChatControllerSessionMemoryTest {
         assertEquals(1, runtimeService.initializeCalls)
         assertEquals(1, repository.prompts.size)
         assertEquals(1, repository.prompts.single().toolCapabilities.publicMcpServers.size)
-        assertEquals(4, repository.prompts.single().toolCapabilities.privateTools.size)
+        assertEquals(5, repository.prompts.single().toolCapabilities.privateTools.size)
         assertTrue(repository.prompts.single().toolCapabilities.privateTools.any { tool -> tool.modelToolName == "notify_user" })
         assertTrue(repository.prompts.single().toolCapabilities.privateTools.any { tool -> tool.modelToolName == "scheduler" })
         assertContains(io.outputText(), "one-shot answer")
@@ -3109,7 +3170,7 @@ class ConsoleChatControllerSessionMemoryTest {
 
         assertEquals(0, exitCode)
         assertEquals(
-            listOf("notify_user", "scheduler", "save_to_file"),
+            listOf("notify_user", "scheduler", "save_to_file", "convert_to_pdf"),
             repository.prompts.single().toolCapabilities.privateTools.map { tool -> tool.modelToolName },
         )
         assertTrue(repository.prompts.single().toolCapabilities.publicMcpServers.isEmpty())
@@ -3140,9 +3201,10 @@ class ConsoleChatControllerSessionMemoryTest {
                 ),
             ),
         )
+        val io = FakeCliIO(inputs = emptyList())
         val controller = createController(
             repository = repository,
-            io = FakeCliIO(inputs = emptyList()),
+            io = io,
             builtInPrivateToolProvider = builtInPrivateToolProvider,
         )
 
@@ -3150,6 +3212,7 @@ class ConsoleChatControllerSessionMemoryTest {
 
         assertEquals(0, exitCode)
         assertEquals(1, schedulerRecorder.currentTimeCalls)
+        assertTrue(io.liveDialogLines.isEmpty())
         val promptConversation = repository.conversations.single()
         val resolvedTimeMessage = promptConversation.firstOrNull { message ->
             message.role == MessageRole.SYSTEM &&
@@ -3303,7 +3366,7 @@ class ConsoleChatControllerSessionMemoryTest {
 
         assertEquals(2, runtimeService.initializeCalls)
         assertEquals(listOf(privateServer), runtimeService.initializeRequests[1])
-        assertEquals(4, repository.prompts.single().toolCapabilities.privateTools.size)
+        assertEquals(5, repository.prompts.single().toolCapabilities.privateTools.size)
         assertTrue(repository.prompts.single().toolCapabilities.privateTools.any { tool -> tool.modelToolName == "notify_user" })
         assertTrue(repository.prompts.single().toolCapabilities.privateTools.any { tool -> tool.modelToolName == "scheduler" })
     }
@@ -3349,7 +3412,7 @@ class ConsoleChatControllerSessionMemoryTest {
         controller.runInteractive()
 
         assertEquals(listOf(enabledServer), runtimeService.initializeRequests.last())
-        assertEquals(4, repository.prompts.single().toolCapabilities.privateTools.size)
+        assertEquals(5, repository.prompts.single().toolCapabilities.privateTools.size)
         assertTrue(repository.prompts.single().toolCapabilities.privateTools.any { tool -> tool.modelToolName == "notify_user" })
         assertTrue(repository.prompts.single().toolCapabilities.privateTools.any { tool -> tool.modelToolName == "scheduler" })
     }
@@ -4396,8 +4459,10 @@ class ConsoleChatControllerSessionMemoryTest {
 
 private class RecordingAgentRepository(
     responses: List<Result<AgentResponse>>,
+    toolTraceEvents: List<List<ToolCallTraceEvent>> = emptyList(),
 ) : AgentRepository {
     private val queuedResponses = ArrayDeque(responses)
+    private val queuedToolTraceEvents = ArrayDeque(toolTraceEvents)
     val prompts = mutableListOf<PromptRequestData>()
     val conversations = mutableListOf<List<ConversationMessage>>()
 
@@ -4406,8 +4471,25 @@ private class RecordingAgentRepository(
         temperature: Double?,
         model: String?,
     ): AgentResponse {
+        return complete(
+            prompt = prompt,
+            temperature = temperature,
+            model = model,
+            toolCallTraceObserver = null,
+        )
+    }
+
+    override suspend fun complete(
+        prompt: PromptRequestData,
+        temperature: Double?,
+        model: String?,
+        toolCallTraceObserver: ToolCallTraceObserver?,
+    ): AgentResponse {
         prompts += prompt
         conversations += prompt.toConversation()
+        queuedToolTraceEvents.removeFirstOrNull().orEmpty().forEach { event ->
+            toolCallTraceObserver?.onToolCallTrace(event)
+        }
         val response = queuedResponses.removeFirstOrNull()
             ?: error("No prepared response for conversation #${conversations.size}")
         return response.getOrThrow()
@@ -4482,6 +4564,7 @@ private class FakeCliIO(
         private set
     var hideThinkingIndicatorCalls: Int = 0
         private set
+    val liveDialogLines = mutableListOf<String>()
     val footerLabels = mutableListOf<String?>()
     val footerPrompts = mutableListOf<String>()
     val mcpMenuOptions = mutableListOf<McpMenuOption>()
@@ -4511,6 +4594,10 @@ private class FakeCliIO(
     override fun updateThinkingIndicator(progressText: String) {
         updateThinkingIndicatorCalls += 1
         lastThinkingProgressText = progressText
+    }
+
+    override fun writeLiveDialogLine(text: String) {
+        liveDialogLines += text
     }
 
     override fun hideThinkingIndicator() {

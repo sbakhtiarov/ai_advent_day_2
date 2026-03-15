@@ -26,6 +26,8 @@ import com.aichallenge.day2.agent.domain.model.SessionCompactionMode
 import com.aichallenge.day2.agent.domain.model.SessionMemory
 import com.aichallenge.day2.agent.domain.model.SessionMemoryState
 import com.aichallenge.day2.agent.domain.model.TokenUsage
+import com.aichallenge.day2.agent.domain.model.ToolCallTraceEvent
+import com.aichallenge.day2.agent.domain.model.ToolCallTraceObserver
 import com.aichallenge.day2.agent.domain.model.UserProfileOption
 import com.aichallenge.day2.agent.domain.model.UserWorkflowDefinition
 import com.aichallenge.day2.agent.domain.model.UserWorkflowOption
@@ -300,6 +302,15 @@ class ConsoleChatController(
             toolContext.systemMessages.forEach { systemMessage ->
                 dialogBlocks += systemMessage
             }
+            val toolCallTraceObserver = object : ToolCallTraceObserver {
+                override suspend fun onToolCallTrace(event: ToolCallTraceEvent) {
+                    val dialogLine = when (event) {
+                        is ToolCallTraceEvent.Started -> "system> tool call: ${event.toolLabel}"
+                    }
+                    io.writeLiveDialogLine(dialogLine)
+                    dialogBlocks += dialogLine
+                }
+            }
             coroutineScope {
                 val progressJob = launch {
                     var frameIndex = 1
@@ -324,6 +335,7 @@ class ConsoleChatController(
                             effectiveSystemPrompt = effectiveSystemPrompt,
                             validateInvariantConstraints = validateInvariantConstraints,
                             toolCapabilities = toolContext.capabilities,
+                            toolCallTraceObserver = toolCallTraceObserver,
                         )
                         val sideEffects = applyAcceptedTurnSideEffects(
                             requestPrompt = requestPrompt,
@@ -1263,6 +1275,7 @@ class ConsoleChatController(
         effectiveSystemPrompt: String,
         toolCapabilities: LlmToolCapabilities,
         additionalContextSystemMessages: List<String> = emptyList(),
+        toolCallTraceObserver: ToolCallTraceObserver? = null,
     ): AgentResponse {
         val effectivePromptWithInvariants = augmentSystemPromptWithInvariants(effectiveSystemPrompt)
         val promptRequest = buildPromptUseCase.execute(
@@ -1279,6 +1292,7 @@ class ConsoleChatController(
         val response = sendPromptUseCase.execute(
             prompt = promptRequest,
             model = currentModel,
+            toolCallTraceObserver = toolCallTraceObserver,
         )
         return response
     }
@@ -1288,6 +1302,7 @@ class ConsoleChatController(
         effectiveSystemPrompt: String,
         toolCapabilities: LlmToolCapabilities,
         additionalContextSystemMessages: List<String> = emptyList(),
+        toolCallTraceObserver: ToolCallTraceObserver? = null,
     ): AgentResponse {
         val effectivePromptWithInvariants = augmentSystemPromptWithInvariants(effectiveSystemPrompt)
         val contextWindow = modelById[currentModel]?.contextWindowTokens
@@ -1322,6 +1337,7 @@ class ConsoleChatController(
         val response = sendPromptUseCase.execute(
             prompt = promptRequest,
             model = currentModel,
+            toolCallTraceObserver = toolCallTraceObserver,
         )
         return response
     }
@@ -1331,6 +1347,7 @@ class ConsoleChatController(
         effectiveSystemPrompt: String,
         validateInvariantConstraints: Boolean,
         toolCapabilities: LlmToolCapabilities = LlmToolCapabilities(),
+        toolCallTraceObserver: ToolCallTraceObserver? = null,
     ): AgentResponse {
         val additionalContextSystemMessages = buildPromptSpecificSystemMessages(
             requestPrompt = requestPrompt,
@@ -1351,6 +1368,7 @@ class ConsoleChatController(
                     effectiveSystemPrompt = effectiveSystemPrompt,
                     toolCapabilities = toolCapabilities,
                     additionalContextSystemMessages = additionalContextSystemMessages,
+                    toolCallTraceObserver = toolCallTraceObserver,
                 )
             } else {
                 executeLinearTurn(
@@ -1358,6 +1376,7 @@ class ConsoleChatController(
                     effectiveSystemPrompt = effectiveSystemPrompt,
                     toolCapabilities = toolCapabilities,
                     additionalContextSystemMessages = additionalContextSystemMessages,
+                    toolCallTraceObserver = toolCallTraceObserver,
                 )
             }
 

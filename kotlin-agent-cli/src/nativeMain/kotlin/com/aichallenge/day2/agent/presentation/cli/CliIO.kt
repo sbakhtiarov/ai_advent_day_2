@@ -30,6 +30,9 @@ interface CliIO {
     fun hideCursor()
     fun showCursor()
     fun writeLine(text: String = "")
+    fun writeLiveDialogLine(text: String) {
+        writeLine(text)
+    }
     fun readLine(prompt: String): String?
     fun readLineInFooter(prompt: String, divider: String, footerLabel: String? = null): String?
     fun showThinkingIndicator() {}
@@ -87,6 +90,21 @@ object StdCliIO : CliIO {
 
     override fun writeLine(text: String) {
         println(text)
+    }
+
+    @OptIn(ExperimentalForeignApi::class)
+    override fun writeLiveDialogLine(text: String) {
+        if (!thinkingIndicatorVisible) {
+            writeLine(text)
+            return
+        }
+
+        print('\r')
+        print("\u001B[2K")
+        print(text)
+        print('\n')
+        fflush(stdout)
+        updateThinkingIndicator(progressText = "")
     }
 
     override fun readLine(prompt: String): String? {

@@ -7,7 +7,10 @@ import com.aichallenge.day2.agent.domain.model.LlmToolCapabilities
 import com.aichallenge.day2.agent.domain.model.PromptRequestData
 import com.aichallenge.day2.agent.domain.model.PrivateToolBinding
 import com.aichallenge.day2.agent.domain.model.PrivateToolResult
+import com.aichallenge.day2.agent.domain.model.PrivateToolTarget
 import com.aichallenge.day2.agent.domain.model.TokenUsage
+import com.aichallenge.day2.agent.domain.model.ToolCallTraceEvent
+import com.aichallenge.day2.agent.domain.model.ToolCallTraceObserver
 import com.aichallenge.day2.agent.domain.service.PrivateToolExecutionService
 import io.ktor.client.HttpClient
 import io.ktor.client.request.header
@@ -41,6 +44,7 @@ class OpenAiRemoteDataSource(
         prompt: PromptRequestData,
         temperature: Double? = null,
         model: String? = null,
+        toolCallTraceObserver: ToolCallTraceObserver? = null,
     ): AssistantReply {
         require(temperature == null || temperature in 0.0..2.0) {
             "Temperature must be in range 0..2."
@@ -105,6 +109,11 @@ class OpenAiRemoteDataSource(
                 }
                 val binding = privateToolBindings[functionCall.name]
                     ?: throw IllegalStateException("OpenAI requested unknown private MCP tool '${functionCall.name}'.")
+                toolCallTraceObserver?.onToolCallTrace(
+                    ToolCallTraceEvent.Started(
+                        toolLabel = buildToolTraceLabel(binding),
+                    ),
+                )
                 buildFunctionCallOutput(binding, functionCall)
             }
 
@@ -298,6 +307,13 @@ class OpenAiRemoteDataSource(
             put("error", throwable.message?.trim().takeUnless { it.isNullOrEmpty() } ?: "Unexpected error")
         }
         return json.encodeToString(JsonObject.serializer(), payload)
+    }
+
+    private fun buildToolTraceLabel(binding: PrivateToolBinding): String {
+        return when (val target = binding.target) {
+            is PrivateToolTarget.BuiltIn -> "built-in '${target.toolId}'"
+            is PrivateToolTarget.Mcp -> "MCP '${target.server.name}/${target.sourceToolName}'"
+        }
     }
 
     private fun extractUsage(payload: ResponsesApiEnvelope): TokenUsage? {

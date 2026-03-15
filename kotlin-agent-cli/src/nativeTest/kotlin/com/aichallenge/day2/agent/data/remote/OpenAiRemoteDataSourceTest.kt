@@ -13,6 +13,8 @@ import com.aichallenge.day2.agent.domain.model.PrivateToolResult
 import com.aichallenge.day2.agent.domain.model.PrivateToolTarget
 import com.aichallenge.day2.agent.domain.model.PublicMcpServerCapability
 import com.aichallenge.day2.agent.domain.model.TokenUsage
+import com.aichallenge.day2.agent.domain.model.ToolCallTraceEvent
+import com.aichallenge.day2.agent.domain.model.ToolCallTraceObserver
 import com.aichallenge.day2.agent.domain.service.PrivateToolExecutionService
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
@@ -199,6 +201,51 @@ class OpenAiRemoteDataSourceTest {
     }
 
     @Test
+    fun fetchAssistantReplyEmitsStartEventForBuiltInTool() = runSuspendTest {
+        val events = mutableListOf<ToolCallTraceEvent>()
+        val dataSource = createDataSource(
+            requestBodies = mutableListOf(),
+            responses = listOf(
+                """
+                    {
+                      "id": "resp_1",
+                      "output": [
+                        {
+                          "type": "function_call",
+                          "call_id": "call_1",
+                          "name": "notify_user",
+                          "arguments": "{\"message\":\"Build finished\"}"
+                        }
+                      ]
+                    }
+                """.trimIndent(),
+                """
+                    {
+                      "id": "resp_2",
+                      "output_text": "Notified the user"
+                    }
+                """.trimIndent(),
+            ),
+            privateToolExecutionService = RecordingPrivateToolExecutionService(
+                toolResultsByName = mapOf(
+                    "notify_user" to Result.success(successfulPrivateToolResult("notified")),
+                ),
+            ),
+        )
+
+        dataSource.fetchAssistantReply(
+            prompt = promptWithPrivateTools(privateTools = listOf(notifyUserToolBinding())),
+            model = "gpt-4.1-mini",
+            toolCallTraceObserver = RecordingToolCallTraceObserver(events),
+        )
+
+        assertEquals(
+            listOf<ToolCallTraceEvent>(ToolCallTraceEvent.Started(toolLabel = "built-in 'notify_user'")),
+            events,
+        )
+    }
+
+    @Test
     fun fetchAssistantReplySupportsMultipleSequentialPrivateToolCalls() = runSuspendTest {
         val requestBodies = mutableListOf<String>()
         val executionService = RecordingPrivateToolExecutionService(
@@ -265,6 +312,79 @@ class OpenAiRemoteDataSourceTest {
         assertEquals("Created follow-up issue", reply.content)
         assertEquals(3, requestBodies.size)
         assertEquals(2, executionService.executeRequests.size)
+    }
+
+    @Test
+    fun fetchAssistantReplyEmitsStartEventsForSequentialMcpToolsInOrder() = runSuspendTest {
+        val events = mutableListOf<ToolCallTraceEvent>()
+        val dataSource = createDataSource(
+            requestBodies = mutableListOf(),
+            responses = listOf(
+                """
+                    {
+                      "id": "resp_1",
+                      "output": [
+                        {
+                          "type": "function_call",
+                          "call_id": "call_1",
+                          "name": "linear__search_issues",
+                          "arguments": "{\"query\":\"bug\"}"
+                        }
+                      ]
+                    }
+                """.trimIndent(),
+                """
+                    {
+                      "id": "resp_2",
+                      "output": [
+                        {
+                          "type": "function_call",
+                          "call_id": "call_2",
+                          "name": "linear__create_issue",
+                          "arguments": "{\"title\":\"Bug\"}"
+                        }
+                      ]
+                    }
+                """.trimIndent(),
+                """
+                    {
+                      "id": "resp_3",
+                      "output_text": "Created follow-up issue"
+                    }
+                """.trimIndent(),
+            ),
+            privateToolExecutionService = RecordingPrivateToolExecutionService(
+                toolResultsByName = mapOf(
+                    "linear__search_issues" to Result.success(successfulPrivateToolResult("issue-1")),
+                    "linear__create_issue" to Result.success(successfulPrivateToolResult("issue-2")),
+                ),
+            ),
+        )
+
+        dataSource.fetchAssistantReply(
+            prompt = promptWithPrivateTools(
+                privateTools = listOf(
+                    privateToolBinding(
+                        modelToolName = "linear__search_issues",
+                        sourceToolName = "search_issues",
+                    ),
+                    privateToolBinding(
+                        modelToolName = "linear__create_issue",
+                        sourceToolName = "create_issue",
+                    ),
+                ),
+            ),
+            model = "gpt-4.1-mini",
+            toolCallTraceObserver = RecordingToolCallTraceObserver(events),
+        )
+
+        assertEquals(
+            listOf<ToolCallTraceEvent>(
+                ToolCallTraceEvent.Started(toolLabel = "MCP 'Linear/search_issues'"),
+                ToolCallTraceEvent.Started(toolLabel = "MCP 'Linear/create_issue'"),
+            ),
+            events,
+        )
     }
 
     @Test
@@ -702,6 +822,14 @@ private data class RecordedPrivateToolExecution(
     val binding: PrivateToolBinding,
     val arguments: JsonObject,
 )
+
+private class RecordingToolCallTraceObserver(
+    private val events: MutableList<ToolCallTraceEvent>,
+) : ToolCallTraceObserver {
+    override suspend fun onToolCallTrace(event: ToolCallTraceEvent) {
+        events += event
+    }
+}
 
 private fun runSuspendTest(block: suspend () -> Unit) {
     runBlocking {
