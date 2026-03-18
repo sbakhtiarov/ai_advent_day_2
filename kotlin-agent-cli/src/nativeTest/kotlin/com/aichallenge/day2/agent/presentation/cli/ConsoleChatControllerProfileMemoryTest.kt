@@ -597,6 +597,9 @@ private class ProfileMemoryControllerTestCliIO(
         selectedIndex = currentSelection,
     )
 
+    override fun openRagMenu(options: List<RagMenuOption>, currentSelection: Int, reuseAnchor: Boolean): Int? =
+        currentSelection
+
     override fun openProfileMenu(options: List<String>, currentSelection: Int): Int? = currentSelection
 
     override fun openWorkflowMenu(options: List<String>, currentSelection: Int): Int? = currentSelection

@@ -1,0 +1,10 @@
+{
+  "sources": [
+    {
+      "name": "Local RFC RAG",
+      "type": "postgres",
+      "database_url": "postgresql://raguser:ragpass@localhost:5432/ragdb",
+      "enabled": true
+    }
+  ]
+}
