@@ -1,0 +1,11 @@
+  1. What are the core organizing principles of the MLS protocol and how do they impact group state management?
+  2. How does MLS ensure continuous group authenticated key exchange (AKE) with dynamic membership changes?
+  3. What roles do the Authentication Service (AS) and Delivery Service (DS) play in the MLS protocol architecture?
+  4. What are the differences between PublicMessage and PrivateMessage formats in MLS?
+  5. How are proposals and commits used to update or remove members in an MLS group?
+  6. What are the key security considerations discussed in RFC 9420 regarding MLS message confidentiality and integrity?
+  7. How does MLS achieve post-compromise security, and what implications does this have for forward secrecy?
+  8. What is the message/mls media type and how does it relate to interoperability with other protocols?
+  9. What extensibility mechanisms does MLS support, and what constraints ensure broad interoperability?
+  10. What are the defined MLS wire formats and their purposes as registered in IANA per RFC 9420?
+  
