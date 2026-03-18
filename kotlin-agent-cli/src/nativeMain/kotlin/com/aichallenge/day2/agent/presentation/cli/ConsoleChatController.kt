@@ -22,7 +22,6 @@ import com.aichallenge.day2.agent.domain.model.PrivateToolBinding
 import com.aichallenge.day2.agent.domain.model.PublicMcpServerCapability
 import com.aichallenge.day2.agent.domain.model.ProfileMemoryState
 import com.aichallenge.day2.agent.domain.model.ProfilePreferenceState
-import com.aichallenge.day2.agent.domain.model.RagSourceConfig
 import com.aichallenge.day2.agent.domain.model.SessionCompactionMode
 import com.aichallenge.day2.agent.domain.model.SessionMemory
 import com.aichallenge.day2.agent.domain.model.SessionMemoryState
@@ -36,7 +35,6 @@ import com.aichallenge.day2.agent.domain.model.WorkflowRuntimeState
 import com.aichallenge.day2.agent.domain.model.WorkflowStep
 import com.aichallenge.day2.agent.domain.model.WorkingMemoryState
 import com.aichallenge.day2.agent.domain.repository.ProfileMemoryStore
-import com.aichallenge.day2.agent.domain.repository.RagSourceStore
 import com.aichallenge.day2.agent.domain.repository.SessionMemoryStore
 import com.aichallenge.day2.agent.domain.repository.InvariantConstraintStore
 import com.aichallenge.day2.agent.domain.repository.McpServerStore
@@ -92,7 +90,6 @@ class ConsoleChatController(
     private val userDefinedWorkflowStore: UserDefinedWorkflowStore? = null,
     private val invariantConstraintStore: InvariantConstraintStore? = null,
     private val mcpServerStore: McpServerStore? = null,
-    private val ragSourceStore: RagSourceStore? = null,
     private val mcpRuntimeService: McpRuntimeService = NoOpMcpRuntimeService,
     private val mcpPrivateToolProvider: McpPrivateToolProvider = McpPrivateToolProvider(),
     private val builtInPrivateToolProvider: BuiltInPrivateToolProvider = BuiltInPrivateToolProvider(BuiltInToolRegistry.createDefault()),
@@ -144,13 +141,10 @@ class ConsoleChatController(
     private var invariantConstraintsInitialized = false
     private var mcpServersLoaded = false
     private var mcpStartupInitialized = false
-    private var ragSourcesLoaded = false
     private var invariantConstraints = mutableListOf<String>()
     private var mcpServers = mutableListOf<McpServerConfig>()
-    private var ragSources = mutableListOf<RagSourceConfig>()
     private val pendingMcpStartupMessages = mutableListOf<String>()
     private var mcpMenuSelection = 0
-    private var ragMenuSelection = 0
     private var workflowModeEnabled = false
     private var activeWorkflow: UserWorkflowDefinition? = null
     private var workflowRuntimeState: WorkflowRuntimeState? = null
@@ -1973,11 +1967,6 @@ class ConsoleChatController(
                 true
             }
 
-            input == "/rag" -> {
-                handleRagCommand()
-                true
-            }
-
             input.startsWith("/mcp ") -> {
                 handleMcpToolCommand(input)
                 true
@@ -2113,18 +2102,6 @@ class ConsoleChatController(
             mcpServerStore?.load()
         }.getOrNull().orEmpty().toMutableList()
         mcpMenuSelection = mcpMenuSelection.coerceIn(0, mcpServers.lastIndex.coerceAtLeast(0))
-    }
-
-    private fun ensureRagSourcesLoaded() {
-        if (ragSourcesLoaded) {
-            return
-        }
-
-        ragSourcesLoaded = true
-        ragSources = runCatching {
-            ragSourceStore?.load()
-        }.getOrNull().orEmpty().toMutableList()
-        ragMenuSelection = ragMenuSelection.coerceIn(0, ragSources.lastIndex.coerceAtLeast(0))
     }
 
     private suspend fun prepareMainTurnToolContext(): PreparedMainTurnToolContext {
@@ -2414,7 +2391,7 @@ class ConsoleChatController(
         io.writeLine()
         io.writeLine("    type your prompt and press Enter")
         io.writeLine(
-            "    commands: /help, /models, /model <id|number>, /memory, /compact, /profile, /workflow, /mcp, /rag, /invariant, /reset, /exit, @<path>",
+            "    commands: /help, /models, /model <id|number>, /memory, /compact, /profile, /workflow, /mcp, /invariant, /reset, /exit, @<path>",
         )
         io.writeLine()
 
@@ -2449,7 +2426,6 @@ class ConsoleChatController(
         /profile             choose active user profile
         /workflow            enable workflow mode with workflow selection (toggle off when enabled)
         /mcp                 configure MCP servers
-        /rag                 configure RAG sources
         /mcp <n> <tool> [json-object-args]
                              call an MCP tool on an enabled ready server
         /invariant           configure invariant constraints
@@ -2507,49 +2483,6 @@ class ConsoleChatController(
             }
 
             mcpMenuSelection = currentSelection
-        }
-    }
-
-    private fun handleRagCommand() {
-        ensureRagSourcesLoaded()
-        val store = ragSourceStore
-        if (store == null || ragSources.isEmpty()) {
-            dialogBlocks += "system> no valid RAG sources found"
-            return
-        }
-
-        var currentSelection = ragMenuSelection.coerceIn(0, ragSources.lastIndex)
-        var reuseMenuAnchor = false
-        while (true) {
-            val selectedIndex = io.openRagMenu(
-                options = ragSources.map { source ->
-                    RagMenuOption(
-                        name = source.name,
-                        enabled = source.enabled,
-                    )
-                },
-                currentSelection = currentSelection,
-                reuseAnchor = reuseMenuAnchor,
-            ) ?: run {
-                ragMenuSelection = currentSelection
-                return
-            }
-
-            currentSelection = selectedIndex.coerceIn(0, ragSources.lastIndex)
-            reuseMenuAnchor = true
-            val currentSource = ragSources[currentSelection]
-            ragSources[currentSelection] = currentSource.copy(enabled = !currentSource.enabled)
-
-            val persisted = runCatching {
-                store.save(ragSources.toList())
-                true
-            }.getOrDefault(false)
-            if (!persisted) {
-                ragSources[currentSelection] = currentSource
-                dialogBlocks += "system> failed to persist RAG source state"
-            }
-
-            ragMenuSelection = currentSelection
         }
     }
 

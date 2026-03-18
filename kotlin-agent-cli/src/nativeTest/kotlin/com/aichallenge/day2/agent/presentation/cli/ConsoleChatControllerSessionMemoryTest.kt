@@ -25,8 +25,6 @@ import com.aichallenge.day2.agent.domain.model.PrivateToolResult
 import com.aichallenge.day2.agent.domain.model.PrivateToolTarget
 import com.aichallenge.day2.agent.domain.model.PromptRequestData
 import com.aichallenge.day2.agent.domain.model.ProfilePreferenceState
-import com.aichallenge.day2.agent.domain.model.RagSourceConfig
-import com.aichallenge.day2.agent.domain.model.RagSourceType
 import com.aichallenge.day2.agent.domain.model.RollingWindowCompactionStartPolicy
 import com.aichallenge.day2.agent.domain.model.SessionCompactionMode
 import com.aichallenge.day2.agent.domain.model.SessionCompactionSummaryMode
@@ -46,7 +44,6 @@ import com.aichallenge.day2.agent.domain.model.WorkflowStep
 import com.aichallenge.day2.agent.domain.repository.AgentRepository
 import com.aichallenge.day2.agent.domain.repository.InvariantConstraintStore
 import com.aichallenge.day2.agent.domain.repository.McpServerStore
-import com.aichallenge.day2.agent.domain.repository.RagSourceStore
 import com.aichallenge.day2.agent.domain.repository.SessionMemoryStore
 import com.aichallenge.day2.agent.domain.repository.UserDefinedProfileStore
 import com.aichallenge.day2.agent.domain.repository.UserDefinedWorkflowStore
@@ -2225,14 +2222,13 @@ class ConsoleChatControllerSessionMemoryTest {
         val output = io.outputText()
         assertContains(
             output,
-            "commands: /help, /models, /model <id|number>, /memory, /compact, /profile, /workflow, /mcp, /rag, /invariant, /reset, /exit, @<path>",
+            "commands: /help, /models, /model <id|number>, /memory, /compact, /profile, /workflow, /mcp, /invariant, /reset, /exit, @<path>",
         )
         assertContains(output, "/memory              show session-memory context usage")
         assertContains(output, "/compact             choose memory compaction strategy")
         assertContains(output, "/profile             choose active user profile")
         assertContains(output, "/workflow            enable workflow mode with workflow selection (toggle off when enabled)")
         assertContains(output, "/mcp                 configure MCP servers")
-        assertContains(output, "/rag                 configure RAG sources")
         assertContains(output, "/invariant           configure invariant constraints")
         assertContains(output, "@<path>              attach file for the next prompt")
     }
@@ -2554,23 +2550,6 @@ class ConsoleChatControllerSessionMemoryTest {
 
         assertEquals(1, mcpStore.loadCalls)
         assertContains(io.outputText(), "system> no valid MCP servers found")
-    }
-
-    @Test
-    fun ragCommandShowsMessageWhenNoValidSourcesFound() = runBlocking {
-        val repository = RecordingAgentRepository(responses = emptyList())
-        val ragStore = RecordingRagSourceStore()
-        val io = FakeCliIO(inputs = listOf("/rag", "/exit"))
-        val controller = createController(
-            repository = repository,
-            io = io,
-            ragSourceStore = ragStore,
-        )
-
-        controller.runInteractive()
-
-        assertEquals(1, ragStore.loadCalls)
-        assertContains(io.outputText(), "system> no valid RAG sources found")
     }
 
     @Test
@@ -3009,135 +2988,6 @@ class ConsoleChatControllerSessionMemoryTest {
         assertEquals(0, mcpStore.saveStates.size)
         assertEquals(true, mcpStore.currentServers().single().enabled)
         assertContains(io.outputText(), "system> failed to persist MCP server state")
-    }
-
-    @Test
-    fun ragCommandTogglesSelectedSourceAndPersists() = runBlocking {
-        val repository = RecordingAgentRepository(responses = emptyList())
-        val ragStore = RecordingRagSourceStore(
-            loadedSources = listOf(
-                postgresRagSource(
-                    name = "Local RFC RAG",
-                    databaseUrl = "postgresql://raguser:ragpass@localhost:5432/ragdb",
-                    enabled = true,
-                ),
-                postgresRagSource(
-                    name = "Backup RAG",
-                    databaseUrl = "postgresql://raguser:ragpass@localhost:5433/ragdb",
-                    enabled = false,
-                ),
-            ),
-        )
-        val io = FakeCliIO(
-            inputs = listOf("/rag", "/exit"),
-            ragSelections = listOf(0, null),
-        )
-        val controller = createController(
-            repository = repository,
-            io = io,
-            ragSourceStore = ragStore,
-        )
-
-        controller.runInteractive()
-
-        assertEquals(1, ragStore.saveStates.size)
-        assertEquals(false, ragStore.saveStates.single()[0].enabled)
-        assertEquals(false, ragStore.currentSources()[0].enabled)
-        assertEquals(false, ragStore.currentSources()[1].enabled)
-    }
-
-    @Test
-    fun ragCommandKeepsMenuOpenForMultipleToggles() = runBlocking {
-        val repository = RecordingAgentRepository(responses = emptyList())
-        val ragStore = RecordingRagSourceStore(
-            loadedSources = listOf(
-                postgresRagSource(
-                    name = "Local RFC RAG",
-                    databaseUrl = "postgresql://raguser:ragpass@localhost:5432/ragdb",
-                    enabled = true,
-                ),
-                postgresRagSource(
-                    name = "Backup RAG",
-                    databaseUrl = "postgresql://raguser:ragpass@localhost:5433/ragdb",
-                    enabled = false,
-                ),
-            ),
-        )
-        val io = FakeCliIO(
-            inputs = listOf("/rag", "/exit"),
-            ragSelections = listOf(0, 1, null),
-        )
-        val controller = createController(
-            repository = repository,
-            io = io,
-            ragSourceStore = ragStore,
-        )
-
-        controller.runInteractive()
-
-        assertEquals(2, ragStore.saveStates.size)
-        assertEquals(false, ragStore.saveStates[0][0].enabled)
-        assertEquals(true, ragStore.saveStates[1][1].enabled)
-        assertEquals(false, ragStore.currentSources()[0].enabled)
-        assertEquals(true, ragStore.currentSources()[1].enabled)
-    }
-
-    @Test
-    fun ragCommandCancelKeepsStateUnchanged() = runBlocking {
-        val repository = RecordingAgentRepository(responses = emptyList())
-        val ragStore = RecordingRagSourceStore(
-            loadedSources = listOf(
-                postgresRagSource(
-                    name = "Local RFC RAG",
-                    databaseUrl = "postgresql://raguser:ragpass@localhost:5432/ragdb",
-                    enabled = true,
-                ),
-            ),
-        )
-        val io = FakeCliIO(
-            inputs = listOf("/rag", "/exit"),
-            ragSelections = listOf(null),
-        )
-        val controller = createController(
-            repository = repository,
-            io = io,
-            ragSourceStore = ragStore,
-        )
-
-        controller.runInteractive()
-
-        assertEquals(0, ragStore.saveStates.size)
-        assertEquals(true, ragStore.currentSources().single().enabled)
-    }
-
-    @Test
-    fun ragCommandSaveFailureRevertsStateAndShowsMessage() = runBlocking {
-        val repository = RecordingAgentRepository(responses = emptyList())
-        val ragStore = RecordingRagSourceStore(
-            loadedSources = listOf(
-                postgresRagSource(
-                    name = "Local RFC RAG",
-                    databaseUrl = "postgresql://raguser:ragpass@localhost:5432/ragdb",
-                    enabled = true,
-                ),
-            ),
-            failOnSaveCalls = setOf(1),
-        )
-        val io = FakeCliIO(
-            inputs = listOf("/rag", "/exit"),
-            ragSelections = listOf(0, null),
-        )
-        val controller = createController(
-            repository = repository,
-            io = io,
-            ragSourceStore = ragStore,
-        )
-
-        controller.runInteractive()
-
-        assertEquals(0, ragStore.saveStates.size)
-        assertEquals(true, ragStore.currentSources().single().enabled)
-        assertContains(io.outputText(), "system> failed to persist RAG source state")
     }
 
     @Test
@@ -4568,7 +4418,6 @@ class ConsoleChatControllerSessionMemoryTest {
         userDefinedWorkflowStore: UserDefinedWorkflowStore? = null,
         invariantConstraintStore: InvariantConstraintStore? = null,
         mcpServerStore: McpServerStore? = null,
-        ragSourceStore: RagSourceStore? = null,
         mcpRuntimeService: McpRuntimeService = RecordingMcpRuntimeService(),
         builtInPrivateToolProvider: BuiltInPrivateToolProvider = BuiltInPrivateToolProvider(BuiltInToolRegistry.createDefault()),
         persistentMemoryEnabled: Boolean = true,
@@ -4598,7 +4447,6 @@ class ConsoleChatControllerSessionMemoryTest {
             userDefinedWorkflowStore = userDefinedWorkflowStore,
             invariantConstraintStore = invariantConstraintStore,
             mcpServerStore = mcpServerStore,
-            ragSourceStore = ragSourceStore,
             mcpRuntimeService = mcpRuntimeService,
             builtInPrivateToolProvider = builtInPrivateToolProvider,
             persistentMemoryEnabled = persistentMemoryEnabled,
@@ -4693,20 +4541,10 @@ private fun httpMcpServer(name: String, url: String, enabled: Boolean, isPublic:
     )
 }
 
-private fun postgresRagSource(name: String, databaseUrl: String, enabled: Boolean): RagSourceConfig {
-    return RagSourceConfig(
-        name = name,
-        enabled = enabled,
-        type = RagSourceType.POSTGRES,
-        databaseUrl = databaseUrl,
-    )
-}
-
 private class FakeCliIO(
     inputs: List<String>,
     private val compactionSelections: List<Int?> = emptyList(),
     private val mcpSelections: List<McpMenuResult?> = emptyList(),
-    private val ragSelections: List<Int?> = emptyList(),
     private val profileSelections: List<Int?> = emptyList(),
     private val workflowSelections: List<Int?> = emptyList(),
     private val invariantSelections: List<InvariantMenuResult?> = emptyList(),
@@ -4714,7 +4552,6 @@ private class FakeCliIO(
     private val queuedInputs = ArrayDeque<String?>(inputs)
     private var nextCompactionSelectionIndex = 0
     private var nextMcpSelectionIndex = 0
-    private var nextRagSelectionIndex = 0
     private var nextProfileSelectionIndex = 0
     private var nextWorkflowSelectionIndex = 0
     private var nextInvariantSelectionIndex = 0
@@ -4731,7 +4568,6 @@ private class FakeCliIO(
     val footerLabels = mutableListOf<String?>()
     val footerPrompts = mutableListOf<String>()
     val mcpMenuOptions = mutableListOf<McpMenuOption>()
-    val ragMenuOptions = mutableListOf<RagMenuOption>()
 
     override fun clearScreen() = Unit
 
@@ -4789,17 +4625,6 @@ private class FakeCliIO(
             action = McpMenuAction.TOGGLE,
             selectedIndex = currentSelection,
         )
-    }
-
-    override fun openRagMenu(options: List<RagMenuOption>, currentSelection: Int, reuseAnchor: Boolean): Int? {
-        ragMenuOptions.clear()
-        ragMenuOptions += options
-        val selection = ragSelections.getOrNull(nextRagSelectionIndex)
-        if (nextRagSelectionIndex < ragSelections.size) {
-            nextRagSelectionIndex += 1
-            return selection
-        }
-        return null
     }
 
     override fun openProfileMenu(options: List<String>, currentSelection: Int): Int? {
@@ -4862,33 +4687,6 @@ private class RecordingMcpServerStore(
     }
 
     fun currentServers(): List<McpServerConfig> = servers.map { server -> server.copy() }
-}
-
-private class RecordingRagSourceStore(
-    loadedSources: List<RagSourceConfig> = emptyList(),
-    private val failOnSaveCalls: Set<Int> = emptySet(),
-) : RagSourceStore {
-    private var sources = loadedSources.map { source -> source.copy() }.toMutableList()
-    var loadCalls: Int = 0
-        private set
-    private var saveCallCount: Int = 0
-    val saveStates = mutableListOf<List<RagSourceConfig>>()
-
-    override fun load(): List<RagSourceConfig> {
-        loadCalls += 1
-        return sources.map { source -> source.copy() }
-    }
-
-    override fun save(sources: List<RagSourceConfig>) {
-        saveCallCount += 1
-        if (saveCallCount in failOnSaveCalls) {
-            error("save failure")
-        }
-        this.sources = sources.map { source -> source.copy() }.toMutableList()
-        saveStates += this.sources.map { source -> source.copy() }
-    }
-
-    fun currentSources(): List<RagSourceConfig> = sources.map { source -> source.copy() }
 }
 
 private class RecordingMcpRuntimeService(

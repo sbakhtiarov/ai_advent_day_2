@@ -9,7 +9,6 @@ import com.aichallenge.day2.agent.data.local.JsonFileProfileMemoryStore
 import com.aichallenge.day2.agent.data.local.JsonFileSessionMemoryStore
 import com.aichallenge.day2.agent.data.local.JsonFileInvariantConstraintStore
 import com.aichallenge.day2.agent.data.local.JsonFileMcpServerStore
-import com.aichallenge.day2.agent.data.local.JsonFileRagSourceStore
 import com.aichallenge.day2.agent.data.local.JsonFileUserDefinedProfileStore
 import com.aichallenge.day2.agent.data.local.JsonFileUserDefinedWorkflowStore
 import com.aichallenge.day2.agent.data.local.JsonFileWorkingMemoryStore
@@ -148,7 +147,6 @@ private suspend fun runConfiguredApp(
     val userDefinedWorkflowStore = JsonFileUserDefinedWorkflowStore.fromDefaultLocation()
     val invariantConstraintStore = JsonFileInvariantConstraintStore.fromDefaultLocation()
     val mcpServerStore = JsonFileMcpServerStore.fromDefaultLocation()
-    val ragSourceStore = JsonFileRagSourceStore.fromDefaultLocation()
     val workingMemoryDistillationUseCase = if (isInteractiveMode) {
         WorkingMemoryDistillationUseCase(container.sendPromptUseCase)
     } else {
@@ -173,7 +171,6 @@ private suspend fun runConfiguredApp(
         userDefinedWorkflowStore = userDefinedWorkflowStore,
         invariantConstraintStore = invariantConstraintStore,
         mcpServerStore = mcpServerStore,
-        ragSourceStore = ragSourceStore,
         mcpRuntimeService = container.mcpRuntimeService,
         builtInPrivateToolProvider = BuiltInPrivateToolProvider(container.builtInToolRegistry),
         workingMemoryDistillationUseCase = workingMemoryDistillationUseCase,

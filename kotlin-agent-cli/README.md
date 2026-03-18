@@ -67,25 +67,6 @@ Example:
 
 `public` is loaded and persisted as part of MCP server configuration. It is currently schema-only and does not change runtime behavior yet.
 
-RAG source configuration is read from `~/.kotlin-agent-cli/rag-sources.json`.
-Example:
-
-```json
-{
-  "sources": [
-    {
-      "name": "Local RFC RAG",
-      "type": "postgres",
-      "database_url": "postgresql://raguser:ragpass@localhost:5432/ragdb",
-      "enabled": true
-    }
-  ]
-}
-```
-
-In interactive mode, `/rag` opens the RAG source menu and lets you enable or disable configured sources.
-This v1 is config-only: enabled RAG sources do not yet trigger runtime connections, tool exposure, or retrieval.
-
 In interactive mode, `/mcp` still opens the MCP server menu. You can also invoke a tool directly for connectivity checks:
 
 ```text
@@ -156,9 +137,6 @@ time> <seconds> s
 - MCP server configuration is loaded from `~/.kotlin-agent-cli/mcp-servers.json`.
 - MCP server entries use explicit transport types: `http` (`url`) or `stdio` (`command` + `args`).
 - Legacy URL-only MCP entries are still accepted on load and are rewritten to the explicit `type` format on the next save.
-- RAG source configuration is loaded from `~/.kotlin-agent-cli/rag-sources.json`.
-- RAG source entries use explicit source type `postgres` with `database_url`.
-- Enabled RAG sources are persisted independently but do not affect runtime behavior yet.
 - Scheduled jobs are persisted in `~/.kotlin-agent-cli/scheduled-jobs.json`.
 - Scheduler run logs are written to `~/.kotlin-agent-cli/scheduler-logs/<schedule-id>.log`.
 - Scheduler `launchd` definitions are written to `~/Library/LaunchAgents/com.aichallenge.day2.agent.scheduler.<schedule-id>.plist`.
@@ -224,7 +202,6 @@ time> <seconds> s
 - `/profile` - choose active user profile (`user-profile-<name>.json`)
 - `/workflow` - enable strict workflow mode with workflow selection (toggle off when already enabled)
 - `/mcp` - configure MCP servers from `mcp-servers.json` (`Enter` toggles, `I` inspects tools, `ESC` closes)
-- `/rag` - configure RAG sources from `rag-sources.json` (`Enter` toggles, `ESC` closes)
 - `/mcp <server-index> <tool-name> [json-object-args]` - call a tool on an enabled, already initialized MCP server (`args` must be a JSON object, omitted means `{}`)
 - `/invariant` - manage persisted invariant constraints (`Del` removes selected item, `Add new constraint` creates one)
 - `/reset` - clear conversation memory and transcript, clear working memory, then persist an empty session snapshot (profile memory remains intact)
