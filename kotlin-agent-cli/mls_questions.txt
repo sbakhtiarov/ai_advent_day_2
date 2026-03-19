@@ -8,4 +8,3 @@
   8. What is the message/mls media type and how does it relate to interoperability with other protocols?
   9. What extensibility mechanisms does MLS support, and what constraints ensure broad interoperability?
   10. What are the defined MLS wire formats and their purposes as registered in IANA per RFC 9420?
-  
