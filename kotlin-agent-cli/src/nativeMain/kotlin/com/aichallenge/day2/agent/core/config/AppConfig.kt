@@ -23,24 +23,12 @@ data class ModelProperties(
 )
 
 data class AppConfig(
-    val fallbackApiSettings: ApiSettings?,
-    val openAiModels: List<ModelProperties>,
-    val ollamaModels: List<ModelProperties>,
+    val models: List<ModelProperties>,
     val systemPrompt: String,
     val apiTrafficLogFilePath: String?,
 ) {
-    fun modelsFor(provider: ApiProvider): List<ModelProperties> {
-        return when (provider) {
-            ApiProvider.OPENAI -> openAiModels
-            ApiProvider.OLLAMA -> ollamaModels
-        }
-    }
-
     companion object {
         private const val DEFAULT_OPENAI_MODEL = "gpt-4.1-mini"
-        private const val DEFAULT_OLLAMA_MODEL = "qwen3:8b"
-        private const val DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
-        private const val DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1"
         private const val DEFAULT_SYSTEM_PROMPT =
             "You are a concise and pragmatic assistant. Ask for clarification only when needed."
         private const val DEFAULT_API_TRAFFIC_LOG_FILE = ".kotlin-agent-cli/openai-api-traffic.log"
@@ -130,44 +118,20 @@ data class AppConfig(
             ),
         )
 
-        private val OLLAMA_MODEL_CATALOG = listOf(
-            ModelProperties(
-                id = DEFAULT_OLLAMA_MODEL,
-            ),
-        )
-
         fun fromEnvironment(): AppConfig {
             val localProperties = loadLocalProperties()
-            val openAiModels = internalModelCatalog()
-            val ollamaModels = ollamaModelCatalog()
-            validateModelCatalog(openAiModels, requirePricing = true, requireContextWindow = true)
-            validateModelCatalog(ollamaModels, requirePricing = false, requireContextWindow = false)
+            val models = internalModelCatalog()
+            validateModelCatalog(models, requirePricing = true, requireContextWindow = true)
 
-            val apiKey = readConfig("OPENAI_API_KEY", localProperties).orEmpty().trim()
-            val baseUrl = readConfig("OPENAI_BASE_URL", localProperties).orEmpty().trim()
-                .ifEmpty { DEFAULT_OPENAI_BASE_URL }
             val configuredApiTrafficLogPath = readConfigAllowingBlank("OPENAI_API_LOG_FILE", localProperties)
             val apiTrafficLogFilePath = when {
                 configuredApiTrafficLogPath == null -> defaultApiTrafficLogFilePath()
                 configuredApiTrafficLogPath.isBlank() -> null
                 else -> configuredApiTrafficLogPath.trim()
             }
-            val fallbackApiSettings = apiKey.takeIf { it.isNotEmpty() }?.let { normalizedApiKey ->
-                ApiSettings(
-                    activeProvider = ApiProvider.OPENAI,
-                    openAi = ApiProviderSettings(
-                        baseUrl = baseUrl.trimEnd('/'),
-                        apiKey = normalizedApiKey,
-                        selectedModel = DEFAULT_OPENAI_MODEL,
-                    ),
-                    ollama = null,
-                )
-            }
 
             return AppConfig(
-                fallbackApiSettings = fallbackApiSettings,
-                openAiModels = openAiModels,
-                ollamaModels = ollamaModels,
+                models = models,
                 systemPrompt = DEFAULT_SYSTEM_PROMPT,
                 apiTrafficLogFilePath = apiTrafficLogFilePath,
             )
@@ -175,30 +139,7 @@ data class AppConfig(
 
         internal fun internalModelCatalog(): List<ModelProperties> = INTERNAL_MODEL_CATALOG.toList()
 
-        internal fun ollamaModelCatalog(): List<ModelProperties> = OLLAMA_MODEL_CATALOG.toList()
-
-        internal fun defaultModelId(provider: ApiProvider = ApiProvider.OPENAI): String {
-            return when (provider) {
-                ApiProvider.OPENAI -> DEFAULT_OPENAI_MODEL
-                ApiProvider.OLLAMA -> DEFAULT_OLLAMA_MODEL
-            }
-        }
-
-        internal fun defaultBaseUrl(provider: ApiProvider): String {
-            return when (provider) {
-                ApiProvider.OPENAI -> DEFAULT_OPENAI_BASE_URL
-                ApiProvider.OLLAMA -> DEFAULT_OLLAMA_BASE_URL
-            }
-        }
-
-        @OptIn(ExperimentalForeignApi::class)
-        private fun readConfig(name: String, localProperties: Map<String, String>): String? {
-            val envValue = readEnv(name)?.trim().orEmpty()
-            if (envValue.isNotEmpty()) {
-                return envValue
-            }
-            return localProperties[name]
-        }
+        internal fun defaultModelId(): String = DEFAULT_OPENAI_MODEL
 
         @OptIn(ExperimentalForeignApi::class)
         private fun readConfigAllowingBlank(name: String, localProperties: Map<String, String>): String? {
@@ -354,9 +295,8 @@ data class AppConfig(
                 }
             }
 
-            val expectedDefaultModel = if (requirePricing) DEFAULT_OPENAI_MODEL else DEFAULT_OLLAMA_MODEL
-            require(models.any { it.id == expectedDefaultModel }) {
-                "Default model '$expectedDefaultModel' must be present in the internal model catalog."
+            require(models.any { it.id == DEFAULT_OPENAI_MODEL }) {
+                "Default model '$DEFAULT_OPENAI_MODEL' must be present in the internal model catalog."
             }
         }
     }

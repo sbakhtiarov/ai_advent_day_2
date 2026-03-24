@@ -1,8 +1,7 @@
 package com.aichallenge.day2.agent.data.remote
 
-import com.aichallenge.day2.agent.core.config.ApiProvider
-import com.aichallenge.day2.agent.core.config.ApiProviderSettings
 import com.aichallenge.day2.agent.core.config.ApiSettings
+import com.aichallenge.day2.agent.core.config.ConfiguredApi
 import com.aichallenge.day2.agent.core.config.MutableApiSettingsService
 import com.aichallenge.day2.agent.domain.model.ConversationMessage
 import com.aichallenge.day2.agent.domain.model.LlmToolCapabilities
@@ -720,13 +719,18 @@ class OpenAiRemoteDataSourceTest {
             httpClient = httpClient,
             apiSettingsService = MutableApiSettingsService(
                 ApiSettings(
-                    activeProvider = ApiProvider.OPENAI,
-                    openAi = ApiProviderSettings(
-                        baseUrl = "https://api.openai.com/v1",
-                        apiKey = "test-key",
-                        selectedModel = "gpt-4.1-mini",
+                    activeApiId = "prod",
+                    apis = listOf(
+                        ConfiguredApi(
+                            id = "prod",
+                            name = "Production",
+                            baseUrl = "https://api.openai.com/v1",
+                            apiKey = "test-key",
+                            availableModels = listOf("gpt-4.1-mini"),
+                            defaultModel = "gpt-4.1-mini",
+                            selectedModel = "gpt-4.1-mini",
+                        ),
                     ),
-                    ollama = null,
                 ),
             ),
             json = json,

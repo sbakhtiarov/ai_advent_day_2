@@ -1,8 +1,7 @@
 package com.aichallenge.day2.agent.data.local
 
-import com.aichallenge.day2.agent.core.config.ApiProvider
-import com.aichallenge.day2.agent.core.config.ApiProviderSettings
 import com.aichallenge.day2.agent.core.config.ApiSettings
+import com.aichallenge.day2.agent.core.config.ConfiguredApi
 import com.aichallenge.day2.agent.domain.repository.ApiSettingsStore
 import kotlinx.cinterop.ByteVar
 import kotlinx.cinterop.ExperimentalForeignApi
@@ -41,7 +40,7 @@ class JsonFileApiSettingsStore(
 
     override fun save(settings: ApiSettings) {
         val normalizedSettings = settings.normalizedOrNull()
-            ?: throw IllegalArgumentException("API settings must include a configured active provider.")
+            ?: throw IllegalArgumentException("API settings must include at least one valid configured API.")
         val payload = json.encodeToString(
             ApiSettingsSnapshotDto.fromDomainModel(normalizedSettings),
         )
@@ -80,7 +79,7 @@ class JsonFileApiSettingsStore(
     }
 
     companion object {
-        private const val SNAPSHOT_VERSION = 1
+        private const val SNAPSHOT_VERSION = 3
         private const val DIRECTORY_MODE = 493 // 0755
         private const val READ_BUFFER_SIZE = 4096
 
@@ -137,51 +136,60 @@ class JsonFileApiSettingsStore(
 
 @Serializable
 private data class ApiSettingsSnapshotDto(
-    val version: Int = 1,
-    val active_provider: String = "",
-    val openai: ApiProviderSettingsSnapshotDto? = null,
-    val ollama: ApiProviderSettingsSnapshotDto? = null,
+    val version: Int = 3,
+    val active_api_id: String = "",
+    val apis: List<ConfiguredApiSnapshotDto> = emptyList(),
 ) {
     fun toDomainModelOrNull(): ApiSettings? {
-        val activeProvider = ApiProvider.fromStorageValue(active_provider) ?: return null
         return ApiSettings(
-            activeProvider = activeProvider,
-            openAi = openai?.toDomainModelOrNull(),
-            ollama = ollama?.toDomainModelOrNull(),
-        ).normalizedOrNull()
+            activeApiId = active_api_id,
+            apis = apis.mapNotNull { api -> api.toDomainModelOrNull() },
+        ).takeIf { settings -> settings.apis.size == apis.size }
+            ?.normalizedOrNull()
     }
 
     companion object {
         fun fromDomainModel(settings: ApiSettings): ApiSettingsSnapshotDto {
             return ApiSettingsSnapshotDto(
-                version = 1,
-                active_provider = settings.activeProvider.name,
-                openai = settings.openAi?.let(ApiProviderSettingsSnapshotDto::fromDomainModel),
-                ollama = settings.ollama?.let(ApiProviderSettingsSnapshotDto::fromDomainModel),
+                version = 3,
+                active_api_id = settings.activeApiId,
+                apis = settings.apis.map(ConfiguredApiSnapshotDto::fromDomainModel),
             )
         }
     }
 }
 
 @Serializable
-private data class ApiProviderSettingsSnapshotDto(
+private data class ConfiguredApiSnapshotDto(
+    val id: String = "",
+    val name: String = "",
     val base_url: String = "",
     val api_key: String = "",
+    val available_models: List<String> = emptyList(),
+    val default_model: String = "",
     val selected_model: String = "",
 ) {
-    fun toDomainModelOrNull(): ApiProviderSettings? {
-        return ApiProviderSettings(
+    fun toDomainModelOrNull(): ConfiguredApi? {
+        return ConfiguredApi(
+            id = id,
+            name = name,
             baseUrl = base_url,
             apiKey = api_key,
+            availableModels = available_models,
+            defaultModel = default_model,
             selectedModel = selected_model,
         ).normalizedOrNull()
     }
 
     companion object {
-        fun fromDomainModel(settings: ApiProviderSettings): ApiProviderSettingsSnapshotDto {
-            return ApiProviderSettingsSnapshotDto(
+        fun fromDomainModel(settings: ConfiguredApi): ConfiguredApiSnapshotDto {
+            return ConfiguredApiSnapshotDto(
+                id = settings.id,
+                name = settings.name,
                 base_url = settings.baseUrl,
                 api_key = settings.apiKey,
+                available_models = settings.availableModels,
+                default_model = settings.defaultModel,
                 selected_model = settings.selectedModel,
             )
         }

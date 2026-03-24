@@ -3,8 +3,6 @@
 package com.aichallenge.day2.agent
 
 import com.aichallenge.day2.agent.core.config.AppConfig
-import com.aichallenge.day2.agent.core.config.ApiProvider
-import com.aichallenge.day2.agent.core.config.ApiProviderSettings
 import com.aichallenge.day2.agent.core.config.ApiSettings
 import com.aichallenge.day2.agent.core.config.MutableApiSettingsService
 import com.aichallenge.day2.agent.core.config.ProfileEnvironmentFactsProvider
@@ -111,7 +109,7 @@ private suspend fun runConfiguredApp(
         apiSettingsStore = apiSettingsStore,
     )
     if (!isInteractiveMode && initialApiSettings == null) {
-        println("Configuration error: no API provider is configured.")
+        println("Configuration error: no API is configured.")
         printEnvironmentHelp()
         return 1
     }
@@ -183,10 +181,7 @@ private suspend fun runConfiguredApp(
         initialSystemPrompt = config.systemPrompt,
         apiSettingsService = apiSettingsService,
         apiSettingsStore = apiSettingsStore,
-        modelsByProvider = mapOf(
-            ApiProvider.OPENAI to config.openAiModels,
-            ApiProvider.OLLAMA to config.ollamaModels,
-        ),
+        availableModels = config.models,
         sessionMemoryStore = sessionMemoryStore,
         workingMemoryStore = workingMemoryStore,
         profileMemoryStore = profileMemoryStore,
@@ -253,12 +248,10 @@ private fun printUsage() {
 private fun printEnvironmentHelp() {
     println(
         """
-        Interactive mode can be configured with /api and persists settings to ~/.kotlin-agent-cli/api-settings.json.
-        OPENAI_* environment variables or local.properties are still supported as OpenAI fallback defaults.
+        Interactive mode loads APIs from ~/.kotlin-agent-cli/api-settings.json.
+        Use /api to select the active API from that file.
 
-        Optional configuration (environment variable or local.properties):
-          OPENAI_API_KEY       OpenAI API key
-          OPENAI_BASE_URL      default: https://api.openai.com/v1
+        Optional logging configuration (environment variable or local.properties):
           OPENAI_API_LOG_FILE  default: ~/.kotlin-agent-cli/openai-api-traffic.log (blank disables)
         """.trimIndent(),
     )
@@ -269,8 +262,7 @@ private fun resolveInitialApiSettings(
     apiSettingsStore: JsonFileApiSettingsStore?,
 ): ApiSettings? {
     val persistedSettings = runCatching { apiSettingsStore?.load() }.getOrNull()
-    val preferredSettings = persistedSettings ?: config.fallbackApiSettings
-    return preferredSettings?.let { settings ->
+    return persistedSettings?.let { settings ->
         normalizeApiSettingsForCatalog(
             settings = settings,
             config = config,
@@ -278,29 +270,10 @@ private fun resolveInitialApiSettings(
     }
 }
 
-private fun normalizeApiSettingsForCatalog(
+@Suppress("UNUSED_PARAMETER")
+internal fun normalizeApiSettingsForCatalog(
     settings: ApiSettings,
     config: AppConfig,
 ): ApiSettings? {
-    fun normalizeProviderSettings(
-        provider: ApiProvider,
-        providerSettings: ApiProviderSettings?,
-    ): ApiProviderSettings? {
-        val normalizedSettings = providerSettings?.normalizedOrNull() ?: return null
-        if (provider == ApiProvider.OPENAI && normalizedSettings.apiKey.isBlank()) {
-            return null
-        }
-        val availableModelIds = config.modelsFor(provider).map { model -> model.id }
-        val selectedModel = normalizedSettings.selectedModel
-            .takeIf { modelId -> modelId in availableModelIds }
-            ?: availableModelIds.firstOrNull()
-            ?: return null
-        return normalizedSettings.copy(selectedModel = selectedModel)
-    }
-
-    return ApiSettings(
-        activeProvider = settings.activeProvider,
-        openAi = normalizeProviderSettings(ApiProvider.OPENAI, settings.openAi),
-        ollama = normalizeProviderSettings(ApiProvider.OLLAMA, settings.ollama),
-    ).normalizedOrNull()
+    return settings.normalizedOrNull()
 }

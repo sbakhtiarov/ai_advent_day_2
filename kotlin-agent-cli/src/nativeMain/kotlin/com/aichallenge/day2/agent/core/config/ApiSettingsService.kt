@@ -3,9 +3,7 @@ package com.aichallenge.day2.agent.core.config
 interface ApiSettingsService {
     fun currentSettings(): ApiSettings?
 
-    fun currentProvider(): ApiProvider? = currentSettings()?.activeProvider
-
-    fun currentProviderSettings(): ApiProviderSettings? = currentSettings()?.activeProviderSettingsOrNull()
+    fun currentApi(): ConfiguredApi? = currentSettings()?.activeApiOrNull()
 
     fun replace(settings: ApiSettings?)
 }
@@ -21,4 +19,3 @@ class MutableApiSettingsService(
         this.settings = settings?.normalizedOrNull()
     }
 }
-

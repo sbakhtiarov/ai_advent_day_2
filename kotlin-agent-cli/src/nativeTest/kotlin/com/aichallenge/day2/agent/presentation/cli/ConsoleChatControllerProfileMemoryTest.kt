@@ -1,6 +1,5 @@
 package com.aichallenge.day2.agent.presentation.cli
 
-import com.aichallenge.day2.agent.core.config.ApiProvider
 import com.aichallenge.day2.agent.core.config.MutableApiSettingsService
 import com.aichallenge.day2.agent.core.config.ModelPricing
 import com.aichallenge.day2.agent.core.config.ModelProperties
@@ -451,16 +450,14 @@ class ConsoleChatControllerProfileMemoryTest {
             sendPromptUseCase = SendPromptUseCase(repository),
             initialSystemPrompt = "Base system prompt",
             apiSettingsService = MutableApiSettingsService(defaultApiSettings()),
-            modelsByProvider = mapOf(
-                ApiProvider.OPENAI to listOf(
-                    ModelProperties(
-                        id = "gpt-4.1-mini",
-                        pricing = ModelPricing(
-                            inputUsdPer1M = 0.40,
-                            outputUsdPer1M = 1.60,
-                        ),
-                        contextWindowTokens = 1_047_576,
+            availableModels = listOf(
+                ModelProperties(
+                    id = "gpt-4.1-mini",
+                    pricing = ModelPricing(
+                        inputUsdPer1M = 0.40,
+                        outputUsdPer1M = 1.60,
                     ),
+                    contextWindowTokens = 1_047_576,
                 ),
             ),
             io = io,
@@ -591,6 +588,8 @@ private class ProfileMemoryControllerTestCliIO(
         }
         return currentSelection
     }
+
+    override fun openApiMenu(options: List<String>, currentSelection: Int): Int? = currentSelection
 
     override fun openMcpMenu(
         options: List<McpMenuOption>,

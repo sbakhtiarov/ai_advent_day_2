@@ -40,6 +40,7 @@ interface CliIO {
     fun hideThinkingIndicator() {}
     fun updateFooterStatusLabel(label: String?) {}
     fun openCompactionMenu(options: List<String>, currentSelection: Int): Int?
+    fun openApiMenu(options: List<String>, currentSelection: Int): Int?
     fun openMcpMenu(options: List<McpMenuOption>, currentSelection: Int, reuseAnchor: Boolean = false): McpMenuResult?
     fun openProfileMenu(options: List<String>, currentSelection: Int): Int?
     fun openWorkflowMenu(options: List<String>, currentSelection: Int): Int?
@@ -505,6 +506,100 @@ object StdCliIO : CliIO {
                             action = McpMenuAction.INFO,
                             selectedIndex = selectedIndex,
                         )
+                        break
+                    }
+
+                    ESCAPE -> {
+                        val escNext = readOptionalByte(timeoutDeciseconds = 1)
+                        if (escNext == null) {
+                            result = null
+                            break
+                        }
+
+                        if (escNext == CSI) {
+                            when (readOptionalByte(timeoutDeciseconds = 1)) {
+                                ARROW_UP -> {
+                                    selectedIndex = (selectedIndex - 1 + options.size) % options.size
+                                    renderMenu()
+                                }
+
+                                ARROW_DOWN -> {
+                                    selectedIndex = (selectedIndex + 1) % options.size
+                                    renderMenu()
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        print("\u001B8")
+        print('\r')
+        print("\u001B[J")
+        return result
+    }
+
+    override fun openApiMenu(options: List<String>, currentSelection: Int): Int? {
+        if (options.isEmpty()) {
+            return null
+        }
+
+        var selectedIndex = currentSelection.coerceIn(0, options.lastIndex)
+
+        fun buildMenuLines(): List<String> {
+            val lines = mutableListOf<String>()
+            lines += "   APIs"
+            lines += ""
+            options.forEachIndexed { index, option ->
+                val optionText = "${index + 1}. $option"
+                val decorated = if (index == selectedIndex) {
+                    "$OPTION_SELECTED_COLOR$optionText$ANSI_RESET"
+                } else {
+                    optionText
+                }
+                lines += "   $decorated"
+            }
+            lines += ""
+            lines += "   Press Enter to apply, ESC to close"
+            return lines
+        }
+
+        fun renderMenu() {
+            print("\u001B8")
+            print('\r')
+
+            val terminalWidth = detectTerminalWidth().coerceAtLeast(1)
+            val menuLines = buildMenuLines()
+            val menuHeight = calculateWrappedLineCount(menuLines, terminalWidth)
+            ensureMenuFits(requiredMenuLines = menuHeight)
+
+            print("\u001B7")
+            print("\u001B[J")
+            menuLines.forEachIndexed { index, line ->
+                print(line)
+                if (index != menuLines.lastIndex) {
+                    print('\n')
+                }
+            }
+        }
+
+        print("\r\n")
+        print("\u001B7")
+        renderMenu()
+
+        var result: Int? = null
+
+        withRawInput<Unit> {
+            while (true) {
+                when (readByte()) {
+                    null -> {
+                        result = null
+                        break
+                    }
+
+                    ENTER_CR, ENTER_LF -> {
+                        result = selectedIndex
                         break
                     }
 

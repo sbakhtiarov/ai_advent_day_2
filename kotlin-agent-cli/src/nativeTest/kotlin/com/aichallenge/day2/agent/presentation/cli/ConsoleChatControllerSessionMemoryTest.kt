@@ -1,9 +1,8 @@
 package com.aichallenge.day2.agent.presentation.cli
 
-import com.aichallenge.day2.agent.core.config.ApiProvider
-import com.aichallenge.day2.agent.core.config.ApiProviderSettings
 import com.aichallenge.day2.agent.core.config.ApiSettings
 import com.aichallenge.day2.agent.core.config.ApiSettingsService
+import com.aichallenge.day2.agent.core.config.ConfiguredApi
 import com.aichallenge.day2.agent.core.config.ModelPricing
 import com.aichallenge.day2.agent.core.config.ModelProperties
 import com.aichallenge.day2.agent.core.config.MutableApiSettingsService
@@ -2230,7 +2229,7 @@ class ConsoleChatControllerSessionMemoryTest {
             output,
             "commands: /help, /api, /models, /model <id|number>, /memory, /compact, /profile, /workflow, /mcp, /invariant, /reset, /exit, @<path>",
         )
-        assertContains(output, "/api                 configure the active API provider (OpenAI or Ollama)")
+        assertContains(output, "/api                 select the active API from api-settings.json")
         assertContains(output, "/memory              show session-memory context usage")
         assertContains(output, "/compact             choose memory compaction strategy")
         assertContains(output, "/profile             choose active user profile")
@@ -2255,16 +2254,22 @@ class ConsoleChatControllerSessionMemoryTest {
         controller.runInteractive()
 
         assertTrue(repository.conversations.isEmpty())
-        assertContains(io.outputText(), "system> no API provider configured. Run /api to configure OpenAI or Ollama.")
+        assertContains(
+            io.outputText(),
+            "system> no API configured. Define APIs in ~/.kotlin-agent-cli/api-settings.json and use /api to select one.",
+        )
     }
 
     @Test
-    fun apiCommandSwitchesToOllamaImmediatelyAndPersists() = runBlocking {
+    fun apiCommandSwitchesToSelectedConfiguredApiAndPersists() = runBlocking {
         val repository = RecordingAgentRepository(
-            responses = listOf(Result.success(AgentResponse(content = "ollama answer"))),
+            responses = listOf(Result.success(AgentResponse(content = "local answer"))),
         )
         val apiSettingsStore = RecordingApiSettingsStore(defaultApiSettings())
-        val io = FakeCliIO(inputs = listOf("/api", "2", "", "", "/models", "prompt one", "/exit"))
+        val io = FakeCliIO(
+            inputs = listOf("/api", "/models", "prompt one", "/exit"),
+            apiSelections = listOf(1),
+        )
         val controller = createController(
             repository = repository,
             io = io,
@@ -2273,13 +2278,16 @@ class ConsoleChatControllerSessionMemoryTest {
 
         controller.runInteractive()
 
-        assertEquals(ApiProvider.OLLAMA, apiSettingsStore.saveStates.last().activeProvider)
-        assertEquals("qwen3:8b", apiSettingsStore.saveStates.last().ollama?.selectedModel)
-        assertEquals(listOf<String?>("qwen3:8b"), repository.requestedModels)
+        assertEquals("local", apiSettingsStore.saveStates.last().activeApiId)
+        assertEquals("Local", io.apiMenuOptions.last())
+        assertEquals("gpt-4.1-mini", apiSettingsStore.saveStates.last().activeApiOrNull()?.selectedModel)
+        assertEquals(listOf<String?>("gpt-4.1-mini"), repository.requestedModels)
         val output = io.outputText()
-        assertContains(output, "system> API provider switched to 'Ollama'")
-        assertContains(output, "Available models for Ollama:")
-        assertContains(output, "qwen3:8b")
+        assertContains(output, "system> active API set to 'Local'")
+        assertContains(output, "default_model='gpt-4.1-mini'")
+        assertContains(output, "Available models for Local:")
+        assertContains(output, "gpt-4.1-mini")
+        assertContains(output, "gpt-4.1-nano")
     }
 
     @Test
@@ -2297,9 +2305,119 @@ class ConsoleChatControllerSessionMemoryTest {
 
         controller.runInteractive()
 
-        assertEquals("gpt-4.1-nano", apiSettingsStore.saveStates.last().openAi?.selectedModel)
+        assertEquals("gpt-4.1-nano", apiSettingsStore.saveStates.last().activeApiOrNull()?.selectedModel)
         assertEquals(listOf<String?>("gpt-4.1-nano"), repository.requestedModels)
         assertContains(io.outputText(), "system> model switched to 'gpt-4.1-nano'")
+    }
+
+    @Test
+    fun modelCommandRejectsModelsOutsideActiveApiCatalog() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(Result.success(AgentResponse(content = "unused"))),
+        )
+        val restrictedSettings = ApiSettings(
+            activeApiId = "local",
+            apis = listOf(
+                ConfiguredApi(
+                    id = "local",
+                    name = "Local",
+                    baseUrl = "http://127.0.0.1:11434/v1",
+                    apiKey = "local-key",
+                    availableModels = listOf("gpt-4.1-nano"),
+                    defaultModel = "gpt-4.1-nano",
+                    selectedModel = "gpt-4.1-nano",
+                ),
+            ),
+        )
+        val io = FakeCliIO(inputs = listOf("/model gpt-4.1-mini", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            apiSettingsService = MutableApiSettingsService(restrictedSettings),
+            apiSettingsStore = RecordingApiSettingsStore(restrictedSettings),
+        )
+
+        controller.runInteractive()
+
+        assertTrue(repository.conversations.isEmpty())
+        assertContains(io.outputText(), "system> unknown model 'gpt-4.1-mini'. Run /models to view available models.")
+    }
+
+    @Test
+    fun modelsCommandListsOnlyModelsConfiguredForActiveApi() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(Result.success(AgentResponse(content = "unused"))),
+        )
+        val restrictedSettings = ApiSettings(
+            activeApiId = "local",
+            apis = listOf(
+                ConfiguredApi(
+                    id = "prod",
+                    name = "Production",
+                    baseUrl = "https://api.openai.com/v1",
+                    apiKey = "test-key",
+                    availableModels = listOf("gpt-4.1-mini", "gpt-4.1-nano"),
+                    defaultModel = "gpt-4.1-mini",
+                    selectedModel = "gpt-4.1-mini",
+                ),
+                ConfiguredApi(
+                    id = "local",
+                    name = "Local",
+                    baseUrl = "http://127.0.0.1:11434/v1",
+                    apiKey = "local-key",
+                    availableModels = listOf("gpt-4.1-nano"),
+                    defaultModel = "gpt-4.1-nano",
+                    selectedModel = "gpt-4.1-nano",
+                ),
+            ),
+        )
+        val io = FakeCliIO(inputs = listOf("/models", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            apiSettingsService = MutableApiSettingsService(restrictedSettings),
+        )
+
+        controller.runInteractive()
+
+        val output = io.outputText()
+        assertContains(output, "Available models for Local:")
+        assertContains(output, "gpt-4.1-nano")
+        assertFalse(output.contains("gpt-4.1-mini"))
+    }
+
+    @Test
+    fun modelsCommandShowsConfiguredUnknownModelsWithUnavailableMetadata() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(Result.success(AgentResponse(content = "unused"))),
+        )
+        val restrictedSettings = ApiSettings(
+            activeApiId = "local",
+            apis = listOf(
+                ConfiguredApi(
+                    id = "local",
+                    name = "Local",
+                    baseUrl = "http://127.0.0.1:11434/v1",
+                    apiKey = "local-key",
+                    availableModels = listOf("qwen3:8b"),
+                    defaultModel = "qwen3:8b",
+                    selectedModel = "qwen3:8b",
+                ),
+            ),
+        )
+        val io = FakeCliIO(inputs = listOf("/models", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            apiSettingsService = MutableApiSettingsService(restrictedSettings),
+            apiSettingsStore = RecordingApiSettingsStore(restrictedSettings),
+        )
+
+        controller.runInteractive()
+
+        val output = io.outputText()
+        assertContains(output, "Available models for Local:")
+        assertContains(output, "qwen3:8b (ctx=n/a; in=n/a; out=n/a)")
     }
 
     @Test
@@ -2311,7 +2429,10 @@ class ConsoleChatControllerSessionMemoryTest {
             loadedSettings = defaultApiSettings(),
             failOnSaveCalls = setOf(1),
         )
-        val io = FakeCliIO(inputs = listOf("/api", "2", "", "", "prompt one", "/exit"))
+        val io = FakeCliIO(
+            inputs = listOf("/api", "prompt one", "/exit"),
+            apiSelections = listOf(1),
+        )
         val controller = createController(
             repository = repository,
             io = io,
@@ -4506,7 +4627,7 @@ class ConsoleChatControllerSessionMemoryTest {
         io: CliIO,
         apiSettingsService: ApiSettingsService = MutableApiSettingsService(defaultApiSettings()),
         apiSettingsStore: ApiSettingsStore? = null,
-        modelsByProvider: Map<ApiProvider, List<ModelProperties>> = defaultModelsByProvider(),
+        availableModels: List<ModelProperties> = defaultModels(),
         sessionMemoryStore: SessionMemoryStore? = null,
         userDefinedProfileStore: UserDefinedProfileStore? = null,
         userDefinedWorkflowStore: UserDefinedWorkflowStore? = null,
@@ -4526,7 +4647,7 @@ class ConsoleChatControllerSessionMemoryTest {
             initialSystemPrompt = "Base system prompt",
             apiSettingsService = apiSettingsService,
             apiSettingsStore = apiSettingsStore,
-            modelsByProvider = modelsByProvider,
+            availableModels = availableModels,
             io = io,
             sessionMemoryStore = sessionMemoryStore,
             userDefinedProfileStore = userDefinedProfileStore,
@@ -4545,42 +4666,47 @@ class ConsoleChatControllerSessionMemoryTest {
 
 internal fun defaultApiSettings(): ApiSettings {
     return ApiSettings(
-        activeProvider = ApiProvider.OPENAI,
-        openAi = ApiProviderSettings(
-            baseUrl = "https://api.openai.com/v1",
-            apiKey = "test-key",
-            selectedModel = "gpt-4.1-mini",
-        ),
-        ollama = ApiProviderSettings(
-            baseUrl = "http://127.0.0.1:11434/v1",
-            apiKey = "ollama",
-            selectedModel = "qwen3:8b",
+        activeApiId = "prod",
+        apis = listOf(
+            ConfiguredApi(
+                id = "prod",
+                name = "Production",
+                baseUrl = "https://api.openai.com/v1",
+                apiKey = "test-key",
+                availableModels = listOf("gpt-4.1-mini", "gpt-4.1-nano"),
+                defaultModel = "gpt-4.1-mini",
+                selectedModel = "gpt-4.1-mini",
+            ),
+            ConfiguredApi(
+                id = "local",
+                name = "Local",
+                baseUrl = "http://127.0.0.1:11434/v1",
+                apiKey = "local-key",
+                availableModels = listOf("gpt-4.1-mini", "gpt-4.1-nano"),
+                defaultModel = "gpt-4.1-mini",
+                selectedModel = "gpt-4.1-nano",
+            ),
         ),
     )
 }
 
-internal fun defaultModelsByProvider(): Map<ApiProvider, List<ModelProperties>> {
-    return mapOf(
-        ApiProvider.OPENAI to listOf(
-            ModelProperties(
-                id = "gpt-4.1-mini",
-                pricing = ModelPricing(
-                    inputUsdPer1M = 0.40,
-                    outputUsdPer1M = 1.60,
-                ),
-                contextWindowTokens = 1_047_576,
+internal fun defaultModels(): List<ModelProperties> {
+    return listOf(
+        ModelProperties(
+            id = "gpt-4.1-mini",
+            pricing = ModelPricing(
+                inputUsdPer1M = 0.40,
+                outputUsdPer1M = 1.60,
             ),
-            ModelProperties(
-                id = "gpt-4.1-nano",
-                pricing = ModelPricing(
-                    inputUsdPer1M = 0.10,
-                    outputUsdPer1M = 0.40,
-                ),
-                contextWindowTokens = 1_047_576,
-            ),
+            contextWindowTokens = 1_047_576,
         ),
-        ApiProvider.OLLAMA to listOf(
-            ModelProperties(id = "qwen3:8b"),
+        ModelProperties(
+            id = "gpt-4.1-nano",
+            pricing = ModelPricing(
+                inputUsdPer1M = 0.10,
+                outputUsdPer1M = 0.40,
+            ),
+            contextWindowTokens = 1_047_576,
         ),
     )
 }
@@ -4674,6 +4800,7 @@ private fun httpMcpServer(name: String, url: String, enabled: Boolean, isPublic:
 private class FakeCliIO(
     inputs: List<String>,
     private val compactionSelections: List<Int?> = emptyList(),
+    private val apiSelections: List<Int?> = emptyList(),
     private val mcpSelections: List<McpMenuResult?> = emptyList(),
     private val profileSelections: List<Int?> = emptyList(),
     private val workflowSelections: List<Int?> = emptyList(),
@@ -4681,6 +4808,7 @@ private class FakeCliIO(
 ) : CliIO {
     private val queuedInputs = ArrayDeque<String?>(inputs)
     private var nextCompactionSelectionIndex = 0
+    private var nextApiSelectionIndex = 0
     private var nextMcpSelectionIndex = 0
     private var nextProfileSelectionIndex = 0
     private var nextWorkflowSelectionIndex = 0
@@ -4697,6 +4825,7 @@ private class FakeCliIO(
     val liveDialogLines = mutableListOf<String>()
     val footerLabels = mutableListOf<String?>()
     val footerPrompts = mutableListOf<String>()
+    val apiMenuOptions = mutableListOf<String>()
     val mcpMenuOptions = mutableListOf<McpMenuOption>()
 
     override fun clearScreen() = Unit
@@ -4738,6 +4867,17 @@ private class FakeCliIO(
         val selection = compactionSelections.getOrNull(nextCompactionSelectionIndex)
         if (nextCompactionSelectionIndex < compactionSelections.size) {
             nextCompactionSelectionIndex += 1
+            return selection
+        }
+        return currentSelection
+    }
+
+    override fun openApiMenu(options: List<String>, currentSelection: Int): Int? {
+        apiMenuOptions.clear()
+        apiMenuOptions += options
+        val selection = apiSelections.getOrNull(nextApiSelectionIndex)
+        if (nextApiSelectionIndex < apiSelections.size) {
+            nextApiSelectionIndex += 1
             return selection
         }
         return currentSelection

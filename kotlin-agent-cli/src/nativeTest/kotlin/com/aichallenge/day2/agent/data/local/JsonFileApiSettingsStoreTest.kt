@@ -1,8 +1,7 @@
 package com.aichallenge.day2.agent.data.local
 
-import com.aichallenge.day2.agent.core.config.ApiProvider
-import com.aichallenge.day2.agent.core.config.ApiProviderSettings
 import com.aichallenge.day2.agent.core.config.ApiSettings
+import com.aichallenge.day2.agent.core.config.ConfiguredApi
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.convert
 import platform.posix.EEXIST
@@ -19,20 +18,30 @@ import kotlin.test.assertNull
 
 class JsonFileApiSettingsStoreTest {
     @Test
-    fun saveAndLoadRoundTripPreservesProviders() {
+    fun saveAndLoadRoundTripPreservesConfiguredApis() {
         val filePath = uniqueApiSettingsFilePath()
         val store = JsonFileApiSettingsStore(filePath)
         val settings = ApiSettings(
-            activeProvider = ApiProvider.OLLAMA,
-            openAi = ApiProviderSettings(
-                baseUrl = "https://api.openai.com/v1",
-                apiKey = "sk-test",
-                selectedModel = "gpt-4.1-mini",
-            ),
-            ollama = ApiProviderSettings(
-                baseUrl = "http://127.0.0.1:11434/v1",
-                apiKey = "ollama",
-                selectedModel = "qwen3:8b",
+            activeApiId = "local",
+            apis = listOf(
+                ConfiguredApi(
+                    id = "prod",
+                    name = "Production",
+                    baseUrl = "https://api.openai.com/v1",
+                    apiKey = "sk-prod",
+                    availableModels = listOf("gpt-4.1-mini", "gpt-4.1-nano"),
+                    defaultModel = "gpt-4.1-mini",
+                    selectedModel = "gpt-4.1-mini",
+                ),
+                ConfiguredApi(
+                    id = "local",
+                    name = "Local",
+                    baseUrl = "https://localhost:8080/v1",
+                    apiKey = "sk-local",
+                    availableModels = listOf("gpt-4.1-nano"),
+                    defaultModel = "gpt-4.1-nano",
+                    selectedModel = "gpt-4.1-nano",
+                ),
             ),
         )
 
@@ -59,26 +68,205 @@ class JsonFileApiSettingsStoreTest {
     }
 
     @Test
-    fun loadReturnsNullWhenActiveProviderIsIncomplete() {
+    fun loadReturnsNullWhenSnapshotVersionIsOld() {
         val filePath = uniqueApiSettingsFilePath()
         ensureDirectoryExists(parentDirectory(filePath))
         writeTextFile(
             filePath,
             """
                 {
-                  "version": 1,
-                  "active_provider": "OPENAI",
-                  "openai": {
-                    "base_url": "https://api.openai.com/v1",
-                    "api_key": "",
-                    "selected_model": "gpt-4.1-mini"
-                  }
+                  "version": 2,
+                  "active_api_id": "prod",
+                  "apis": [
+                    {
+                      "id": "prod",
+                      "name": "Production",
+                      "base_url": "https://api.openai.com/v1",
+                      "api_key": "sk-prod",
+                      "selected_model": "gpt-4.1-mini"
+                    }
+                  ]
                 }
             """.trimIndent(),
         )
         val store = JsonFileApiSettingsStore(filePath)
 
         assertNull(store.load())
+    }
+
+    @Test
+    fun loadReturnsNullWhenDuplicateApiIdsExist() {
+        val filePath = uniqueApiSettingsFilePath()
+        ensureDirectoryExists(parentDirectory(filePath))
+        writeTextFile(filePath, validSnapshot().replaceFirst(""""id": "local"""", """"id": "prod""""))
+        val store = JsonFileApiSettingsStore(filePath)
+
+        assertNull(store.load())
+    }
+
+    @Test
+    fun loadReturnsNullWhenDuplicateApiNamesExist() {
+        val filePath = uniqueApiSettingsFilePath()
+        ensureDirectoryExists(parentDirectory(filePath))
+        writeTextFile(filePath, validSnapshot().replaceFirst(""""name": "Local"""", """"name": "Production""""))
+        val store = JsonFileApiSettingsStore(filePath)
+
+        assertNull(store.load())
+    }
+
+    @Test
+    fun loadReturnsNullWhenAvailableModelsAreMissing() {
+        val filePath = uniqueApiSettingsFilePath()
+        ensureDirectoryExists(parentDirectory(filePath))
+        writeTextFile(
+            filePath,
+            """
+                {
+                  "version": 3,
+                  "active_api_id": "prod",
+                  "apis": [
+                    {
+                      "id": "prod",
+                      "name": "Production",
+                      "base_url": "https://api.openai.com/v1",
+                      "api_key": "sk-prod",
+                      "available_models": [],
+                      "default_model": "gpt-4.1-mini",
+                      "selected_model": "gpt-4.1-mini"
+                    }
+                  ]
+                }
+            """.trimIndent(),
+        )
+        val store = JsonFileApiSettingsStore(filePath)
+
+        assertNull(store.load())
+    }
+
+    @Test
+    fun loadReturnsNullWhenDefaultModelIsNotInAvailableModels() {
+        val filePath = uniqueApiSettingsFilePath()
+        ensureDirectoryExists(parentDirectory(filePath))
+        writeTextFile(
+            filePath,
+            """
+                {
+                  "version": 3,
+                  "active_api_id": "prod",
+                  "apis": [
+                    {
+                      "id": "prod",
+                      "name": "Production",
+                      "base_url": "https://api.openai.com/v1",
+                      "api_key": "sk-prod",
+                      "available_models": ["gpt-4.1-nano"],
+                      "default_model": "gpt-4.1-mini",
+                      "selected_model": "gpt-4.1-nano"
+                    }
+                  ]
+                }
+            """.trimIndent(),
+        )
+        val store = JsonFileApiSettingsStore(filePath)
+
+        assertNull(store.load())
+    }
+
+    @Test
+    fun loadReturnsNullWhenAvailableModelsContainDuplicates() {
+        val filePath = uniqueApiSettingsFilePath()
+        ensureDirectoryExists(parentDirectory(filePath))
+        writeTextFile(
+            filePath,
+            """
+                {
+                  "version": 3,
+                  "active_api_id": "prod",
+                  "apis": [
+                    {
+                      "id": "prod",
+                      "name": "Production",
+                      "base_url": "https://api.openai.com/v1",
+                      "api_key": "sk-prod",
+                      "available_models": ["gpt-4.1-mini", "gpt-4.1-mini"],
+                      "default_model": "gpt-4.1-mini",
+                      "selected_model": "gpt-4.1-mini"
+                    }
+                  ]
+                }
+            """.trimIndent(),
+        )
+        val store = JsonFileApiSettingsStore(filePath)
+
+        assertNull(store.load())
+    }
+
+    @Test
+    fun loadNormalizesMissingSelectedModelToDefaultModel() {
+        val filePath = uniqueApiSettingsFilePath()
+        ensureDirectoryExists(parentDirectory(filePath))
+        writeTextFile(
+            filePath,
+            """
+                {
+                  "version": 3,
+                  "active_api_id": "prod",
+                  "apis": [
+                    {
+                      "id": "prod",
+                      "name": "Production",
+                      "base_url": "https://api.openai.com/v1",
+                      "api_key": "sk-prod",
+                      "available_models": ["gpt-4.1-mini", "gpt-4.1-nano"],
+                      "default_model": "gpt-4.1-mini",
+                      "selected_model": ""
+                    }
+                  ]
+                }
+            """.trimIndent(),
+        )
+        val store = JsonFileApiSettingsStore(filePath)
+
+        assertEquals("gpt-4.1-mini", store.load()?.activeApiOrNull()?.selectedModel)
+    }
+
+    @Test
+    fun loadFallsBackToFirstApiWhenActiveApiIdIsMissing() {
+        val filePath = uniqueApiSettingsFilePath()
+        ensureDirectoryExists(parentDirectory(filePath))
+        writeTextFile(filePath, validSnapshot().replaceFirst(""""active_api_id": "prod"""", """"active_api_id": "missing""""))
+        val store = JsonFileApiSettingsStore(filePath)
+
+        assertEquals("prod", store.load()?.activeApiId)
+    }
+
+    private fun validSnapshot(): String {
+        return """
+            {
+              "version": 3,
+              "active_api_id": "prod",
+              "apis": [
+                {
+                  "id": "prod",
+                  "name": "Production",
+                  "base_url": "https://api.openai.com/v1",
+                  "api_key": "sk-prod",
+                  "available_models": ["gpt-4.1-mini", "gpt-4.1-nano"],
+                  "default_model": "gpt-4.1-mini",
+                  "selected_model": "gpt-4.1-mini"
+                },
+                {
+                  "id": "local",
+                  "name": "Local",
+                  "base_url": "https://localhost:8080/v1",
+                  "api_key": "sk-local",
+                  "available_models": ["gpt-4.1-nano"],
+                  "default_model": "gpt-4.1-nano",
+                  "selected_model": "gpt-4.1-nano"
+                }
+              ]
+            }
+        """.trimIndent()
     }
 }
 

@@ -16,67 +16,50 @@ build/bin/native/releaseExecutable/agent-cli.kexe
 
 ## Run
 
-You can configure the active provider interactively with `/api`. The CLI persists that selection to `~/.kotlin-agent-cli/api-settings.json`.
-
-You can also provide OpenAI fallback defaults through `local.properties` in this folder (`kotlin-agent-cli/local.properties`):
-
-```properties
-OPENAI_API_KEY=sk-...
-OPENAI_BASE_URL=https://api.openai.com/v1
-OPENAI_API_LOG_FILE=/Users/you/.kotlin-agent-cli/openai-api-traffic.log
-```
-
-Environment variables are still supported and take precedence over `local.properties`.
-Saved `/api` settings take precedence over both environment variables and `local.properties`.
-
-Optional OpenAI fallback defaults:
-
-```bash
-export OPENAI_API_KEY="<your_key>"
-```
-
-```bash
-export OPENAI_BASE_URL="https://api.openai.com/v1"
-export OPENAI_API_LOG_FILE="$HOME/.kotlin-agent-cli/openai-api-traffic.log"
-```
-
-Ollama can be configured from `/api` with an OpenAI-compatible endpoint such as:
-
-```text
-base_url=http://127.0.0.1:11434/v1
-api_key=ollama
-```
-
-In v1, Ollama support is intentionally limited to a single hardcoded model: `qwen3:8b`.
+`/api` opens a menu of APIs loaded from `~/.kotlin-agent-cli/api-settings.json`. Each entry needs an `id`, `name`, `base_url`, `api_key`, `available_models`, `default_model`, and `selected_model`.
 
 Raw LLM API traffic is logged to `~/.kotlin-agent-cli/openai-api-traffic.log` by default.
 Set `OPENAI_API_LOG_FILE` to a different absolute path to override it, or set it to an empty value to disable file logging.
 The logger writes raw JSON request/response bodies plus HTTP status and headers; the `Authorization` header is redacted in the log file.
 
-Provider settings are persisted at `~/.kotlin-agent-cli/api-settings.json` with:
+You can configure logging through `local.properties` in this folder (`kotlin-agent-cli/local.properties`) or via environment variables:
+
+```properties
+OPENAI_API_LOG_FILE=/Users/you/.kotlin-agent-cli/openai-api-traffic.log
+```
+
+API settings are persisted at `~/.kotlin-agent-cli/api-settings.json` with:
 
 ```json
 {
-  "version": 1,
-  "active_provider": "OPENAI",
-  "openai": {
-    "base_url": "https://api.openai.com/v1",
-    "api_key": "sk-...",
-    "selected_model": "gpt-4.1-mini"
-  },
-  "ollama": {
-    "base_url": "http://127.0.0.1:11434/v1",
-    "api_key": "ollama",
-    "selected_model": "qwen3:8b"
-  }
+  "version": 3,
+  "active_api_id": "prod",
+  "apis": [
+    {
+      "id": "prod",
+      "name": "Production",
+      "base_url": "https://api.openai.com/v1",
+      "api_key": "sk-...",
+      "available_models": ["gpt-4.1-mini", "gpt-4.1-nano"],
+      "default_model": "gpt-4.1-mini",
+      "selected_model": "gpt-4.1-mini"
+    },
+    {
+      "id": "local",
+      "name": "Local",
+      "base_url": "http://127.0.0.1:11434/v1",
+      "api_key": "local-key",
+      "available_models": ["gpt-4.1-nano"],
+      "default_model": "gpt-4.1-nano",
+      "selected_model": "gpt-4.1-nano"
+    }
+  ]
 }
 ```
 
-The built-in model catalog is provider-aware:
-- OpenAI exposes the built-in pricing/context catalog.
-- Ollama currently exposes only `qwen3:8b`.
+All configured entries are treated as OpenAI-compatible APIs and resolve model pricing/context metadata from the built-in model catalog.
 
-Use `/models` to see models for the active provider and `/model <id|number>` to switch the active model for that provider.
+Use `/models` to see models for the active API and `/model <id|number>` to switch the active model for that API entry. Selecting an API with `/api` resets that API's current model to its `default_model`.
 
 MCP server configuration is read from `~/.kotlin-agent-cli/mcp-servers.json`.
 Example:
@@ -166,9 +149,11 @@ time> <seconds> s
 - Workflow files must match `workflow-<name>.json` and include non-blank top-level keys: `name`, `planning`, `execution`, `validation`.
 - Workflow files can optionally include `basePrompt` as an additional static system prompt for that workflow.
 - Active workflow file selection is persisted in `~/.kotlin-agent-cli/active-workflow.json` as `{ "active_file_name": "<file-name>" }`.
-- API provider configuration is loaded from `~/.kotlin-agent-cli/api-settings.json`.
-- Saved `/api` settings override `OPENAI_*` environment variables and `local.properties`.
-- If no saved `/api` settings exist, `OPENAI_API_KEY` and `OPENAI_BASE_URL` are used as OpenAI fallback defaults.
+- API configuration is loaded from `~/.kotlin-agent-cli/api-settings.json`.
+- The active API is persisted by `active_api_id`, while `/api` menu labels use each entry's `name`.
+- Each API entry persists its own `available_models`, `default_model`, and `selected_model`.
+- `/api` switches the active API and resets that API's `selected_model` to `default_model`.
+- If `api-settings.json` is missing or invalid, the CLI starts with no active API configured.
 - MCP server configuration is loaded from `~/.kotlin-agent-cli/mcp-servers.json`.
 - MCP server entries use explicit transport types: `http` (`url`) or `stdio` (`command` + `args`).
 - Legacy URL-only MCP entries are still accepted on load and are rewritten to the explicit `type` format on the next save.
@@ -230,9 +215,9 @@ time> <seconds> s
 ## Interactive Commands
 
 - `/help` - show commands
-- `/api` - configure and switch the active API provider (`OpenAI` or `Ollama`)
-- `/models` - list models for the active provider with active marker and metadata when available
-- `/model <id|number>` - switch the active provider-specific model (must be listed in `/models`)
+- `/api` - select the active API from `api-settings.json`
+- `/models` - list models for the active API with active marker and metadata when available
+- `/model <id|number>` - switch the active model for the active API entry (must be listed in `/models`)
 - `/memory` - show estimated session-memory context usage
 - `/compact` - choose compaction strategy (`Rolling summary`, `Sliding window`, `Fact map`, or `Branching`)
 - `/profile` - choose active user profile (`user-profile-<name>.json`)

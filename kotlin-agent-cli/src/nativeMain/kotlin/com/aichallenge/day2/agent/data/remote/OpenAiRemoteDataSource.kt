@@ -1,8 +1,7 @@
 package com.aichallenge.day2.agent.data.remote
 
-import com.aichallenge.day2.agent.core.config.ApiProvider
-import com.aichallenge.day2.agent.core.config.ApiProviderSettings
 import com.aichallenge.day2.agent.core.config.ApiSettingsService
+import com.aichallenge.day2.agent.core.config.ConfiguredApi
 import com.aichallenge.day2.agent.core.logging.ApiTrafficFileLogger
 import com.aichallenge.day2.agent.domain.model.MessageRole
 import com.aichallenge.day2.agent.domain.model.LlmToolCapabilities
@@ -57,17 +56,15 @@ class OpenAiRemoteDataSource(
             .filter { it.isNotEmpty() }
             .joinToString(separator = "\n\n")
             .ifBlank { null }
-        val activeProvider = apiSettingsService.currentProvider()
-            ?: throw IllegalStateException("No API provider is configured. Run /api before sending a prompt.")
-        val providerSettings = apiSettingsService.currentProviderSettings()
-            ?: throw IllegalStateException("${activeProvider.displayName} is selected but not fully configured. Run /api.")
-        val requestUrl = "${providerSettings.baseUrl}/responses"
+        val activeApi = apiSettingsService.currentApi()
+            ?: throw IllegalStateException("No API is configured. Define APIs in ~/.kotlin-agent-cli/api-settings.json and use /api to select one.")
+        val requestUrl = "${activeApi.baseUrl}/responses"
         val responseTools = buildResponseTools(prompt.toolCapabilities)
         val privateToolBindings = prompt.toolCapabilities.privateTools.associateBy(PrivateToolBinding::modelToolName)
         var totalUsage: TokenUsage? = null
         var executedPrivateToolCalls = 0
         var requestPayload = ResponsesApiRequest(
-            model = model ?: providerSettings.selectedModel,
+            model = model ?: activeApi.selectedModel,
             instructions = instructions,
             temperature = temperature,
             input = prompt.messages.map { message ->
@@ -87,8 +84,7 @@ class OpenAiRemoteDataSource(
 
         while (true) {
             val payload = executeRequest(
-                activeProvider = activeProvider,
-                providerSettings = providerSettings,
+                activeApi = activeApi,
                 requestUrl = requestUrl,
                 requestPayload = requestPayload,
             )
@@ -98,7 +94,7 @@ class OpenAiRemoteDataSource(
             if (pendingFunctionCalls.isEmpty()) {
                 val output = extractOutput(payload)
                 if (output.isBlank()) {
-                    throw IllegalStateException("${activeProvider.displayName} returned an empty response.")
+                    throw IllegalStateException("API '${activeApi.name}' returned an empty response.")
                 }
                 return AssistantReply(
                     content = output,
@@ -107,16 +103,16 @@ class OpenAiRemoteDataSource(
             }
 
             val responseId = payload.id?.trim().takeUnless { it.isNullOrEmpty() }
-                ?: throw IllegalStateException("${activeProvider.displayName} returned function calls without a response id.")
+                ?: throw IllegalStateException("API '${activeApi.name}' returned function calls without a response id.")
             val functionOutputs = pendingFunctionCalls.map { functionCall ->
                 executedPrivateToolCalls += 1
                 if (executedPrivateToolCalls > MAX_PRIVATE_TOOL_CALLS_PER_TURN) {
                     throw IllegalStateException(
-                        "${activeProvider.displayName} requested more than $MAX_PRIVATE_TOOL_CALLS_PER_TURN private MCP tool calls in one turn.",
+                        "API '${activeApi.name}' requested more than $MAX_PRIVATE_TOOL_CALLS_PER_TURN private MCP tool calls in one turn.",
                     )
                 }
                 val binding = privateToolBindings[functionCall.name]
-                    ?: throw IllegalStateException("${activeProvider.displayName} requested unknown private MCP tool '${functionCall.name}'.")
+                    ?: throw IllegalStateException("API '${activeApi.name}' requested unknown private MCP tool '${functionCall.name}'.")
                 toolCallTraceObserver?.onToolCallTrace(
                     ToolCallTraceEvent.Started(
                         toolLabel = buildToolTraceLabel(binding),
@@ -126,7 +122,7 @@ class OpenAiRemoteDataSource(
             }
 
             requestPayload = ResponsesApiRequest(
-                model = model ?: providerSettings.selectedModel,
+                model = model ?: activeApi.selectedModel,
                 instructions = instructions,
                 temperature = temperature,
                 input = functionOutputs.map { output ->
@@ -175,14 +171,13 @@ class OpenAiRemoteDataSource(
     }
 
     private suspend fun executeRequest(
-        activeProvider: ApiProvider,
-        providerSettings: ApiProviderSettings,
+        activeApi: ConfiguredApi,
         requestUrl: String,
         requestPayload: ResponsesApiRequest,
     ): ResponsesApiEnvelope {
         val rawRequestBody = json.encodeToString(requestPayload)
         val exchangeId = apiTrafficLogger?.reserveExchangeId() ?: 0L
-        val requestHeaders = buildRequestHeaders(providerSettings)
+        val requestHeaders = buildRequestHeaders(activeApi)
 
         apiTrafficLogger?.logRequest(
             exchangeId = exchangeId,
@@ -223,18 +218,18 @@ class OpenAiRemoteDataSource(
 
         if (response.status.value !in 200..299) {
             throw IllegalStateException(
-                "${activeProvider.displayName} request failed with HTTP ${response.status.value}: $rawResponseBody",
+                "API '${activeApi.name}' request failed with HTTP ${response.status.value}: $rawResponseBody",
             )
         }
 
         return json.decodeFromString(rawResponseBody)
     }
 
-    private fun buildRequestHeaders(providerSettings: ApiProviderSettings): List<Pair<String, String>> {
+    private fun buildRequestHeaders(api: ConfiguredApi): List<Pair<String, String>> {
         val headers = mutableListOf(
             HttpHeaders.ContentType to ContentType.Application.Json.toString(),
         )
-        providerSettings.apiKey.takeIf { it.isNotBlank() }?.let { apiKey ->
+        api.apiKey.takeIf { it.isNotBlank() }?.let { apiKey ->
             headers += HttpHeaders.Authorization to "Bearer $apiKey"
         }
         return headers

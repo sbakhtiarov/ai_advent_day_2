@@ -105,10 +105,9 @@ class AppConfigTest {
     }
 
     @Test
-    fun deprecatedModelEnvKeysDoNotAffectConfiguration() {
+    fun deprecatedModelEnvKeysDoNotAffectModelCatalog() {
         withEnvironment(
             mapOf(
-                "OPENAI_API_KEY" to "test-api-key",
                 "OPENAI_MODEL" to "unexpected-model",
                 "OPENAI_MODELS" to "unexpected-model,another-model",
                 "OPENAI_MODEL_PRICING" to "unexpected-model=broken-pricing",
@@ -116,11 +115,9 @@ class AppConfigTest {
         ) {
             val config = AppConfig.fromEnvironment()
 
-            assertEquals(ApiProvider.OPENAI, config.fallbackApiSettings?.activeProvider)
-            assertEquals(AppConfig.defaultModelId(), config.fallbackApiSettings?.openAi?.selectedModel)
             assertEquals(
                 AppConfig.internalModelCatalog().map { it.id },
-                config.openAiModels.map { it.id },
+                config.models.map { it.id },
             )
         }
     }
@@ -129,7 +126,6 @@ class AppConfigTest {
     fun agentSystemPromptEnvKeyDoesNotAffectConfiguration() {
         withEnvironment(
             mapOf(
-                "OPENAI_API_KEY" to "test-api-key",
                 "AGENT_SYSTEM_PROMPT" to "unexpected override",
             ),
         ) {
@@ -146,7 +142,6 @@ class AppConfigTest {
     fun defaultApiTrafficLogFileUsesHomeDirectory() {
         withEnvironment(
             mapOf(
-                "OPENAI_API_KEY" to "test-api-key",
                 "HOME" to "/tmp/app-config-home",
                 "OPENAI_API_LOG_FILE" to "",
             ),
@@ -166,7 +161,6 @@ class AppConfigTest {
     fun explicitBlankApiTrafficLogFileDisablesLogging() {
         withEnvironment(
             mapOf(
-                "OPENAI_API_KEY" to "test-api-key",
                 "HOME" to "/tmp/app-config-home",
                 "OPENAI_API_LOG_FILE" to "",
             ),
@@ -181,7 +175,6 @@ class AppConfigTest {
     fun explicitApiTrafficLogFileOverridesDefaultLocation() {
         withEnvironment(
             mapOf(
-                "OPENAI_API_KEY" to "test-api-key",
                 "HOME" to "/tmp/app-config-home",
                 "OPENAI_API_LOG_FILE" to "/tmp/custom-openai.log",
             ),
