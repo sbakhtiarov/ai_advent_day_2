@@ -1,8 +1,9 @@
 package com.aichallenge.day2.agent.data.remote
 
-import com.aichallenge.day2.agent.core.config.AppConfig
-import com.aichallenge.day2.agent.core.config.ModelPricing
-import com.aichallenge.day2.agent.core.config.ModelProperties
+import com.aichallenge.day2.agent.core.config.ApiProvider
+import com.aichallenge.day2.agent.core.config.ApiProviderSettings
+import com.aichallenge.day2.agent.core.config.ApiSettings
+import com.aichallenge.day2.agent.core.config.MutableApiSettingsService
 import com.aichallenge.day2.agent.domain.model.ConversationMessage
 import com.aichallenge.day2.agent.domain.model.LlmToolCapabilities
 import com.aichallenge.day2.agent.domain.model.McpServerConfig
@@ -717,22 +718,16 @@ class OpenAiRemoteDataSourceTest {
 
         return OpenAiRemoteDataSource(
             httpClient = httpClient,
-            config = AppConfig(
-                apiKey = "test-key",
-                model = "gpt-4.1-mini",
-                models = listOf(
-                    ModelProperties(
-                        id = "gpt-4.1-mini",
-                        pricing = ModelPricing(
-                            inputUsdPer1M = 0.40,
-                            outputUsdPer1M = 1.60,
-                        ),
-                        contextWindowTokens = 1_000_000,
+            apiSettingsService = MutableApiSettingsService(
+                ApiSettings(
+                    activeProvider = ApiProvider.OPENAI,
+                    openAi = ApiProviderSettings(
+                        baseUrl = "https://api.openai.com/v1",
+                        apiKey = "test-key",
+                        selectedModel = "gpt-4.1-mini",
                     ),
+                    ollama = null,
                 ),
-                baseUrl = "https://api.openai.com/v1",
-                systemPrompt = "System",
-                apiTrafficLogFilePath = null,
             ),
             json = json,
             privateToolExecutionService = privateToolExecutionService,

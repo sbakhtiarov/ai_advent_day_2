@@ -3,8 +3,13 @@
 package com.aichallenge.day2.agent
 
 import com.aichallenge.day2.agent.core.config.AppConfig
+import com.aichallenge.day2.agent.core.config.ApiProvider
+import com.aichallenge.day2.agent.core.config.ApiProviderSettings
+import com.aichallenge.day2.agent.core.config.ApiSettings
+import com.aichallenge.day2.agent.core.config.MutableApiSettingsService
 import com.aichallenge.day2.agent.core.config.ProfileEnvironmentFactsProvider
 import com.aichallenge.day2.agent.core.di.AppContainer
+import com.aichallenge.day2.agent.data.local.JsonFileApiSettingsStore
 import com.aichallenge.day2.agent.data.local.JsonFileProfileMemoryStore
 import com.aichallenge.day2.agent.data.local.JsonFileSessionMemoryStore
 import com.aichallenge.day2.agent.data.local.JsonFileInvariantConstraintStore
@@ -99,7 +104,22 @@ private suspend fun runConfiguredApp(
     prompt: String?,
     onSinglePromptSuccess: ((AgentResponse) -> Unit)? = null,
 ): Int {
-    val container = AppContainer(config)
+    val isInteractiveMode = prompt == null
+    val apiSettingsStore = JsonFileApiSettingsStore.fromDefaultLocation()
+    val initialApiSettings = resolveInitialApiSettings(
+        config = config,
+        apiSettingsStore = apiSettingsStore,
+    )
+    if (!isInteractiveMode && initialApiSettings == null) {
+        println("Configuration error: no API provider is configured.")
+        printEnvironmentHelp()
+        return 1
+    }
+    val apiSettingsService = MutableApiSettingsService(initialApiSettings)
+    val container = AppContainer(
+        config = config,
+        apiSettingsService = apiSettingsService,
+    )
     val sessionMemoryCompactionCoordinators = mapOf(
         SessionCompactionMode.ROLLING_SUMMARY to SessionMemoryCompactionCoordinator(
             startPolicy = RollingWindowCompactionStartPolicy(
@@ -127,7 +147,6 @@ private suspend fun runConfiguredApp(
         ),
         SessionCompactionMode.BRANCHING to SessionMemoryCompactionCoordinator.disabled(),
     )
-    val isInteractiveMode = prompt == null
     val sessionMemoryStore = if (isInteractiveMode) {
         JsonFileSessionMemoryStore.fromDefaultLocation()
     } else {
@@ -162,8 +181,12 @@ private suspend fun runConfiguredApp(
         buildPromptUseCase = container.buildPromptUseCase,
         systemPromptBuilder = SystemPromptBuilder(),
         initialSystemPrompt = config.systemPrompt,
-        initialModel = config.model,
-        models = config.models,
+        apiSettingsService = apiSettingsService,
+        apiSettingsStore = apiSettingsStore,
+        modelsByProvider = mapOf(
+            ApiProvider.OPENAI to config.openAiModels,
+            ApiProvider.OLLAMA to config.ollamaModels,
+        ),
         sessionMemoryStore = sessionMemoryStore,
         workingMemoryStore = workingMemoryStore,
         profileMemoryStore = profileMemoryStore,
@@ -230,12 +253,54 @@ private fun printUsage() {
 private fun printEnvironmentHelp() {
     println(
         """
-        Required configuration (environment variable or local.properties):
-          OPENAI_API_KEY       OpenAI API key
-        
+        Interactive mode can be configured with /api and persists settings to ~/.kotlin-agent-cli/api-settings.json.
+        OPENAI_* environment variables or local.properties are still supported as OpenAI fallback defaults.
+
         Optional configuration (environment variable or local.properties):
+          OPENAI_API_KEY       OpenAI API key
           OPENAI_BASE_URL      default: https://api.openai.com/v1
           OPENAI_API_LOG_FILE  default: ~/.kotlin-agent-cli/openai-api-traffic.log (blank disables)
         """.trimIndent(),
     )
+}
+
+private fun resolveInitialApiSettings(
+    config: AppConfig,
+    apiSettingsStore: JsonFileApiSettingsStore?,
+): ApiSettings? {
+    val persistedSettings = runCatching { apiSettingsStore?.load() }.getOrNull()
+    val preferredSettings = persistedSettings ?: config.fallbackApiSettings
+    return preferredSettings?.let { settings ->
+        normalizeApiSettingsForCatalog(
+            settings = settings,
+            config = config,
+        )
+    }
+}
+
+private fun normalizeApiSettingsForCatalog(
+    settings: ApiSettings,
+    config: AppConfig,
+): ApiSettings? {
+    fun normalizeProviderSettings(
+        provider: ApiProvider,
+        providerSettings: ApiProviderSettings?,
+    ): ApiProviderSettings? {
+        val normalizedSettings = providerSettings?.normalizedOrNull() ?: return null
+        if (provider == ApiProvider.OPENAI && normalizedSettings.apiKey.isBlank()) {
+            return null
+        }
+        val availableModelIds = config.modelsFor(provider).map { model -> model.id }
+        val selectedModel = normalizedSettings.selectedModel
+            .takeIf { modelId -> modelId in availableModelIds }
+            ?: availableModelIds.firstOrNull()
+            ?: return null
+        return normalizedSettings.copy(selectedModel = selectedModel)
+    }
+
+    return ApiSettings(
+        activeProvider = settings.activeProvider,
+        openAi = normalizeProviderSettings(ApiProvider.OPENAI, settings.openAi),
+        ollama = normalizeProviderSettings(ApiProvider.OLLAMA, settings.ollama),
+    ).normalizedOrNull()
 }

@@ -1,7 +1,12 @@
 package com.aichallenge.day2.agent.presentation.cli
 
+import com.aichallenge.day2.agent.core.config.ApiProvider
+import com.aichallenge.day2.agent.core.config.ApiProviderSettings
+import com.aichallenge.day2.agent.core.config.ApiSettings
+import com.aichallenge.day2.agent.core.config.ApiSettingsService
 import com.aichallenge.day2.agent.core.config.ModelPricing
 import com.aichallenge.day2.agent.core.config.ModelProperties
+import com.aichallenge.day2.agent.core.config.MutableApiSettingsService
 import com.aichallenge.day2.agent.data.tools.BuiltInPrivateToolProvider
 import com.aichallenge.day2.agent.data.tools.BuiltInToolDefinition
 import com.aichallenge.day2.agent.data.tools.BuiltInToolRegistration
@@ -42,6 +47,7 @@ import com.aichallenge.day2.agent.domain.model.UserWorkflowOption
 import com.aichallenge.day2.agent.domain.model.WorkflowRuntimeState
 import com.aichallenge.day2.agent.domain.model.WorkflowStep
 import com.aichallenge.day2.agent.domain.repository.AgentRepository
+import com.aichallenge.day2.agent.domain.repository.ApiSettingsStore
 import com.aichallenge.day2.agent.domain.repository.InvariantConstraintStore
 import com.aichallenge.day2.agent.domain.repository.McpServerStore
 import com.aichallenge.day2.agent.domain.repository.SessionMemoryStore
@@ -2209,7 +2215,7 @@ class ConsoleChatControllerSessionMemoryTest {
     }
 
     @Test
-    fun helpAndHeaderIncludeMemoryCommand() = runBlocking {
+    fun helpAndHeaderIncludeApiAndMemoryCommands() = runBlocking {
         val repository = RecordingAgentRepository(responses = emptyList())
         val io = FakeCliIO(inputs = listOf("/help", "/exit"))
         val controller = createController(
@@ -2222,8 +2228,9 @@ class ConsoleChatControllerSessionMemoryTest {
         val output = io.outputText()
         assertContains(
             output,
-            "commands: /help, /models, /model <id|number>, /memory, /compact, /profile, /workflow, /mcp, /invariant, /reset, /exit, @<path>",
+            "commands: /help, /api, /models, /model <id|number>, /memory, /compact, /profile, /workflow, /mcp, /invariant, /reset, /exit, @<path>",
         )
+        assertContains(output, "/api                 configure the active API provider (OpenAI or Ollama)")
         assertContains(output, "/memory              show session-memory context usage")
         assertContains(output, "/compact             choose memory compaction strategy")
         assertContains(output, "/profile             choose active user profile")
@@ -2231,6 +2238,90 @@ class ConsoleChatControllerSessionMemoryTest {
         assertContains(output, "/mcp                 configure MCP servers")
         assertContains(output, "/invariant           configure invariant constraints")
         assertContains(output, "@<path>              attach file for the next prompt")
+    }
+
+    @Test
+    fun promptWithoutConfiguredApiProviderShowsGuidance() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(Result.success(AgentResponse(content = "unused"))),
+        )
+        val io = FakeCliIO(inputs = listOf("prompt one", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            apiSettingsService = MutableApiSettingsService(null),
+        )
+
+        controller.runInteractive()
+
+        assertTrue(repository.conversations.isEmpty())
+        assertContains(io.outputText(), "system> no API provider configured. Run /api to configure OpenAI or Ollama.")
+    }
+
+    @Test
+    fun apiCommandSwitchesToOllamaImmediatelyAndPersists() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(Result.success(AgentResponse(content = "ollama answer"))),
+        )
+        val apiSettingsStore = RecordingApiSettingsStore(defaultApiSettings())
+        val io = FakeCliIO(inputs = listOf("/api", "2", "", "", "/models", "prompt one", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            apiSettingsStore = apiSettingsStore,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(ApiProvider.OLLAMA, apiSettingsStore.saveStates.last().activeProvider)
+        assertEquals("qwen3:8b", apiSettingsStore.saveStates.last().ollama?.selectedModel)
+        assertEquals(listOf<String?>("qwen3:8b"), repository.requestedModels)
+        val output = io.outputText()
+        assertContains(output, "system> API provider switched to 'Ollama'")
+        assertContains(output, "Available models for Ollama:")
+        assertContains(output, "qwen3:8b")
+    }
+
+    @Test
+    fun modelCommandPersistsSelectionForActiveProvider() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(Result.success(AgentResponse(content = "answer one"))),
+        )
+        val apiSettingsStore = RecordingApiSettingsStore(defaultApiSettings())
+        val io = FakeCliIO(inputs = listOf("/model 2", "prompt one", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            apiSettingsStore = apiSettingsStore,
+        )
+
+        controller.runInteractive()
+
+        assertEquals("gpt-4.1-nano", apiSettingsStore.saveStates.last().openAi?.selectedModel)
+        assertEquals(listOf<String?>("gpt-4.1-nano"), repository.requestedModels)
+        assertContains(io.outputText(), "system> model switched to 'gpt-4.1-nano'")
+    }
+
+    @Test
+    fun apiCommandSaveFailureLeavesCurrentProviderAndModelUnchanged() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(Result.success(AgentResponse(content = "answer one"))),
+        )
+        val apiSettingsStore = RecordingApiSettingsStore(
+            loadedSettings = defaultApiSettings(),
+            failOnSaveCalls = setOf(1),
+        )
+        val io = FakeCliIO(inputs = listOf("/api", "2", "", "", "prompt one", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            apiSettingsStore = apiSettingsStore,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(listOf<String?>("gpt-4.1-mini"), repository.requestedModels)
+        assertContains(io.outputText(), "system> failed to persist API settings")
     }
 
     @Test
@@ -4413,6 +4504,9 @@ class ConsoleChatControllerSessionMemoryTest {
     private fun createController(
         repository: RecordingAgentRepository,
         io: CliIO,
+        apiSettingsService: ApiSettingsService = MutableApiSettingsService(defaultApiSettings()),
+        apiSettingsStore: ApiSettingsStore? = null,
+        modelsByProvider: Map<ApiProvider, List<ModelProperties>> = defaultModelsByProvider(),
         sessionMemoryStore: SessionMemoryStore? = null,
         userDefinedProfileStore: UserDefinedProfileStore? = null,
         userDefinedWorkflowStore: UserDefinedWorkflowStore? = null,
@@ -4430,17 +4524,9 @@ class ConsoleChatControllerSessionMemoryTest {
         return ConsoleChatController(
             sendPromptUseCase = SendPromptUseCase(repository),
             initialSystemPrompt = "Base system prompt",
-            initialModel = "gpt-4.1-mini",
-            models = listOf(
-                ModelProperties(
-                    id = "gpt-4.1-mini",
-                    pricing = ModelPricing(
-                        inputUsdPer1M = 0.40,
-                        outputUsdPer1M = 1.60,
-                    ),
-                    contextWindowTokens = 1_047_576,
-                ),
-            ),
+            apiSettingsService = apiSettingsService,
+            apiSettingsStore = apiSettingsStore,
+            modelsByProvider = modelsByProvider,
             io = io,
             sessionMemoryStore = sessionMemoryStore,
             userDefinedProfileStore = userDefinedProfileStore,
@@ -4457,6 +4543,48 @@ class ConsoleChatControllerSessionMemoryTest {
     }
 }
 
+internal fun defaultApiSettings(): ApiSettings {
+    return ApiSettings(
+        activeProvider = ApiProvider.OPENAI,
+        openAi = ApiProviderSettings(
+            baseUrl = "https://api.openai.com/v1",
+            apiKey = "test-key",
+            selectedModel = "gpt-4.1-mini",
+        ),
+        ollama = ApiProviderSettings(
+            baseUrl = "http://127.0.0.1:11434/v1",
+            apiKey = "ollama",
+            selectedModel = "qwen3:8b",
+        ),
+    )
+}
+
+internal fun defaultModelsByProvider(): Map<ApiProvider, List<ModelProperties>> {
+    return mapOf(
+        ApiProvider.OPENAI to listOf(
+            ModelProperties(
+                id = "gpt-4.1-mini",
+                pricing = ModelPricing(
+                    inputUsdPer1M = 0.40,
+                    outputUsdPer1M = 1.60,
+                ),
+                contextWindowTokens = 1_047_576,
+            ),
+            ModelProperties(
+                id = "gpt-4.1-nano",
+                pricing = ModelPricing(
+                    inputUsdPer1M = 0.10,
+                    outputUsdPer1M = 0.40,
+                ),
+                contextWindowTokens = 1_047_576,
+            ),
+        ),
+        ApiProvider.OLLAMA to listOf(
+            ModelProperties(id = "qwen3:8b"),
+        ),
+    )
+}
+
 private class RecordingAgentRepository(
     responses: List<Result<AgentResponse>>,
     toolTraceEvents: List<List<ToolCallTraceEvent>> = emptyList(),
@@ -4465,6 +4593,7 @@ private class RecordingAgentRepository(
     private val queuedToolTraceEvents = ArrayDeque(toolTraceEvents)
     val prompts = mutableListOf<PromptRequestData>()
     val conversations = mutableListOf<List<ConversationMessage>>()
+    val requestedModels = mutableListOf<String?>()
 
     override suspend fun complete(
         prompt: PromptRequestData,
@@ -4487,6 +4616,7 @@ private class RecordingAgentRepository(
     ): AgentResponse {
         prompts += prompt
         conversations += prompt.toConversation()
+        requestedModels += model
         queuedToolTraceEvents.removeFirstOrNull().orEmpty().forEach { event ->
             toolCallTraceObserver?.onToolCallTrace(event)
         }
@@ -4660,6 +4790,26 @@ private class FakeCliIO(
     private fun nextInput(): String? = queuedInputs.removeFirstOrNull()
 
     fun outputText(): String = lines.joinToString(separator = "\n")
+}
+
+private class RecordingApiSettingsStore(
+    loadedSettings: ApiSettings? = null,
+    private val failOnSaveCalls: Set<Int> = emptySet(),
+) : ApiSettingsStore {
+    private var settings: ApiSettings? = loadedSettings
+    private var saveCallCount: Int = 0
+    val saveStates = mutableListOf<ApiSettings>()
+
+    override fun load(): ApiSettings? = settings
+
+    override fun save(settings: ApiSettings) {
+        saveCallCount += 1
+        if (saveCallCount in failOnSaveCalls) {
+            error("save failure")
+        }
+        this.settings = settings
+        saveStates += settings
+    }
 }
 
 private class RecordingMcpServerStore(

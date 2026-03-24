@@ -1,5 +1,10 @@
 package com.aichallenge.day2.agent.presentation.cli
 
+import com.aichallenge.day2.agent.core.config.ApiProvider
+import com.aichallenge.day2.agent.core.config.ApiProviderSettings
+import com.aichallenge.day2.agent.core.config.ApiSettings
+import com.aichallenge.day2.agent.core.config.ApiSettingsService
+import com.aichallenge.day2.agent.core.config.MutableApiSettingsService
 import com.aichallenge.day2.agent.core.config.ProfileEnvironmentFactsProvider
 import com.aichallenge.day2.agent.core.config.ModelProperties
 import com.aichallenge.day2.agent.data.tools.BuiltInPrivateToolProvider
@@ -34,6 +39,7 @@ import com.aichallenge.day2.agent.domain.model.UserWorkflowOption
 import com.aichallenge.day2.agent.domain.model.WorkflowRuntimeState
 import com.aichallenge.day2.agent.domain.model.WorkflowStep
 import com.aichallenge.day2.agent.domain.model.WorkingMemoryState
+import com.aichallenge.day2.agent.domain.repository.ApiSettingsStore
 import com.aichallenge.day2.agent.domain.repository.ProfileMemoryStore
 import com.aichallenge.day2.agent.domain.repository.SessionMemoryStore
 import com.aichallenge.day2.agent.domain.repository.InvariantConstraintStore
@@ -80,8 +86,9 @@ class ConsoleChatController(
     private val sendPromptUseCase: SendPromptUseCase,
     private val invariantConstraintValidationUseCase: InvariantConstraintValidationUseCase = InvariantConstraintValidationUseCase(sendPromptUseCase),
     initialSystemPrompt: String,
-    initialModel: String,
-    models: List<ModelProperties>,
+    private val apiSettingsService: ApiSettingsService = MutableApiSettingsService(),
+    private val apiSettingsStore: ApiSettingsStore? = null,
+    private val modelsByProvider: Map<ApiProvider, List<ModelProperties>> = emptyMap(),
     private val io: CliIO = StdCliIO,
     private val sessionMemoryStore: SessionMemoryStore? = null,
     private val workingMemoryStore: WorkingMemoryStore? = null,
@@ -113,9 +120,8 @@ class ConsoleChatController(
         basePrompt = baseSystemPrompt,
         userDefinedProfile = userDefinedProfilePreferences,
     )
-    private val availableModelIds = models.map { it.id }.distinct().ifEmpty { listOf(initialModel) }
-    private val modelById = models.associateBy { it.id }
-    private var currentModel = initialModel
+    private var currentProvider = apiSettingsService.currentProvider()
+    private var currentModel = apiSettingsService.currentProviderSettings()?.selectedModel
     private val sessionMemory = SessionMemory()
     private val branchingSessionMemory = BranchingSessionMemory()
     private val branchClassificationUseCase = BranchClassificationUseCase(sendPromptUseCase)
@@ -155,15 +161,69 @@ class ConsoleChatController(
     private var activeCompactionMode = defaultCompactionMode
 
     init {
-        require(currentModel in availableModelIds) {
-            "Initial model must be present in available models."
-        }
         require(availableCompactionModes.isNotEmpty()) {
             "At least one compaction mode must be available."
         }
         require(defaultCompactionMode in availableCompactionModes) {
             "Default compaction mode must have a coordinator."
         }
+        normalizeActiveApiSelection()
+    }
+
+    private fun availableModelsFor(provider: ApiProvider?): List<ModelProperties> {
+        return provider?.let { modelsByProvider[it].orEmpty() }.orEmpty()
+    }
+
+    private fun availableModelIds(provider: ApiProvider? = currentProvider): List<String> {
+        return availableModelsFor(provider).map { it.id }.distinct()
+    }
+
+    private fun modelById(provider: ApiProvider? = currentProvider): Map<String, ModelProperties> {
+        return availableModelsFor(provider).associateBy { it.id }
+    }
+
+    private fun normalizeActiveApiSelection() {
+        val provider = currentProvider ?: run {
+            currentModel = null
+            return
+        }
+        val availableModelIds = availableModelIds(provider)
+        if (availableModelIds.isEmpty()) {
+            currentProvider = null
+            currentModel = null
+            return
+        }
+        val normalizedModel = currentModel?.takeIf { selectedModel -> selectedModel in availableModelIds }
+            ?: availableModelIds.first()
+        currentModel = normalizedModel
+        syncApiSettingsSelection(provider, normalizedModel)
+    }
+
+    private fun syncApiSettingsSelection(
+        provider: ApiProvider,
+        selectedModel: String,
+    ) {
+        val currentSettings = apiSettingsService.currentSettings() ?: return
+        val updatedSettings = when (provider) {
+            ApiProvider.OPENAI -> currentSettings.copy(
+                activeProvider = provider,
+                openAi = currentSettings.openAi?.copy(selectedModel = selectedModel),
+            )
+
+            ApiProvider.OLLAMA -> currentSettings.copy(
+                activeProvider = provider,
+                ollama = currentSettings.ollama?.copy(selectedModel = selectedModel),
+            )
+        }
+        apiSettingsService.replace(updatedSettings)
+    }
+
+    private fun requireActiveModel(): String {
+        return currentModel ?: throw IllegalStateException("No API provider is configured. Run /api before sending a prompt.")
+    }
+
+    private fun currentProviderLabel(): String {
+        return currentProvider?.displayName ?: "n/a"
     }
 
     suspend fun runInteractive() {
@@ -268,6 +328,11 @@ class ConsoleChatController(
             workflowUiStep = null
             persistMemorySnapshot()
             dialogBlocks += "system> workflow mode disabled: no active workflow found"
+        }
+
+        if (currentProvider == null || currentModel == null) {
+            dialogBlocks += "system> no API provider configured. Run /api to configure OpenAI or Ollama."
+            return
         }
 
         executeModelTurn(
@@ -1277,6 +1342,7 @@ class ConsoleChatController(
         additionalContextSystemMessages: List<String> = emptyList(),
         toolCallTraceObserver: ToolCallTraceObserver? = null,
     ): AgentResponse {
+        val activeModel = requireActiveModel()
         val effectivePromptWithInvariants = augmentSystemPromptWithInvariants(effectiveSystemPrompt)
         val promptRequest = buildPromptUseCase.execute(
             request = BuildPromptRequest(
@@ -1291,7 +1357,7 @@ class ConsoleChatController(
         )
         val response = sendPromptUseCase.execute(
             prompt = promptRequest,
-            model = currentModel,
+            model = activeModel,
             toolCallTraceObserver = toolCallTraceObserver,
         )
         return response
@@ -1304,8 +1370,9 @@ class ConsoleChatController(
         additionalContextSystemMessages: List<String> = emptyList(),
         toolCallTraceObserver: ToolCallTraceObserver? = null,
     ): AgentResponse {
+        val activeModel = requireActiveModel()
         val effectivePromptWithInvariants = augmentSystemPromptWithInvariants(effectiveSystemPrompt)
-        val contextWindow = modelById[currentModel]?.contextWindowTokens
+        val contextWindow = modelById()[activeModel]?.contextWindowTokens
         val branchingPromptData = branchingSessionMemory.promptDataForRequest(
             maxEstimatedTokens = contextWindow,
             estimateTokens = { sessionPromptData ->
@@ -1336,7 +1403,7 @@ class ConsoleChatController(
         )
         val response = sendPromptUseCase.execute(
             prompt = promptRequest,
-            model = currentModel,
+            model = activeModel,
             toolCallTraceObserver = toolCallTraceObserver,
         )
         return response
@@ -1349,6 +1416,7 @@ class ConsoleChatController(
         toolCapabilities: LlmToolCapabilities = LlmToolCapabilities(),
         toolCallTraceObserver: ToolCallTraceObserver? = null,
     ): AgentResponse {
+        val activeModel = requireActiveModel()
         val additionalContextSystemMessages = buildPromptSpecificSystemMessages(
             requestPrompt = requestPrompt,
             toolCapabilities = toolCapabilities,
@@ -1388,7 +1456,7 @@ class ConsoleChatController(
                 invariants = invariantConstraints,
                 userPrompt = requestPrompt,
                 assistantResponse = response.content,
-                model = currentModel,
+                model = activeModel,
             )
 
             if (validationResult.status == InvariantValidationStatus.PASS) {
@@ -1549,7 +1617,7 @@ class ConsoleChatController(
             val compacted = activeCompactionCoordinator()
                 ?.compactIfNeeded(
                     sessionMemory = sessionMemory,
-                    model = currentModel,
+                    model = requireActiveModel(),
                 )
                 ?: false
             TurnSideEffects(
@@ -1639,11 +1707,12 @@ class ConsoleChatController(
         prompt: String,
         response: String,
     ): List<String> {
+        val activeModel = requireActiveModel()
         val classification = branchClassificationUseCase.classify(
             existingTopics = branchingSessionMemory.topicCatalog(),
             userPrompt = prompt,
             assistantResponse = response,
-            model = currentModel,
+            model = activeModel,
         )
         val activation = branchingSessionMemory.resolveAndActivate(
             topicName = classification.topicName,
@@ -1662,7 +1731,7 @@ class ConsoleChatController(
                     ConversationMessage.user(prompt),
                     ConversationMessage.assistant(response),
                 ),
-                model = currentModel,
+                model = activeModel,
             ).trim()
         }.getOrNull()
         if (!updatedSummary.isNullOrBlank()) {
@@ -1934,6 +2003,11 @@ class ConsoleChatController(
         return when {
             input == "/help" -> {
                 dialogBlocks += helpText()
+                true
+            }
+
+            input == "/api" -> {
+                handleApiCommand()
                 true
             }
 
@@ -2294,6 +2368,7 @@ class ConsoleChatController(
         }
 
         val distillationUseCase = workingMemoryDistillationUseCase ?: return
+        val activeModel = currentModel ?: return
         val nextTaskState = runCatching {
             distillationUseCase.distill(
                 previousTaskState = workingMemoryState?.taskState,
@@ -2301,7 +2376,7 @@ class ConsoleChatController(
                     ConversationMessage.user(userPrompt),
                     ConversationMessage.assistant(assistantResponse),
                 ),
-                model = currentModel,
+                model = activeModel,
             )
         }.getOrNull() ?: return
 
@@ -2321,6 +2396,7 @@ class ConsoleChatController(
 
         val store = profileMemoryStore ?: return
         val distillationUseCase = profileMemoryDistillationUseCase ?: return
+        val activeModel = currentModel ?: return
         val currentState = profileMemoryState ?: ProfileMemoryState(
             preferences = ProfilePreferenceState(),
             environmentFacts = profileEnvironmentFactsProvider.read(),
@@ -2331,7 +2407,7 @@ class ConsoleChatController(
                 recentMessages = listOf(
                     ConversationMessage.user(userPrompt),
                 ),
-                model = currentModel,
+                model = activeModel,
             )
         }.getOrNull() ?: return
 
@@ -2391,7 +2467,7 @@ class ConsoleChatController(
         io.writeLine()
         io.writeLine("    type your prompt and press Enter")
         io.writeLine(
-            "    commands: /help, /models, /model <id|number>, /memory, /compact, /profile, /workflow, /mcp, /invariant, /reset, /exit, @<path>",
+            "    commands: /help, /api, /models, /model <id|number>, /memory, /compact, /profile, /workflow, /mcp, /invariant, /reset, /exit, @<path>",
         )
         io.writeLine()
 
@@ -2419,7 +2495,8 @@ class ConsoleChatController(
     private fun helpText(): String = """
         Available commands:
         /help                show this help message
-        /models              list available built-in models
+        /api                 configure the active API provider (OpenAI or Ollama)
+        /models              list available models for the active provider
         /model <id|number>   switch active model (must be from /models)
         /memory              show session-memory context usage
         /compact             choose memory compaction strategy
@@ -2433,6 +2510,146 @@ class ConsoleChatController(
         /exit                close the application
         @<path>              attach file for the next prompt
     """.trimIndent()
+
+    private fun handleApiCommand() {
+        val currentSettings = apiSettingsService.currentSettings()
+        val selectedProvider = readApiProviderSelection(currentSettings?.activeProvider ?: currentProvider) ?: return
+        val existingProviderSettings = currentSettings?.settingsFor(selectedProvider)
+
+        val defaultBaseUrl = existingProviderSettings?.baseUrl ?: defaultBaseUrlFor(selectedProvider)
+        val baseUrlInput = readApiInput(
+            prompt = "api> base URL [$defaultBaseUrl] (blank keeps current): ",
+        ) ?: return
+        val resolvedBaseUrl = baseUrlInput.trim().ifEmpty { defaultBaseUrl }
+
+        val apiKeyInput = readApiInput(
+            prompt = "api> API key (blank keeps current): ",
+        ) ?: return
+        val resolvedApiKey = apiKeyInput.trim().ifEmpty {
+            existingProviderSettings?.apiKey.orEmpty()
+        }
+        if (selectedProvider == ApiProvider.OPENAI && resolvedApiKey.isBlank()) {
+            dialogBlocks += "system> OpenAI API key is required"
+            return
+        }
+
+        val selectedModel = when (selectedProvider) {
+            ApiProvider.OPENAI -> {
+                dialogBlocks += buildModelsTextForProvider(
+                    provider = ApiProvider.OPENAI,
+                    selectedModel = existingProviderSettings?.selectedModel,
+                )
+                val modelInput = readApiInput(
+                    prompt = "api> model id|number (blank keeps current): ",
+                ) ?: return
+                if (modelInput.isBlank()) {
+                    existingProviderSettings?.selectedModel
+                        ?.takeIf { it in availableModelIds(ApiProvider.OPENAI) }
+                        ?: availableModelIds(ApiProvider.OPENAI).firstOrNull()
+                } else {
+                    resolveRequestedModel(modelInput.trim(), ApiProvider.OPENAI)
+                } ?: run {
+                    dialogBlocks += "system> invalid OpenAI model selection"
+                    return
+                }
+            }
+
+            ApiProvider.OLLAMA -> availableModelIds(ApiProvider.OLLAMA).firstOrNull() ?: run {
+                dialogBlocks += "system> no Ollama models are configured"
+                return
+            }
+        }
+
+        val updatedSettings = when (selectedProvider) {
+            ApiProvider.OPENAI -> ApiSettings(
+                activeProvider = selectedProvider,
+                openAi = ApiProviderSettings(
+                    baseUrl = resolvedBaseUrl,
+                    apiKey = resolvedApiKey,
+                    selectedModel = selectedModel,
+                ),
+                ollama = currentSettings?.ollama,
+            )
+
+            ApiProvider.OLLAMA -> ApiSettings(
+                activeProvider = selectedProvider,
+                openAi = currentSettings?.openAi,
+                ollama = ApiProviderSettings(
+                    baseUrl = resolvedBaseUrl,
+                    apiKey = resolvedApiKey,
+                    selectedModel = selectedModel,
+                ),
+            )
+        }
+        if (!applyApiSettingsUpdate(updatedSettings)) {
+            dialogBlocks += "system> failed to persist API settings"
+            return
+        }
+        dialogBlocks += "system> API provider switched to '${selectedProvider.displayName}' " +
+            "(base_url='${resolvedBaseUrl.trimEnd('/')}', model='$selectedModel')${persistenceSuffix()}"
+    }
+
+    private fun readApiProviderSelection(currentSelection: ApiProvider?): ApiProvider? {
+        val defaultProvider = currentSelection ?: ApiProvider.OPENAI
+        val response = readApiInput(
+            prompt = "api> provider [1=OpenAI, 2=Ollama] (blank keeps ${defaultProvider.displayName}): ",
+        ) ?: return null
+        val normalized = response.trim()
+        if (normalized.isEmpty()) {
+            return defaultProvider
+        }
+        return when (normalized.lowercase()) {
+            "1", "openai" -> ApiProvider.OPENAI
+            "2", "ollama" -> ApiProvider.OLLAMA
+            else -> {
+                dialogBlocks += "system> invalid provider selection '$normalized'"
+                null
+            }
+        }
+    }
+
+    private fun readApiInput(prompt: String): String? {
+        renderScreen()
+        io.showCursor()
+        return try {
+            io.readLineInFooter(
+                prompt = prompt,
+                divider = inputDivider,
+                footerLabel = workflowFooterLabel(),
+            )
+        } finally {
+            io.hideCursor()
+        }
+    }
+
+    private fun buildModelsTextForProvider(
+        provider: ApiProvider,
+        selectedModel: String? = currentModel,
+    ): String {
+        val previousProvider = currentProvider
+        val previousModel = currentModel
+        currentProvider = provider
+        currentModel = selectedModel
+        val text = modelsText()
+        currentProvider = previousProvider
+        currentModel = previousModel
+        return text
+    }
+
+    private fun defaultBaseUrlFor(provider: ApiProvider): String {
+        return when (provider) {
+            ApiProvider.OPENAI -> "https://api.openai.com/v1"
+            ApiProvider.OLLAMA -> "http://127.0.0.1:11434/v1"
+        }
+    }
+
+    private fun persistenceSuffix(): String {
+        return if (apiSettingsStore == null) {
+            " (current session only)"
+        } else {
+            ""
+        }
+    }
 
     private fun handleMcpCommand() {
         val store = mcpServerStore
@@ -2817,32 +3034,51 @@ class ConsoleChatController(
         }
     }
 
-    private fun modelsText(): String = buildString {
-        appendLine("Available models:")
-        availableModelIds.forEachIndexed { index, modelId ->
-            val marker = if (modelId == currentModel) " * " else "   "
-            val model = modelById[modelId]
-            if (model == null) {
-                appendLine("$marker${index + 1}. $modelId")
-                return@forEachIndexed
-            }
-
-            val pricing = model.pricing
-            appendLine(
-                "$marker${index + 1}. $modelId " +
-                    "(ctx=${formatIntWithGrouping(model.contextWindowTokens)}; " +
-                    "in=$${formatRate(pricing.inputUsdPer1M)}/1M; " +
-                    "out=$${formatRate(pricing.outputUsdPer1M)}/1M)",
-            )
+    private fun modelsText(): String {
+        val provider = currentProvider
+            ?: return "No API provider configured. Run /api to configure OpenAI or Ollama."
+        val availableModels = availableModelsFor(provider)
+        if (availableModels.isEmpty()) {
+            return "No models are configured for ${provider.displayName}."
         }
-    }.trimEnd()
+
+        return buildString {
+            appendLine("Available models for ${provider.displayName}:")
+            availableModels.forEachIndexed { index, model ->
+                val marker = if (model.id == currentModel) " * " else "   "
+                val pricing = model.pricing
+                val contextWindowTokens = model.contextWindowTokens
+                if (pricing == null || contextWindowTokens == null) {
+                    appendLine("$marker${index + 1}. ${model.id} (ctx=n/a; in=n/a; out=n/a)")
+                } else {
+                    appendLine(
+                        "$marker${index + 1}. ${model.id} " +
+                            "(ctx=${formatIntWithGrouping(contextWindowTokens)}; " +
+                            "in=$${formatRate(pricing.inputUsdPer1M)}/1M; " +
+                            "out=$${formatRate(pricing.outputUsdPer1M)}/1M)",
+                    )
+                }
+            }
+        }.trimEnd()
+    }
 
     private fun memoryUsageText(): String {
+        val provider = currentProvider
+        val activeModel = currentModel
+        if (provider == null || activeModel == null) {
+            return """
+                memory> Provider: n/a
+                memory> Model: n/a
+                memory> Configure an API provider with /api before sending prompts.
+            """.trimIndent()
+        }
+
         val usedTokens = memoryUsageSnapshot.estimatedTokens.coerceAtLeast(0)
-        val contextWindow = modelById[currentModel]?.contextWindowTokens
+        val contextWindow = modelById()[activeModel]?.contextWindowTokens
         if (contextWindow == null || contextWindow <= 0) {
             return """
-                memory> Model: $currentModel
+                memory> Provider: ${provider.displayName}
+                memory> Model: $activeModel
                 memory> Used: ${formatIntWithGrouping(usedTokens)}/n/a (n/a) | Remaining: n/a
                 memory> [${"-".repeat(MEMORY_BAR_WIDTH)}]
                 memory> Estimate: ${memoryEstimateLabel(memoryUsageSnapshot.source)}
@@ -2852,7 +3088,8 @@ class ConsoleChatController(
         val remainingTokens = (contextWindow - usedTokens).coerceAtLeast(0)
         val percentUsed = usedTokens * 100.0 / contextWindow
         return """
-            memory> Model: $currentModel
+            memory> Provider: ${provider.displayName}
+            memory> Model: $activeModel
             memory> Used: ${formatIntWithGrouping(usedTokens)}/${formatIntWithGrouping(contextWindow)} (${formatPercentage(percentUsed)}) | Remaining: ${formatIntWithGrouping(remainingTokens)}
             memory> [${buildMemoryUsageBar(usedTokens, contextWindow)}]
             memory> Estimate: ${memoryEstimateLabel(memoryUsageSnapshot.source)}
@@ -3002,14 +3239,18 @@ class ConsoleChatController(
     }
 
     private fun handleModelCommand(input: String) {
+        val provider = currentProvider ?: run {
+            dialogBlocks += "system> no API provider configured. Run /api to configure OpenAI or Ollama."
+            return
+        }
         val parts = input.trim().split(Regex("\\s+"), limit = 2)
         if (parts.size != 2 || parts[1].isBlank()) {
-            dialogBlocks += "system> usage: /model <id|number>. Current model: $currentModel"
+            dialogBlocks += "system> usage: /model <id|number>. Current model: ${currentModel ?: "n/a"}"
             return
         }
 
         val requestedModelArg = parts[1].trim()
-        val requestedModel = resolveRequestedModel(requestedModelArg)
+        val requestedModel = resolveRequestedModel(requestedModelArg, provider)
         if (requestedModel == null) {
             dialogBlocks += "system> unknown model '$requestedModelArg'. Run /models to view available models."
             return
@@ -3020,11 +3261,33 @@ class ConsoleChatController(
             return
         }
 
-        currentModel = requestedModel
+        val currentSettings = apiSettingsService.currentSettings() ?: run {
+            dialogBlocks += "system> failed to load current API settings"
+            return
+        }
+        val updatedSettings = when (provider) {
+            ApiProvider.OPENAI -> currentSettings.copy(
+                activeProvider = provider,
+                openAi = currentSettings.openAi?.copy(selectedModel = requestedModel),
+            )
+
+            ApiProvider.OLLAMA -> currentSettings.copy(
+                activeProvider = provider,
+                ollama = currentSettings.ollama?.copy(selectedModel = requestedModel),
+            )
+        }
+        if (!applyApiSettingsUpdate(updatedSettings)) {
+            dialogBlocks += "system> failed to persist model selection"
+            return
+        }
         dialogBlocks += "system> model switched to '$requestedModel'"
     }
 
-    private fun resolveRequestedModel(argument: String): String? {
+    private fun resolveRequestedModel(
+        argument: String,
+        provider: ApiProvider,
+    ): String? {
+        val availableModelIds = availableModelIds(provider)
         val index = argument.toIntOrNull()
         if (index != null) {
             if (index !in 1..availableModelIds.size) {
@@ -3033,6 +3296,24 @@ class ConsoleChatController(
             return availableModelIds[index - 1]
         }
         return availableModelIds.firstOrNull { it == argument }
+    }
+
+    private fun applyApiSettingsUpdate(settings: ApiSettings): Boolean {
+        val normalizedSettings = settings.normalizedOrNull() ?: return false
+        val persisted = apiSettingsStore?.let { store ->
+            runCatching {
+                store.save(normalizedSettings)
+                true
+            }.getOrDefault(false)
+        } ?: true
+        if (!persisted) {
+            return false
+        }
+        apiSettingsService.replace(normalizedSettings)
+        currentProvider = normalizedSettings.activeProvider
+        currentModel = normalizedSettings.activeProviderSettingsOrNull()?.selectedModel
+        normalizeActiveApiSelection()
+        return true
     }
 
     private fun formatUserPrompt(text: String): String {
@@ -3139,12 +3420,16 @@ class ConsoleChatController(
     }
 
     private fun formatResponsePrice(usage: TokenUsage?): String {
-        val modelRate = modelById[currentModel]?.pricing
+        val activeModel = currentModel
         if (usage == null) {
             return "price> n/a (token usage unavailable)"
         }
+        if (activeModel == null) {
+            return "price> n/a (no model selected)"
+        }
+        val modelRate = modelById()[activeModel]?.pricing
         if (modelRate == null) {
-            return "price> n/a (pricing not configured for '$currentModel')"
+            return "price> n/a (pricing not configured for '$activeModel')"
         }
 
         val inputCost = usage.inputTokens * modelRate.inputUsdPer1M / TOKENS_PER_MILLION

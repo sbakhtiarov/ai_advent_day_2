@@ -1,6 +1,7 @@
 package com.aichallenge.day2.agent.core.di
 
 import com.aichallenge.day2.agent.core.config.AppConfig
+import com.aichallenge.day2.agent.core.config.ApiSettingsService
 import com.aichallenge.day2.agent.core.logging.ApiTrafficFileLogger
 import com.aichallenge.day2.agent.data.mcp.SdkMcpRuntimeService
 import com.aichallenge.day2.agent.data.tools.BuiltInToolRegistry
@@ -21,6 +22,7 @@ import kotlinx.serialization.json.Json
 
 class AppContainer(
     config: AppConfig,
+    apiSettingsService: ApiSettingsService,
 ) {
     private val json = Json {
         ignoreUnknownKeys = true
@@ -53,7 +55,7 @@ class AppContainer(
 
     private val remoteDataSource = OpenAiRemoteDataSource(
         httpClient = openAiHttpClient,
-        config = config,
+        apiSettingsService = apiSettingsService,
         json = json,
         apiTrafficLogger = apiTrafficLogger,
         privateToolExecutionService = privateToolExecutionService,

@@ -1,6 +1,8 @@
 package com.aichallenge.day2.agent.data.remote
 
-import com.aichallenge.day2.agent.core.config.AppConfig
+import com.aichallenge.day2.agent.core.config.ApiProvider
+import com.aichallenge.day2.agent.core.config.ApiProviderSettings
+import com.aichallenge.day2.agent.core.config.ApiSettingsService
 import com.aichallenge.day2.agent.core.logging.ApiTrafficFileLogger
 import com.aichallenge.day2.agent.domain.model.MessageRole
 import com.aichallenge.day2.agent.domain.model.LlmToolCapabilities
@@ -30,7 +32,7 @@ import kotlinx.serialization.json.put
 
 class OpenAiRemoteDataSource(
     private val httpClient: HttpClient,
-    private val config: AppConfig,
+    private val apiSettingsService: ApiSettingsService,
     private val json: Json,
     private val apiTrafficLogger: ApiTrafficFileLogger? = null,
     private val privateToolExecutionService: PrivateToolExecutionService,
@@ -55,13 +57,17 @@ class OpenAiRemoteDataSource(
             .filter { it.isNotEmpty() }
             .joinToString(separator = "\n\n")
             .ifBlank { null }
-        val requestUrl = "${config.baseUrl}/responses"
+        val activeProvider = apiSettingsService.currentProvider()
+            ?: throw IllegalStateException("No API provider is configured. Run /api before sending a prompt.")
+        val providerSettings = apiSettingsService.currentProviderSettings()
+            ?: throw IllegalStateException("${activeProvider.displayName} is selected but not fully configured. Run /api.")
+        val requestUrl = "${providerSettings.baseUrl}/responses"
         val responseTools = buildResponseTools(prompt.toolCapabilities)
         val privateToolBindings = prompt.toolCapabilities.privateTools.associateBy(PrivateToolBinding::modelToolName)
         var totalUsage: TokenUsage? = null
         var executedPrivateToolCalls = 0
         var requestPayload = ResponsesApiRequest(
-            model = model ?: config.model,
+            model = model ?: providerSettings.selectedModel,
             instructions = instructions,
             temperature = temperature,
             input = prompt.messages.map { message ->
@@ -81,6 +87,8 @@ class OpenAiRemoteDataSource(
 
         while (true) {
             val payload = executeRequest(
+                activeProvider = activeProvider,
+                providerSettings = providerSettings,
                 requestUrl = requestUrl,
                 requestPayload = requestPayload,
             )
@@ -90,7 +98,7 @@ class OpenAiRemoteDataSource(
             if (pendingFunctionCalls.isEmpty()) {
                 val output = extractOutput(payload)
                 if (output.isBlank()) {
-                    throw IllegalStateException("OpenAI returned an empty response.")
+                    throw IllegalStateException("${activeProvider.displayName} returned an empty response.")
                 }
                 return AssistantReply(
                     content = output,
@@ -99,16 +107,16 @@ class OpenAiRemoteDataSource(
             }
 
             val responseId = payload.id?.trim().takeUnless { it.isNullOrEmpty() }
-                ?: throw IllegalStateException("OpenAI returned function calls without a response id.")
+                ?: throw IllegalStateException("${activeProvider.displayName} returned function calls without a response id.")
             val functionOutputs = pendingFunctionCalls.map { functionCall ->
                 executedPrivateToolCalls += 1
                 if (executedPrivateToolCalls > MAX_PRIVATE_TOOL_CALLS_PER_TURN) {
                     throw IllegalStateException(
-                        "OpenAI requested more than $MAX_PRIVATE_TOOL_CALLS_PER_TURN private MCP tool calls in one turn.",
+                        "${activeProvider.displayName} requested more than $MAX_PRIVATE_TOOL_CALLS_PER_TURN private MCP tool calls in one turn.",
                     )
                 }
                 val binding = privateToolBindings[functionCall.name]
-                    ?: throw IllegalStateException("OpenAI requested unknown private MCP tool '${functionCall.name}'.")
+                    ?: throw IllegalStateException("${activeProvider.displayName} requested unknown private MCP tool '${functionCall.name}'.")
                 toolCallTraceObserver?.onToolCallTrace(
                     ToolCallTraceEvent.Started(
                         toolLabel = buildToolTraceLabel(binding),
@@ -118,7 +126,7 @@ class OpenAiRemoteDataSource(
             }
 
             requestPayload = ResponsesApiRequest(
-                model = model ?: config.model,
+                model = model ?: providerSettings.selectedModel,
                 instructions = instructions,
                 temperature = temperature,
                 input = functionOutputs.map { output ->
@@ -167,26 +175,28 @@ class OpenAiRemoteDataSource(
     }
 
     private suspend fun executeRequest(
+        activeProvider: ApiProvider,
+        providerSettings: ApiProviderSettings,
         requestUrl: String,
         requestPayload: ResponsesApiRequest,
     ): ResponsesApiEnvelope {
         val rawRequestBody = json.encodeToString(requestPayload)
         val exchangeId = apiTrafficLogger?.reserveExchangeId() ?: 0L
+        val requestHeaders = buildRequestHeaders(providerSettings)
 
         apiTrafficLogger?.logRequest(
             exchangeId = exchangeId,
             method = "POST",
             url = requestUrl,
-            headers = listOf(
-                HttpHeaders.Authorization to "Bearer ${config.apiKey}",
-                HttpHeaders.ContentType to ContentType.Application.Json.toString(),
-            ),
+            headers = requestHeaders,
             body = rawRequestBody,
         )
 
         val response = try {
             httpClient.post(requestUrl) {
-                header(HttpHeaders.Authorization, "Bearer ${config.apiKey}")
+                requestHeaders.forEach { (name, value) ->
+                    header(name, value)
+                }
                 contentType(ContentType.Application.Json)
                 setBody(requestPayload)
             }
@@ -213,11 +223,21 @@ class OpenAiRemoteDataSource(
 
         if (response.status.value !in 200..299) {
             throw IllegalStateException(
-                "OpenAI request failed with HTTP ${response.status.value}: $rawResponseBody",
+                "${activeProvider.displayName} request failed with HTTP ${response.status.value}: $rawResponseBody",
             )
         }
 
         return json.decodeFromString(rawResponseBody)
+    }
+
+    private fun buildRequestHeaders(providerSettings: ApiProviderSettings): List<Pair<String, String>> {
+        val headers = mutableListOf(
+            HttpHeaders.ContentType to ContentType.Application.Json.toString(),
+        )
+        providerSettings.apiKey.takeIf { it.isNotBlank() }?.let { apiKey ->
+            headers += HttpHeaders.Authorization to "Bearer $apiKey"
+        }
+        return headers
     }
 
     private fun extractPendingFunctionCalls(payload: ResponsesApiEnvelope): List<PendingFunctionCall> {
@@ -227,9 +247,9 @@ class OpenAiRemoteDataSource(
             }
 
             val callId = item.callId?.trim().takeUnless { it.isNullOrEmpty() }
-                ?: throw IllegalStateException("OpenAI returned a function call without call_id.")
+                ?: throw IllegalStateException("LLM provider returned a function call without call_id.")
             val name = item.name?.trim().takeUnless { it.isNullOrEmpty() }
-                ?: throw IllegalStateException("OpenAI returned a function call without name.")
+                ?: throw IllegalStateException("LLM provider returned a function call without name.")
 
             PendingFunctionCall(
                 callId = callId,

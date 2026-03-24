@@ -1,7 +1,7 @@
 package com.aichallenge.day2.agent.core.config
 
-import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.ByteVar
+import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.allocArray
 import kotlinx.cinterop.memScoped
 import kotlinx.cinterop.toKString
@@ -18,21 +18,29 @@ data class ModelPricing(
 
 data class ModelProperties(
     val id: String,
-    val pricing: ModelPricing,
-    val contextWindowTokens: Int,
+    val pricing: ModelPricing? = null,
+    val contextWindowTokens: Int? = null,
 )
 
 data class AppConfig(
-    val apiKey: String,
-    val model: String,
-    val models: List<ModelProperties>,
-    val baseUrl: String,
+    val fallbackApiSettings: ApiSettings?,
+    val openAiModels: List<ModelProperties>,
+    val ollamaModels: List<ModelProperties>,
     val systemPrompt: String,
     val apiTrafficLogFilePath: String?,
 ) {
+    fun modelsFor(provider: ApiProvider): List<ModelProperties> {
+        return when (provider) {
+            ApiProvider.OPENAI -> openAiModels
+            ApiProvider.OLLAMA -> ollamaModels
+        }
+    }
+
     companion object {
-        private const val DEFAULT_MODEL = "gpt-4.1-mini"
-        private const val DEFAULT_BASE_URL = "https://api.openai.com/v1"
+        private const val DEFAULT_OPENAI_MODEL = "gpt-4.1-mini"
+        private const val DEFAULT_OLLAMA_MODEL = "qwen3:8b"
+        private const val DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+        private const val DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1"
         private const val DEFAULT_SYSTEM_PROMPT =
             "You are a concise and pragmatic assistant. Ask for clarification only when needed."
         private const val DEFAULT_API_TRAFFIC_LOG_FILE = ".kotlin-agent-cli/openai-api-traffic.log"
@@ -122,28 +130,44 @@ data class AppConfig(
             ),
         )
 
+        private val OLLAMA_MODEL_CATALOG = listOf(
+            ModelProperties(
+                id = DEFAULT_OLLAMA_MODEL,
+            ),
+        )
+
         fun fromEnvironment(): AppConfig {
             val localProperties = loadLocalProperties()
-            val apiKey = readConfig("OPENAI_API_KEY", localProperties).orEmpty().trim()
-            require(apiKey.isNotEmpty()) {
-                "OPENAI_API_KEY is required."
-            }
+            val openAiModels = internalModelCatalog()
+            val ollamaModels = ollamaModelCatalog()
+            validateModelCatalog(openAiModels, requirePricing = true, requireContextWindow = true)
+            validateModelCatalog(ollamaModels, requirePricing = false, requireContextWindow = false)
 
-            val models = internalModelCatalog()
-            validateModelCatalog(models)
-            val baseUrl = readConfig("OPENAI_BASE_URL", localProperties).orEmpty().trim().ifEmpty { DEFAULT_BASE_URL }
+            val apiKey = readConfig("OPENAI_API_KEY", localProperties).orEmpty().trim()
+            val baseUrl = readConfig("OPENAI_BASE_URL", localProperties).orEmpty().trim()
+                .ifEmpty { DEFAULT_OPENAI_BASE_URL }
             val configuredApiTrafficLogPath = readConfigAllowingBlank("OPENAI_API_LOG_FILE", localProperties)
             val apiTrafficLogFilePath = when {
                 configuredApiTrafficLogPath == null -> defaultApiTrafficLogFilePath()
                 configuredApiTrafficLogPath.isBlank() -> null
                 else -> configuredApiTrafficLogPath.trim()
             }
+            val fallbackApiSettings = apiKey.takeIf { it.isNotEmpty() }?.let { normalizedApiKey ->
+                ApiSettings(
+                    activeProvider = ApiProvider.OPENAI,
+                    openAi = ApiProviderSettings(
+                        baseUrl = baseUrl.trimEnd('/'),
+                        apiKey = normalizedApiKey,
+                        selectedModel = DEFAULT_OPENAI_MODEL,
+                    ),
+                    ollama = null,
+                )
+            }
 
             return AppConfig(
-                apiKey = apiKey,
-                model = DEFAULT_MODEL,
-                models = models,
-                baseUrl = baseUrl.trimEnd('/'),
+                fallbackApiSettings = fallbackApiSettings,
+                openAiModels = openAiModels,
+                ollamaModels = ollamaModels,
                 systemPrompt = DEFAULT_SYSTEM_PROMPT,
                 apiTrafficLogFilePath = apiTrafficLogFilePath,
             )
@@ -151,7 +175,21 @@ data class AppConfig(
 
         internal fun internalModelCatalog(): List<ModelProperties> = INTERNAL_MODEL_CATALOG.toList()
 
-        internal fun defaultModelId(): String = DEFAULT_MODEL
+        internal fun ollamaModelCatalog(): List<ModelProperties> = OLLAMA_MODEL_CATALOG.toList()
+
+        internal fun defaultModelId(provider: ApiProvider = ApiProvider.OPENAI): String {
+            return when (provider) {
+                ApiProvider.OPENAI -> DEFAULT_OPENAI_MODEL
+                ApiProvider.OLLAMA -> DEFAULT_OLLAMA_MODEL
+            }
+        }
+
+        internal fun defaultBaseUrl(provider: ApiProvider): String {
+            return when (provider) {
+                ApiProvider.OPENAI -> DEFAULT_OPENAI_BASE_URL
+                ApiProvider.OLLAMA -> DEFAULT_OLLAMA_BASE_URL
+            }
+        }
 
         @OptIn(ExperimentalForeignApi::class)
         private fun readConfig(name: String, localProperties: Map<String, String>): String? {
@@ -278,7 +316,11 @@ data class AppConfig(
             return if (startsWithQuote || startsWithSingleQuote) value.substring(1, value.length - 1) else value
         }
 
-        private fun validateModelCatalog(models: List<ModelProperties>) {
+        private fun validateModelCatalog(
+            models: List<ModelProperties>,
+            requirePricing: Boolean,
+            requireContextWindow: Boolean,
+        ) {
             require(models.isNotEmpty()) {
                 "Internal model catalog must not be empty."
             }
@@ -291,19 +333,30 @@ data class AppConfig(
                 require(uniqueIds.add(model.id)) {
                     "Duplicate model id in internal catalog: '${model.id}'."
                 }
-                require(model.pricing.inputUsdPer1M >= 0.0) {
-                    "Model '${model.id}' has invalid input rate: ${model.pricing.inputUsdPer1M}."
+                if (requirePricing) {
+                    requireNotNull(model.pricing) {
+                        "Model '${model.id}' must define pricing."
+                    }
+                    require(model.pricing.inputUsdPer1M >= 0.0) {
+                        "Model '${model.id}' has invalid input rate: ${model.pricing.inputUsdPer1M}."
+                    }
+                    require(model.pricing.outputUsdPer1M >= 0.0) {
+                        "Model '${model.id}' has invalid output rate: ${model.pricing.outputUsdPer1M}."
+                    }
                 }
-                require(model.pricing.outputUsdPer1M >= 0.0) {
-                    "Model '${model.id}' has invalid output rate: ${model.pricing.outputUsdPer1M}."
-                }
-                require(model.contextWindowTokens > 0) {
-                    "Model '${model.id}' has invalid context window: ${model.contextWindowTokens}."
+                if (requireContextWindow) {
+                    requireNotNull(model.contextWindowTokens) {
+                        "Model '${model.id}' must define a context window."
+                    }
+                    require(model.contextWindowTokens > 0) {
+                        "Model '${model.id}' has invalid context window: ${model.contextWindowTokens}."
+                    }
                 }
             }
 
-            require(models.any { it.id == DEFAULT_MODEL }) {
-                "Default model '$DEFAULT_MODEL' must be present in the internal model catalog."
+            val expectedDefaultModel = if (requirePricing) DEFAULT_OPENAI_MODEL else DEFAULT_OLLAMA_MODEL
+            require(models.any { it.id == expectedDefaultModel }) {
+                "Default model '$expectedDefaultModel' must be present in the internal model catalog."
             }
         }
     }

@@ -116,10 +116,11 @@ class AppConfigTest {
         ) {
             val config = AppConfig.fromEnvironment()
 
-            assertEquals(AppConfig.defaultModelId(), config.model)
+            assertEquals(ApiProvider.OPENAI, config.fallbackApiSettings?.activeProvider)
+            assertEquals(AppConfig.defaultModelId(), config.fallbackApiSettings?.openAi?.selectedModel)
             assertEquals(
                 AppConfig.internalModelCatalog().map { it.id },
-                config.models.map { it.id },
+                config.openAiModels.map { it.id },
             )
         }
     }

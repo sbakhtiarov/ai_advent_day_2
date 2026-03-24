@@ -35,7 +35,7 @@ class ApiTrafficFileLogger(
     ) {
         appendEntry(
             buildString {
-                appendLine("===== OpenAI API Exchange #$exchangeId REQUEST =====")
+                appendLine("===== LLM API Exchange #$exchangeId REQUEST =====")
                 appendLine("$method $url")
                 appendLine("Headers:")
                 appendLine(formatHeaders(headers))
@@ -55,7 +55,7 @@ class ApiTrafficFileLogger(
     ) {
         appendEntry(
             buildString {
-                appendLine("===== OpenAI API Exchange #$exchangeId RESPONSE =====")
+                appendLine("===== LLM API Exchange #$exchangeId RESPONSE =====")
                 appendLine("HTTP $statusCode $statusDescription")
                 appendLine("Headers:")
                 appendLine(formatHeaders(headers))
@@ -73,7 +73,7 @@ class ApiTrafficFileLogger(
     ) {
         appendEntry(
             buildString {
-                appendLine("===== OpenAI API Exchange #$exchangeId FAILURE =====")
+                appendLine("===== LLM API Exchange #$exchangeId FAILURE =====")
                 appendLine(throwable::class.simpleName ?: "Throwable")
                 appendLine(throwable.message ?: "(no message)")
                 appendLine("===== End Exchange #$exchangeId =====")
