@@ -100,6 +100,86 @@ class OpenAiRemoteDataSourceTest {
     }
 
     @Test
+    fun fetchAssistantReplyRetriesWithoutPublicMcpToolsWhenFunctionNameIsMissing() = runSuspendTest {
+        val requestBodies = mutableListOf<String>()
+        val executionService = RecordingPrivateToolExecutionService(
+            toolResultsByName = mapOf(
+                "linear__search_issues" to Result.success(successfulPrivateToolResult("issue-1")),
+            ),
+        )
+        val dataSource = createDataSource(
+            requestBodies = requestBodies,
+            responses = listOf(
+                """
+                    {
+                      "id": "resp_1",
+                      "output": [
+                        {
+                          "type": "function_call",
+                          "call_id": "call_1",
+                          "arguments": "{\"query\":\"bug\"}"
+                        }
+                      ]
+                    }
+                """.trimIndent(),
+                """
+                    {
+                      "id": "resp_2",
+                      "output": [
+                        {
+                          "type": "function_call",
+                          "call_id": "call_2",
+                          "name": "linear__search_issues",
+                          "arguments": "{\"query\":\"bug\"}"
+                        }
+                      ]
+                    }
+                """.trimIndent(),
+                """
+                    {
+                      "id": "resp_3",
+                      "output_text": "Found one issue"
+                    }
+                """.trimIndent(),
+            ),
+            privateToolExecutionService = executionService,
+        )
+
+        val reply = dataSource.fetchAssistantReply(
+            prompt = PromptRequestData(
+                systemPrompt = "System",
+                messages = listOf(ConversationMessage.user("Find issues")),
+                toolCapabilities = LlmToolCapabilities(
+                    publicMcpServers = listOf(
+                        PublicMcpServerCapability(
+                            serverLabel = "Weather",
+                            serverUrl = "https://weather.chukai.io/mcp",
+                        ),
+                    ),
+                    privateTools = listOf(privateToolBinding()),
+                ),
+            ),
+            model = "gpt-4.1-mini",
+        )
+
+        assertEquals("Found one issue", reply.content)
+        assertEquals(3, requestBodies.size)
+        assertEquals(1, executionService.executeRequests.size)
+
+        val firstRequestTools = json.parseToJsonElement(requestBodies[0]).jsonObject["tools"]?.jsonArray
+            ?: error("Missing first request tools")
+        assertEquals(listOf("mcp", "function"), firstRequestTools.map { tool -> tool.jsonObject["type"]?.jsonPrimitive?.content })
+
+        val retriedRequest = json.parseToJsonElement(requestBodies[1]).jsonObject
+        val retriedTools = retriedRequest["tools"]?.jsonArray ?: error("Missing retried request tools")
+        assertEquals(listOf("function"), retriedTools.map { tool -> tool.jsonObject["type"]?.jsonPrimitive?.content })
+        assertEquals(null, retriedRequest["previous_response_id"])
+
+        val continuationRequest = json.parseToJsonElement(requestBodies[2]).jsonObject
+        assertEquals("resp_2", continuationRequest["previous_response_id"]?.jsonPrimitive?.content)
+    }
+
+    @Test
     fun fetchAssistantReplyContinuesWithFunctionCallOutputAndAggregatesUsage() = runSuspendTest {
         val requestBodies = mutableListOf<String>()
         val executionService = RecordingPrivateToolExecutionService(

@@ -63,6 +63,7 @@ class OpenAiRemoteDataSource(
         val privateToolBindings = prompt.toolCapabilities.privateTools.associateBy(PrivateToolBinding::modelToolName)
         var totalUsage: TokenUsage? = null
         var executedPrivateToolCalls = 0
+        var retriedWithoutPublicMcpTools = false
         var requestPayload = ResponsesApiRequest(
             model = model ?: activeApi.selectedModel,
             instructions = instructions,
@@ -90,7 +91,16 @@ class OpenAiRemoteDataSource(
             )
             totalUsage = mergeUsage(totalUsage, extractUsage(payload))
 
-            val pendingFunctionCalls = extractPendingFunctionCalls(payload)
+            val pendingFunctionCalls = try {
+                extractPendingFunctionCalls(payload)
+            } catch (missingName: MissingFunctionNameException) {
+                if (!retriedWithoutPublicMcpTools && requestPayload.hasPublicMcpTools()) {
+                    retriedWithoutPublicMcpTools = true
+                    requestPayload = requestPayload.withoutPublicMcpTools()
+                    continue
+                }
+                throw missingName
+            }
             if (pendingFunctionCalls.isEmpty()) {
                 val output = extractOutput(payload)
                 if (output.isBlank()) {
@@ -244,7 +254,7 @@ class OpenAiRemoteDataSource(
             val callId = item.callId?.trim().takeUnless { it.isNullOrEmpty() }
                 ?: throw IllegalStateException("LLM provider returned a function call without call_id.")
             val name = item.name?.trim().takeUnless { it.isNullOrEmpty() }
-                ?: throw IllegalStateException("LLM provider returned a function call without name.")
+                ?: throw MissingFunctionNameException()
 
             PendingFunctionCall(
                 callId = callId,
@@ -363,6 +373,22 @@ class OpenAiRemoteDataSource(
     companion object {
         private const val MAX_PRIVATE_TOOL_CALLS_PER_TURN = 16
     }
+}
+
+private class MissingFunctionNameException : IllegalStateException("LLM provider returned a function call without name.")
+
+private fun ResponsesApiRequest.hasPublicMcpTools(): Boolean {
+    return tools?.any { tool -> tool.type == "mcp" } == true
+}
+
+private fun ResponsesApiRequest.withoutPublicMcpTools(): ResponsesApiRequest {
+    val filteredTools = tools
+        ?.filterNot { tool -> tool.type == "mcp" }
+        ?.takeUnless(List<ResponseTool>::isEmpty)
+    return copy(
+        tools = filteredTools,
+        parallelToolCalls = filteredTools?.let { false },
+    )
 }
 
 private fun MessageRole.toApiRole(): String = when (this) {
