@@ -139,11 +139,13 @@ private data class ApiSettingsSnapshotDto(
     val version: Int = 3,
     val active_api_id: String = "",
     val apis: List<ConfiguredApiSnapshotDto> = emptyList(),
+    val temperature: Double? = null,
 ) {
     fun toDomainModelOrNull(): ApiSettings? {
         return ApiSettings(
             activeApiId = active_api_id,
             apis = apis.mapNotNull { api -> api.toDomainModelOrNull() },
+            temperature = temperature,
         ).takeIf { settings -> settings.apis.size == apis.size }
             ?.normalizedOrNull()
     }
@@ -154,6 +156,7 @@ private data class ApiSettingsSnapshotDto(
                 version = 3,
                 active_api_id = settings.activeApiId,
                 apis = settings.apis.map(ConfiguredApiSnapshotDto::fromDomainModel),
+                temperature = settings.temperature,
             )
         }
     }

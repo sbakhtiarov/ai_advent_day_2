@@ -34,6 +34,7 @@ API settings are persisted at `~/.kotlin-agent-cli/api-settings.json` with:
 {
   "version": 3,
   "active_api_id": "prod",
+  "temperature": 0.7,
   "apis": [
     {
       "id": "prod",
@@ -59,7 +60,7 @@ API settings are persisted at `~/.kotlin-agent-cli/api-settings.json` with:
 
 All configured entries are treated as OpenAI-compatible APIs and resolve model pricing/context metadata from the built-in model catalog.
 
-Use `/models` to see models for the active API and `/model <id|number>` to switch the active model for that API entry. Selecting an API with `/api` resets that API's current model to its `default_model`.
+Use `/models` to see models for the active API and `/model <id|number>` to switch the active model for that API entry. Selecting an API with `/api` resets that API's current model to its `default_model`. Use `/temperature` to view or update the optional global temperature override stored at the top level of this file.
 
 MCP server configuration is read from `~/.kotlin-agent-cli/mcp-servers.json`.
 Example:
@@ -218,6 +219,7 @@ time> <seconds> s
 - `/api` - select the active API from `api-settings.json`
 - `/models` - list models for the active API with active marker and metadata when available
 - `/model <id|number>` - switch the active model for the active API entry (must be listed in `/models`)
+- `/temperature [0..2|default]` - show or set the global temperature override for main prompt requests; `default` clears the override
 - `/memory` - show estimated session-memory context usage
 - `/compact` - choose compaction strategy (`Rolling summary`, `Sliding window`, `Fact map`, or `Branching`)
 - `/profile` - choose active user profile (`user-profile-<name>.json`)

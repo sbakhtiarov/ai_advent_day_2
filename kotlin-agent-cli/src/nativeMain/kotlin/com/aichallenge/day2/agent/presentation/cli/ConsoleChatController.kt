@@ -220,9 +220,12 @@ class ConsoleChatController(
                     api
                 }
             },
+            temperature = currentSettings.temperature,
         )
         apiSettingsService.replace(updatedSettings)
     }
+
+    private fun currentTemperatureOverride(): Double? = apiSettingsService.currentSettings()?.temperature
 
     private fun requireActiveModel(): String {
         return currentModel ?: throw IllegalStateException(
@@ -1367,6 +1370,7 @@ class ConsoleChatController(
         )
         val response = sendPromptUseCase.execute(
             prompt = promptRequest,
+            temperature = currentTemperatureOverride(),
             model = activeModel,
             toolCallTraceObserver = toolCallTraceObserver,
         )
@@ -1413,6 +1417,7 @@ class ConsoleChatController(
         )
         val response = sendPromptUseCase.execute(
             prompt = promptRequest,
+            temperature = currentTemperatureOverride(),
             model = activeModel,
             toolCallTraceObserver = toolCallTraceObserver,
         )
@@ -2066,6 +2071,11 @@ class ConsoleChatController(
                 true
             }
 
+            isTemperatureCommand(input) -> {
+                handleTemperatureCommand(input)
+                true
+            }
+
             input == "/reset" -> {
                 clearWorkingMemory()
                 resetConversation()
@@ -2477,7 +2487,7 @@ class ConsoleChatController(
         io.writeLine()
         io.writeLine("    type your prompt and press Enter")
         io.writeLine(
-            "    commands: /help, /api, /models, /model <id|number>, /memory, /compact, /profile, /workflow, /mcp, /invariant, /reset, /exit, @<path>",
+            "    commands: /help, /api, /models, /model <id|number>, /temperature [0..2|default], /memory, /compact, /profile, /workflow, /mcp, /invariant, /reset, /exit, @<path>",
         )
         io.writeLine()
 
@@ -2508,6 +2518,7 @@ class ConsoleChatController(
         /api                 select the active API from api-settings.json
         /models              list available models for the active API
         /model <id|number>   switch active model (must be from /models)
+        /temperature [arg]   show or set global temperature override (arg: 0..2 or default)
         /memory              show session-memory context usage
         /compact             choose memory compaction strategy
         /profile             choose active user profile
@@ -3156,6 +3167,10 @@ class ConsoleChatController(
         return input == "/model" || input.startsWith("/model ")
     }
 
+    private fun isTemperatureCommand(input: String): Boolean {
+        return input == "/temperature" || input.startsWith("/temperature ")
+    }
+
     private fun handleModelCommand(input: String) {
         val activeApiId = currentApiId ?: run {
             dialogBlocks += "system> no API configured. Define APIs in ~/.kotlin-agent-cli/api-settings.json and use /api to select one."
@@ -3197,6 +3212,51 @@ class ConsoleChatController(
             return
         }
         dialogBlocks += "system> model switched to '$requestedModel'"
+    }
+
+    private fun handleTemperatureCommand(input: String) {
+        val currentSettings = apiSettingsService.currentSettings() ?: run {
+            dialogBlocks += "system> no API configured. Define APIs in ~/.kotlin-agent-cli/api-settings.json and use /api to select one."
+            return
+        }
+        val parts = input.trim().split(Regex("\\s+"), limit = 2)
+        if (parts.size == 1) {
+            val currentValue = currentSettings.temperature?.toString() ?: "default"
+            dialogBlocks += "system> temperature override: $currentValue. Use /temperature <0..2|default> to change it."
+            return
+        }
+
+        val requestedValue = parts[1].trim()
+        if (requestedValue.equals("default", ignoreCase = true)) {
+            if (currentSettings.temperature == null) {
+                dialogBlocks += "system> temperature override is already default"
+                return
+            }
+
+            if (!applyApiSettingsUpdate(currentSettings.copy(temperature = null))) {
+                dialogBlocks += "system> failed to persist temperature override"
+                return
+            }
+            dialogBlocks += "system> temperature override cleared (provider default)${persistenceSuffix()}"
+            return
+        }
+
+        val parsedTemperature = requestedValue.toDoubleOrNull()
+        if (parsedTemperature == null || parsedTemperature !in 0.0..2.0) {
+            dialogBlocks += "system> usage: /temperature <0..2|default>. Current override: ${currentSettings.temperature?.toString() ?: "default"}"
+            return
+        }
+
+        if (currentSettings.temperature == parsedTemperature) {
+            dialogBlocks += "system> temperature override is already ${parsedTemperature}"
+            return
+        }
+
+        if (!applyApiSettingsUpdate(currentSettings.copy(temperature = parsedTemperature))) {
+            dialogBlocks += "system> failed to persist temperature override"
+            return
+        }
+        dialogBlocks += "system> temperature override set to ${parsedTemperature}${persistenceSuffix()}"
     }
 
     private fun resolveRequestedModel(

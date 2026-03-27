@@ -51,6 +51,40 @@ class JsonFileApiSettingsStoreTest {
     }
 
     @Test
+    fun saveAndLoadRoundTripPreservesTemperatureOverride() {
+        val filePath = uniqueApiSettingsFilePath()
+        val store = JsonFileApiSettingsStore(filePath)
+        val settings = ApiSettings(
+            activeApiId = "local",
+            apis = listOf(
+                ConfiguredApi(
+                    id = "prod",
+                    name = "Production",
+                    baseUrl = "https://api.openai.com/v1",
+                    apiKey = "sk-prod",
+                    availableModels = listOf("gpt-4.1-mini", "gpt-4.1-nano"),
+                    defaultModel = "gpt-4.1-mini",
+                    selectedModel = "gpt-4.1-mini",
+                ),
+                ConfiguredApi(
+                    id = "local",
+                    name = "Local",
+                    baseUrl = "https://localhost:8080/v1",
+                    apiKey = "sk-local",
+                    availableModels = listOf("gpt-4.1-nano"),
+                    defaultModel = "gpt-4.1-nano",
+                    selectedModel = "gpt-4.1-nano",
+                ),
+            ),
+            temperature = 0.65,
+        )
+
+        store.save(settings)
+
+        assertEquals(0.65, store.load()?.temperature)
+    }
+
+    @Test
     fun loadReturnsNullWhenFileIsMissing() {
         val store = JsonFileApiSettingsStore(uniqueApiSettingsFilePath())
 
@@ -238,6 +272,16 @@ class JsonFileApiSettingsStoreTest {
         val store = JsonFileApiSettingsStore(filePath)
 
         assertEquals("prod", store.load()?.activeApiId)
+    }
+
+    @Test
+    fun loadTreatsMissingTemperatureAsNull() {
+        val filePath = uniqueApiSettingsFilePath()
+        ensureDirectoryExists(parentDirectory(filePath))
+        writeTextFile(filePath, validSnapshot())
+        val store = JsonFileApiSettingsStore(filePath)
+
+        assertEquals(null, store.load()?.temperature)
     }
 
     private fun validSnapshot(): String {

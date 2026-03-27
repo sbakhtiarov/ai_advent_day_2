@@ -1520,6 +1520,24 @@ class ConsoleChatControllerSessionMemoryTest {
     }
 
     @Test
+    fun runSinglePromptUsesConfiguredTemperatureOverride() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(Result.success(AgentResponse(content = "one-shot answer"))),
+        )
+        val controller = createController(
+            repository = repository,
+            io = FakeCliIO(inputs = emptyList()),
+            apiSettingsService = MutableApiSettingsService(defaultApiSettings().copy(temperature = 0.9)),
+            persistentMemoryEnabled = false,
+        )
+
+        val exitCode = controller.runSinglePrompt("one-shot question")
+
+        assertEquals(0, exitCode)
+        assertEquals(listOf<Double?>(0.9), repository.requestedTemperatures)
+    }
+
+    @Test
     fun interactiveModeLoadsInvariantConstraintsOnStartup() = runBlocking {
         val repository = RecordingAgentRepository(responses = emptyList())
         val invariantStore = RecordingInvariantConstraintStore(
@@ -2227,9 +2245,10 @@ class ConsoleChatControllerSessionMemoryTest {
         val output = io.outputText()
         assertContains(
             output,
-            "commands: /help, /api, /models, /model <id|number>, /memory, /compact, /profile, /workflow, /mcp, /invariant, /reset, /exit, @<path>",
+            "commands: /help, /api, /models, /model <id|number>, /temperature [0..2|default], /memory, /compact, /profile, /workflow, /mcp, /invariant, /reset, /exit, @<path>",
         )
         assertContains(output, "/api                 select the active API from api-settings.json")
+        assertContains(output, "/temperature [arg]   show or set global temperature override (arg: 0..2 or default)")
         assertContains(output, "/memory              show session-memory context usage")
         assertContains(output, "/compact             choose memory compaction strategy")
         assertContains(output, "/profile             choose active user profile")
@@ -2308,6 +2327,113 @@ class ConsoleChatControllerSessionMemoryTest {
         assertEquals("gpt-4.1-nano", apiSettingsStore.saveStates.last().activeApiOrNull()?.selectedModel)
         assertEquals(listOf<String?>("gpt-4.1-nano"), repository.requestedModels)
         assertContains(io.outputText(), "system> model switched to 'gpt-4.1-nano'")
+    }
+
+    @Test
+    fun temperatureCommandShowsCurrentOverrideWhenNoArgumentProvided() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val io = FakeCliIO(inputs = listOf("/temperature", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+        )
+
+        controller.runInteractive()
+
+        assertContains(io.outputText(), "system> temperature override: default. Use /temperature <0..2|default> to change it.")
+    }
+
+    @Test
+    fun temperatureCommandPersistsGlobalOverrideAndUsesItForNextPrompt() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(Result.success(AgentResponse(content = "answer one"))),
+        )
+        val apiSettingsStore = RecordingApiSettingsStore(defaultApiSettings())
+        val io = FakeCliIO(inputs = listOf("/temperature 0.7", "prompt one", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            apiSettingsStore = apiSettingsStore,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(0.7, apiSettingsStore.saveStates.last().temperature)
+        assertEquals(listOf<Double?>(0.7), repository.requestedTemperatures)
+        assertContains(io.outputText(), "system> temperature override set to 0.7")
+    }
+
+    @Test
+    fun temperatureCommandClearRestoresDefaultWithoutResettingMemory() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "answer one")),
+                Result.success(AgentResponse(content = "answer two")),
+            ),
+        )
+        val sessionStore = RecordingSessionMemoryStore()
+        val warmedSettings = defaultApiSettings().copy(temperature = 0.7)
+        val apiSettingsStore = RecordingApiSettingsStore(warmedSettings)
+        val io = FakeCliIO(inputs = listOf("prompt one", "/temperature default", "prompt two", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            sessionMemoryStore = sessionStore,
+            apiSettingsService = MutableApiSettingsService(warmedSettings),
+            apiSettingsStore = apiSettingsStore,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(null, apiSettingsStore.saveStates.last().temperature)
+        assertEquals(listOf<Double?>(0.7, null), repository.requestedTemperatures)
+        assertEquals(0, sessionStore.clearCalls)
+        assertEquals(2, sessionStore.saveStates.size)
+        assertEquals(
+            listOf(MessageRole.USER, MessageRole.ASSISTANT, MessageRole.USER, MessageRole.ASSISTANT),
+            sessionStore.saveStates[1].messages.map { it.role },
+        )
+        assertContains(io.outputText(), "system> temperature override cleared (provider default)")
+    }
+
+    @Test
+    fun temperatureCommandRejectsInvalidValues() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val io = FakeCliIO(inputs = listOf("/temperature nope", "/temperature 2.5", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+        )
+
+        controller.runInteractive()
+
+        val output = io.outputText()
+        assertContains(output, "system> usage: /temperature <0..2|default>. Current override: default")
+        assertTrue(repository.conversations.isEmpty())
+    }
+
+    @Test
+    fun temperatureOverrideSurvivesApiSwitch() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(Result.success(AgentResponse(content = "local answer"))),
+        )
+        val warmedSettings = defaultApiSettings().copy(temperature = 0.4)
+        val apiSettingsStore = RecordingApiSettingsStore(warmedSettings)
+        val io = FakeCliIO(
+            inputs = listOf("/api", "prompt one", "/exit"),
+            apiSelections = listOf(1),
+        )
+        val controller = createController(
+            repository = repository,
+            io = io,
+            apiSettingsService = MutableApiSettingsService(warmedSettings),
+            apiSettingsStore = apiSettingsStore,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(0.4, apiSettingsStore.saveStates.last().temperature)
+        assertEquals(listOf<Double?>(0.4), repository.requestedTemperatures)
     }
 
     @Test
@@ -4720,6 +4846,7 @@ private class RecordingAgentRepository(
     val prompts = mutableListOf<PromptRequestData>()
     val conversations = mutableListOf<List<ConversationMessage>>()
     val requestedModels = mutableListOf<String?>()
+    val requestedTemperatures = mutableListOf<Double?>()
 
     override suspend fun complete(
         prompt: PromptRequestData,
@@ -4743,6 +4870,7 @@ private class RecordingAgentRepository(
         prompts += prompt
         conversations += prompt.toConversation()
         requestedModels += model
+        requestedTemperatures += temperature
         queuedToolTraceEvents.removeFirstOrNull().orEmpty().forEach { event ->
             toolCallTraceObserver?.onToolCallTrace(event)
         }

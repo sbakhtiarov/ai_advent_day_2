@@ -51,6 +51,7 @@ data class ConfiguredApi(
 data class ApiSettings(
     val activeApiId: String,
     val apis: List<ConfiguredApi>,
+    val temperature: Double? = null,
 ) {
     fun activeApiOrNull(): ConfiguredApi? {
         val normalized = normalizedOrNull() ?: return null
@@ -84,10 +85,16 @@ data class ApiSettings(
         val normalizedActiveApiId = activeApiId.trim()
             .takeIf { id -> id.isNotEmpty() && ids.contains(id) }
             ?: ids.first()
+        val normalizedTemperature = when (val value = temperature) {
+            null -> null
+            in 0.0..2.0 -> value
+            else -> return null
+        }
 
         return ApiSettings(
             activeApiId = normalizedActiveApiId,
             apis = normalizedApis,
+            temperature = normalizedTemperature,
         )
     }
 }
