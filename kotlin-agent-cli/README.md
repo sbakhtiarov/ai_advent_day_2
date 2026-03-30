@@ -60,6 +60,28 @@ API settings are persisted at `~/.kotlin-agent-cli/api-settings.json` with:
 
 All configured entries are treated as OpenAI-compatible APIs and resolve model pricing/context metadata from the built-in model catalog.
 
+Vast.ai's `Ollama + WebUI` template can also be used as a hosted OpenAI-compatible endpoint. Add a separate API entry that points to the template's exposed Ollama API URL and bearer token:
+
+```json
+{
+  "id": "vast-ollama",
+  "name": "Vast Ollama",
+  "base_url": "https://<instance-ip-or-host>:<external-port>/v1",
+  "api_key": "<vast-open-button-token>",
+  "available_models": ["<actual-ollama-model-id>"],
+  "default_model": "<actual-ollama-model-id>",
+  "selected_model": "<actual-ollama-model-id>"
+}
+```
+
+Notes for the Vast template setup:
+
+- `api_key` is sent as `Authorization: Bearer <api_key>`.
+- Keep the real Ollama model id, for example `qwen3:8b`; model ids do not need to exist in the built-in catalog.
+- Validate the hosted endpoint with `GET /v1/models` and `POST /v1/responses` before switching the CLI to it.
+- This fast path is best for chat-style turns first. Ollama's OpenAI-compatible `/v1/responses` support is non-stateful, so full tool-using agent loops are a follow-up integration.
+- If the Vast endpoint uses a certificate that the local Ktor/Curl client does not trust, verify the exact URL flow with `curl` first and then adjust the client setup separately if needed.
+
 Use `/models` to see models for the active API and `/model <id|number>` to switch the active model for that API entry. Selecting an API with `/api` resets that API's current model to its `default_model`. Use `/temperature` to view or update the optional global temperature override stored at the top level of this file.
 
 MCP server configuration is read from `~/.kotlin-agent-cli/mcp-servers.json`.
