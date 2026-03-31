@@ -29,6 +29,7 @@ class AppMainConfigNormalizationTest {
                 models = AppConfig.internalModelCatalog(),
                 systemPrompt = "prompt",
                 apiTrafficLogFilePath = null,
+                wireAppRagBaseUrl = "http://localhost:8000",
             ),
         )
 
@@ -57,6 +58,7 @@ class AppMainConfigNormalizationTest {
                 models = AppConfig.internalModelCatalog(),
                 systemPrompt = "prompt",
                 apiTrafficLogFilePath = null,
+                wireAppRagBaseUrl = "http://localhost:8000",
             ),
         )
 
@@ -84,6 +86,7 @@ class AppMainConfigNormalizationTest {
                 models = AppConfig.internalModelCatalog(),
                 systemPrompt = "prompt",
                 apiTrafficLogFilePath = null,
+                wireAppRagBaseUrl = "http://localhost:8000",
             ),
         )
 
@@ -113,6 +116,7 @@ class AppMainConfigNormalizationTest {
                 models = AppConfig.internalModelCatalog(),
                 systemPrompt = "prompt",
                 apiTrafficLogFilePath = null,
+                wireAppRagBaseUrl = "http://localhost:8000",
             ),
         )
 

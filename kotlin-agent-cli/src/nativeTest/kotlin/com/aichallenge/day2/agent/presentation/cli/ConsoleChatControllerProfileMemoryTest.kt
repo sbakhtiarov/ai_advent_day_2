@@ -16,6 +16,7 @@ import com.aichallenge.day2.agent.domain.model.UserProfileOption
 import com.aichallenge.day2.agent.domain.repository.AgentRepository
 import com.aichallenge.day2.agent.domain.repository.ProfileMemoryStore
 import com.aichallenge.day2.agent.domain.repository.UserDefinedProfileStore
+import com.aichallenge.day2.agent.domain.service.WireAppRagRetriever
 import com.aichallenge.day2.agent.domain.usecase.ProfileMemoryDistillationUseCase
 import com.aichallenge.day2.agent.domain.usecase.SendPromptUseCase
 import com.aichallenge.day2.agent.domain.usecase.SessionMemoryCompactionCoordinator
@@ -463,6 +464,7 @@ class ConsoleChatControllerProfileMemoryTest {
             io = io,
             profileMemoryStore = profileMemoryStore,
             userDefinedProfileStore = userDefinedProfileStore,
+            wireAppRagRetriever = WireAppRagRetriever { emptyList() },
             profileMemoryDistillationUseCase = profileMemoryDistillationUseCase,
             profileEnvironmentFactsProvider = profileEnvironmentFactsProvider,
             compactionCoordinators = compactionCoordinators,
@@ -577,7 +579,12 @@ private class ProfileMemoryControllerTestCliIO(
 
     override fun readLine(prompt: String): String? = queuedInputs.removeFirstOrNull()
 
-    override fun readLineInFooter(prompt: String, divider: String, footerLabel: String?): String? =
+    override fun readLineInFooter(
+        prompt: String,
+        divider: String,
+        footerLabel: String?,
+        commandDescriptors: List<CliCommandDescriptor>,
+    ): String? =
         queuedInputs.removeFirstOrNull()
 
     override fun openCompactionMenu(options: List<String>, currentSelection: Int): Int? {

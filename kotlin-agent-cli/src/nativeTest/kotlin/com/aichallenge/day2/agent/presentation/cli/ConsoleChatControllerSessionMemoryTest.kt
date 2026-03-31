@@ -28,6 +28,7 @@ import com.aichallenge.day2.agent.domain.model.McpTransportConfig
 import com.aichallenge.day2.agent.domain.model.PrivateToolResult
 import com.aichallenge.day2.agent.domain.model.PrivateToolTarget
 import com.aichallenge.day2.agent.domain.model.PromptRequestData
+import com.aichallenge.day2.agent.domain.model.RagRetrievedChunk
 import com.aichallenge.day2.agent.domain.model.ProfilePreferenceState
 import com.aichallenge.day2.agent.domain.model.RollingWindowCompactionStartPolicy
 import com.aichallenge.day2.agent.domain.model.SessionCompactionMode
@@ -54,6 +55,7 @@ import com.aichallenge.day2.agent.domain.repository.UserDefinedProfileStore
 import com.aichallenge.day2.agent.domain.repository.UserDefinedWorkflowStore
 import com.aichallenge.day2.agent.domain.service.McpConnectedSession
 import com.aichallenge.day2.agent.domain.service.McpRuntimeService
+import com.aichallenge.day2.agent.domain.service.WireAppRagRetriever
 import com.aichallenge.day2.agent.domain.usecase.SessionMemoryCompactionCoordinator
 import com.aichallenge.day2.agent.domain.usecase.SendPromptUseCase
 import com.aichallenge.day2.agent.domain.usecase.SlidingWindowCompactionStrategy
@@ -2245,8 +2247,9 @@ class ConsoleChatControllerSessionMemoryTest {
         val output = io.outputText()
         assertContains(
             output,
-            "commands: /help, /api, /models, /model <id|number>, /temperature [0..2|default], /memory, /compact, /profile, /workflow, /mcp, /invariant, /reset, /exit, @<path>",
+            "commands: /help, /project_help, /api, /models, /model <id|number>, /temperature [0..2|default], /memory, /compact, /profile, /workflow, /mcp, /invariant, /reset, /exit, @<path>",
         )
+        assertContains(output, "/project_help        toggle Wire project-information mode")
         assertContains(output, "/api                 select the active API from api-settings.json")
         assertContains(output, "/temperature [arg]   show or set global temperature override (arg: 0..2 or default)")
         assertContains(output, "/memory              show session-memory context usage")
@@ -2256,6 +2259,274 @@ class ConsoleChatControllerSessionMemoryTest {
         assertContains(output, "/mcp                 configure MCP servers")
         assertContains(output, "/invariant           configure invariant constraints")
         assertContains(output, "@<path>              attach file for the next prompt")
+    }
+
+    @Test
+    fun interactiveFooterReceivesSharedCommandDescriptors() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val io = FakeCliIO(inputs = listOf("/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(1, io.footerCommandDescriptors.size)
+        assertEquals(
+            CLI_COMMAND_DESCRIPTORS.map(CliCommandDescriptor::name),
+            io.footerCommandDescriptors.single().map(CliCommandDescriptor::name),
+        )
+    }
+
+    @Test
+    fun projectHelpTogglesProjectInformationModeAndShowsFooterLabel() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(Result.success(AgentResponse(content = "Grounded answer"))),
+        )
+        val io = FakeCliIO(inputs = listOf("/project_help", "How does navigation work?", "/project_help", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            wireAppRagRetriever = RecordingWireAppRagRetriever(
+                results = listOf(
+                    Result.success(
+                        listOf(
+                            RagRetrievedChunk(
+                                chunkId = "architecture-1",
+                                sectionName = "Navigation Architecture",
+                                headingPath = "Architecture > Navigation Architecture",
+                                sourcePath = "architecture.md",
+                                score = 0.91,
+                                content = "Navigation is coordinated by the app module.",
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        controller.runInteractive()
+
+        val output = io.outputText()
+        assertContains(output, "system> project information mode enabled")
+        assertContains(output, "system> project information mode disabled")
+        assertEquals("Mode: project info", io.footerLabels.firstOrNull { it != null })
+    }
+
+    @Test
+    fun projectInformationModeReturnsNoDataAvailableWithoutCallingLlm() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val io = FakeCliIO(inputs = listOf("/project_help", "Unknown topic", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            wireAppRagRetriever = RecordingWireAppRagRetriever(
+                results = listOf(Result.success(emptyList())),
+            ),
+        )
+
+        controller.runInteractive()
+
+        assertEquals(0, repository.conversations.size)
+        assertContains(io.outputText(), "No data available")
+    }
+
+    @Test
+    fun projectInformationModeUsesFreshRagGroundedPromptWithoutSessionHistory() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(AgentResponse(content = "Regular answer")),
+                Result.success(AgentResponse(content = "Grounded answer")),
+            ),
+        )
+        val io = FakeCliIO(inputs = listOf("normal prompt", "/project_help", "How does navigation work?", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            wireAppRagRetriever = RecordingWireAppRagRetriever(
+                results = listOf(
+                    Result.success(
+                        listOf(
+                            RagRetrievedChunk(
+                                chunkId = "architecture-1",
+                                sectionName = "Navigation Architecture",
+                                headingPath = "Architecture > Navigation Architecture",
+                                sourcePath = "architecture.md",
+                                score = 0.91,
+                                content = "Navigation is coordinated by the app module.",
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        controller.runInteractive()
+
+        assertEquals(2, repository.conversations.size)
+        val projectConversation = repository.conversations[1]
+        assertEquals(
+            listOf(MessageRole.SYSTEM, MessageRole.SYSTEM, MessageRole.USER),
+            projectConversation.map { it.role },
+        )
+        assertContains(projectConversation[0].content, "Wire App project")
+        assertContains(projectConversation[1].content, "architecture.md")
+        assertContains(projectConversation[1].content, "Navigation is coordinated by the app module.")
+        assertEquals("How does navigation work?", projectConversation[2].content)
+        assertEquals(4, repository.prompts[1].toolCapabilities.privateTools.size)
+        assertTrue(repository.prompts[1].toolCapabilities.publicMcpServers.isEmpty())
+        assertTrue(repository.prompts[1].toolCapabilities.privateTools.any { tool -> tool.modelToolName == "notify_user" })
+        assertTrue(repository.prompts[1].toolCapabilities.privateTools.any { tool -> tool.modelToolName == "scheduler" })
+        assertFalse(projectConversation.any { message -> message.content.contains("normal prompt") })
+        assertFalse(projectConversation.any { message -> message.content.contains("Regular answer") })
+    }
+
+    @Test
+    fun projectInformationModeDoesNotInjectPendingFileReferences() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(Result.success(AgentResponse(content = "Grounded answer"))),
+        )
+        val io = FakeCliIO(inputs = listOf("@notes.txt", "/project_help", "How does navigation work?", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            fileReferenceReader = RecordingFileReferenceReader(
+                contentsByPath = mapOf("notes.txt" to "this should not be injected"),
+            ),
+            wireAppRagRetriever = RecordingWireAppRagRetriever(
+                results = listOf(
+                    Result.success(
+                        listOf(
+                            RagRetrievedChunk(
+                                chunkId = "architecture-1",
+                                sectionName = "Navigation Architecture",
+                                headingPath = "Architecture > Navigation Architecture",
+                                sourcePath = "architecture.md",
+                                score = 0.91,
+                                content = "Navigation is coordinated by the app module.",
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        controller.runInteractive()
+
+        assertEquals(1, repository.conversations.size)
+        val projectConversation = repository.conversations.single()
+        assertEquals(4, repository.prompts.single().toolCapabilities.privateTools.size)
+        assertFalse(projectConversation.any { message -> message.content.contains("[FILE]") })
+        assertFalse(projectConversation.any { message -> message.content.contains("this should not be injected") })
+    }
+
+    @Test
+    fun projectInformationModeAttachesPublicAndPrivateMcpCapabilitiesAlongsideBuiltIns() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(Result.success(AgentResponse(content = "Grounded answer"))),
+        )
+        val publicServer = httpMcpServer(
+            name = "Weather",
+            url = "https://weather.chukai.io/mcp",
+            enabled = true,
+            isPublic = true,
+        )
+        val privateServer = httpMcpServer(name = "Linear", url = "http://localhost:3000", enabled = true)
+        val runtimeService = RecordingMcpRuntimeService(
+            runtimeStates = mapOf(
+                "Linear" to McpServerRuntimeState(
+                    server = privateServer,
+                    status = McpRuntimeStatus.READY,
+                    toolCatalogStatus = McpToolCatalogStatus.LOADED,
+                    tools = listOf(
+                        McpToolDefinition(
+                            name = "search_issues",
+                            description = "Search Linear issues",
+                            inputSchemaJson = """{"type":"object"}""",
+                        ),
+                    ),
+                ),
+            ),
+        )
+        val controller = createController(
+            repository = repository,
+            io = FakeCliIO(inputs = listOf("/project_help", "How does navigation work?", "/exit")),
+            mcpServerStore = RecordingMcpServerStore(
+                loadedServers = listOf(publicServer, privateServer),
+            ),
+            mcpRuntimeService = runtimeService,
+            wireAppRagRetriever = RecordingWireAppRagRetriever(
+                results = listOf(
+                    Result.success(
+                        listOf(
+                            RagRetrievedChunk(
+                                chunkId = "architecture-1",
+                                sectionName = "Navigation Architecture",
+                                headingPath = "Architecture > Navigation Architecture",
+                                sourcePath = "architecture.md",
+                                score = 0.91,
+                                content = "Navigation is coordinated by the app module.",
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        controller.runInteractive()
+
+        assertEquals(1, repository.prompts.size)
+        assertEquals(1, repository.prompts.single().toolCapabilities.publicMcpServers.size)
+        assertEquals(5, repository.prompts.single().toolCapabilities.privateTools.size)
+        assertTrue(repository.prompts.single().toolCapabilities.privateTools.any { tool -> tool.modelToolName == "notify_user" })
+        assertTrue(repository.prompts.single().toolCapabilities.privateTools.any { tool -> tool.modelToolName == "scheduler" })
+        assertTrue(repository.prompts.single().toolCapabilities.privateTools.any { tool ->
+            tool.target == PrivateToolTarget.Mcp(server = privateServer, sourceToolName = "search_issues")
+        })
+    }
+
+    @Test
+    fun projectInformationModeShowsToolCallsLive() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(Result.success(AgentResponse(content = "Grounded answer"))),
+            toolTraceEvents = listOf(
+                listOf(
+                    ToolCallTraceEvent.Started(toolLabel = "built-in 'scheduler'"),
+                ),
+            ),
+        )
+        val io = FakeCliIO(inputs = listOf("/project_help", "How does navigation work?", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            wireAppRagRetriever = RecordingWireAppRagRetriever(
+                results = listOf(
+                    Result.success(
+                        listOf(
+                            RagRetrievedChunk(
+                                chunkId = "architecture-1",
+                                sectionName = "Navigation Architecture",
+                                headingPath = "Architecture > Navigation Architecture",
+                                sourcePath = "architecture.md",
+                                score = 0.91,
+                                content = "Navigation is coordinated by the app module.",
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        controller.runInteractive()
+
+        assertEquals(
+            listOf("system> tool call: built-in 'scheduler'"),
+            io.liveDialogLines,
+        )
+        val output = io.outputText()
+        assertContains(output, "system> tool call: built-in 'scheduler'")
+        assertTrue(output.indexOf("system> tool call: built-in 'scheduler'") < output.indexOf("⏺ Grounded answer"))
     }
 
     @Test
@@ -4761,6 +5032,7 @@ class ConsoleChatControllerSessionMemoryTest {
         mcpServerStore: McpServerStore? = null,
         mcpRuntimeService: McpRuntimeService = RecordingMcpRuntimeService(),
         builtInPrivateToolProvider: BuiltInPrivateToolProvider = BuiltInPrivateToolProvider(BuiltInToolRegistry.createDefault()),
+        wireAppRagRetriever: WireAppRagRetriever = RecordingWireAppRagRetriever(),
         persistentMemoryEnabled: Boolean = true,
         fileReferenceReader: FileReferenceReader = RecordingFileReferenceReader(emptyMap()),
         compactionCoordinators: Map<SessionCompactionMode, SessionMemoryCompactionCoordinator> = mapOf(
@@ -4782,6 +5054,7 @@ class ConsoleChatControllerSessionMemoryTest {
             mcpServerStore = mcpServerStore,
             mcpRuntimeService = mcpRuntimeService,
             builtInPrivateToolProvider = builtInPrivateToolProvider,
+            wireAppRagRetriever = wireAppRagRetriever,
             persistentMemoryEnabled = persistentMemoryEnabled,
             fileReferenceReader = fileReferenceReader,
             compactionCoordinators = compactionCoordinators,
@@ -4916,6 +5189,20 @@ private class RecordingCurrentTimeBuiltInTool {
     }
 }
 
+private class RecordingWireAppRagRetriever(
+    results: List<Result<List<RagRetrievedChunk>>> = emptyList(),
+) : WireAppRagRetriever {
+    private val queuedResults = ArrayDeque(results)
+    val questions = mutableListOf<String>()
+
+    override suspend fun retrieve(question: String): List<RagRetrievedChunk> {
+        questions += question
+        return queuedResults.removeFirstOrNull()
+            ?.getOrThrow()
+            ?: emptyList()
+    }
+}
+
 private fun httpMcpServer(name: String, url: String, enabled: Boolean, isPublic: Boolean = false): McpServerConfig {
     return McpServerConfig(
         name = name,
@@ -4953,6 +5240,7 @@ private class FakeCliIO(
     val liveDialogLines = mutableListOf<String>()
     val footerLabels = mutableListOf<String?>()
     val footerPrompts = mutableListOf<String>()
+    val footerCommandDescriptors = mutableListOf<List<CliCommandDescriptor>>()
     val apiMenuOptions = mutableListOf<String>()
     val mcpMenuOptions = mutableListOf<McpMenuOption>()
 
@@ -4968,9 +5256,15 @@ private class FakeCliIO(
 
     override fun readLine(prompt: String): String? = nextInput()
 
-    override fun readLineInFooter(prompt: String, divider: String, footerLabel: String?): String? {
+    override fun readLineInFooter(
+        prompt: String,
+        divider: String,
+        footerLabel: String?,
+        commandDescriptors: List<CliCommandDescriptor>,
+    ): String? {
         footerPrompts += prompt
         footerLabels += footerLabel
+        footerCommandDescriptors += listOf(commandDescriptors)
         return nextInput()
     }
 

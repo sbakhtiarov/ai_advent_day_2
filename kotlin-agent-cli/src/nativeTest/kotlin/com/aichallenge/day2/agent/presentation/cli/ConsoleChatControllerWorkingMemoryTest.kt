@@ -12,6 +12,7 @@ import com.aichallenge.day2.agent.domain.model.WorkingMemoryState
 import com.aichallenge.day2.agent.domain.model.WorkingTaskState
 import com.aichallenge.day2.agent.domain.repository.AgentRepository
 import com.aichallenge.day2.agent.domain.repository.WorkingMemoryStore
+import com.aichallenge.day2.agent.domain.service.WireAppRagRetriever
 import com.aichallenge.day2.agent.domain.usecase.SendPromptUseCase
 import com.aichallenge.day2.agent.domain.usecase.SessionMemoryCompactionCoordinator
 import com.aichallenge.day2.agent.domain.usecase.WorkingMemoryDistillationUseCase
@@ -262,6 +263,7 @@ class ConsoleChatControllerWorkingMemoryTest {
             ),
             io = io,
             workingMemoryStore = workingMemoryStore,
+            wireAppRagRetriever = WireAppRagRetriever { emptyList() },
             workingMemoryDistillationUseCase = workingMemoryDistillationUseCase,
             compactionCoordinators = compactionCoordinators,
             defaultCompactionMode = SessionCompactionMode.ROLLING_SUMMARY,
@@ -348,7 +350,12 @@ private class WorkingMemoryControllerTestCliIO(
 
     override fun readLine(prompt: String): String? = queuedInputs.removeFirstOrNull()
 
-    override fun readLineInFooter(prompt: String, divider: String, footerLabel: String?): String? =
+    override fun readLineInFooter(
+        prompt: String,
+        divider: String,
+        footerLabel: String?,
+        commandDescriptors: List<CliCommandDescriptor>,
+    ): String? =
         queuedInputs.removeFirstOrNull()
 
     override fun openCompactionMenu(options: List<String>, currentSelection: Int): Int? {

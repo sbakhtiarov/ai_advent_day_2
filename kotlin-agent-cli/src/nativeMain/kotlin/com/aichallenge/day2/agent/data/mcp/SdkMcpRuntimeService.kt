@@ -146,14 +146,17 @@ class SdkMcpRuntimeService internal constructor(
     companion object {
         internal fun create(
             httpClient: HttpClient,
-            processLauncher: McpProcessLauncher = PosixMcpProcessLauncher(),
+            processLauncher: McpProcessLauncher? = null,
+            startupWorkingDirectory: String? = null,
         ): SdkMcpRuntimeService {
             return SdkMcpRuntimeService(
                 sessionManager = McpSessionManager(
                     connector = SdkMcpClientConnector(
                         transportFactory = SdkMcpTransportFactory(
                             httpClient = httpClient,
-                            processLauncher = processLauncher,
+                            processLauncher = processLauncher ?: PosixMcpProcessLauncher(
+                                workingDirectory = startupWorkingDirectory,
+                            ),
                         ),
                     ),
                 ),

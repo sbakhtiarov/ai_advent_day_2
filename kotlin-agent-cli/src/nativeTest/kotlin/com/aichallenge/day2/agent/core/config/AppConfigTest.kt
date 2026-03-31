@@ -1,15 +1,29 @@
 package com.aichallenge.day2.agent.core.config
 
+import kotlinx.cinterop.ByteVar
 import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.cinterop.allocArray
+import kotlinx.cinterop.memScoped
 import kotlinx.cinterop.toKString
+import platform.posix.chdir
+import platform.posix.fclose
+import platform.posix.fopen
+import platform.posix.fputs
 import platform.posix.getenv
+import platform.posix.getcwd
+import platform.posix.mkdir
+import platform.posix.remove
+import platform.posix.rmdir
 import platform.posix.setenv
 import platform.posix.unsetenv
+import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 class AppConfigTest {
+    private val tempPathSuffix = Random.nextInt(1_000_000)
+
     @Test
     fun internalModelCatalogMatchesExpectedModelsInOrder() {
         val expectedCatalog = listOf(
@@ -185,6 +199,47 @@ class AppConfigTest {
         }
     }
 
+    @Test
+    fun wireAppRagBaseUrlDefaultsToLocalhost() {
+        withEnvironment(
+            mapOf(
+                "WIRE_APP_RAG_BASE_URL" to "",
+            ),
+        ) {
+            unsetEnvironment("WIRE_APP_RAG_BASE_URL")
+
+            val config = AppConfig.fromEnvironment()
+
+            assertEquals("http://localhost:8000", config.wireAppRagBaseUrl)
+        }
+    }
+
+    @Test
+    fun explicitWireAppRagBaseUrlOverridesDefaultLocation() {
+        withEnvironment(
+            mapOf(
+                "WIRE_APP_RAG_BASE_URL" to "http://wire-rag.internal:8123",
+            ),
+        ) {
+            val config = AppConfig.fromEnvironment()
+
+            assertEquals("http://wire-rag.internal:8123", config.wireAppRagBaseUrl)
+        }
+    }
+
+    @Test
+    fun localPropertiesWireAppRagBaseUrlIsUsedWhenEnvironmentIsUnset() {
+        withTemporaryWorkingDirectory(
+            localPropertiesContent = "WIRE_APP_RAG_BASE_URL=http://localhost:9001\n",
+        ) {
+            unsetEnvironment("WIRE_APP_RAG_BASE_URL")
+
+            val config = AppConfig.fromEnvironment()
+
+            assertEquals("http://localhost:9001", config.wireAppRagBaseUrl)
+        }
+    }
+
     @OptIn(ExperimentalForeignApi::class)
     private fun withEnvironment(
         overrides: Map<String, String>,
@@ -213,5 +268,47 @@ class AppConfigTest {
     @OptIn(ExperimentalForeignApi::class)
     private fun unsetEnvironment(name: String) {
         unsetenv(name)
+    }
+
+    @OptIn(ExperimentalForeignApi::class)
+    private fun withTemporaryWorkingDirectory(
+        localPropertiesContent: String,
+        block: () -> Unit,
+    ) {
+        val originalDirectory = currentDirectory()
+        val tempDirectory = "/tmp/kotlin-agent-cli-config-$tempPathSuffix-${Random.nextInt(1_000_000)}"
+        check(mkdir(tempDirectory, 511u) == 0) {
+            "Failed to create temporary directory: $tempDirectory"
+        }
+
+        val localPropertiesPath = "$tempDirectory/local.properties"
+        val file = fopen(localPropertiesPath, "w")
+            ?: error("Failed to create $localPropertiesPath")
+        try {
+            fputs(localPropertiesContent, file)
+        } finally {
+            fclose(file)
+        }
+
+        check(chdir(tempDirectory) == 0) {
+            "Failed to change directory to $tempDirectory"
+        }
+
+        try {
+            block()
+        } finally {
+            check(chdir(originalDirectory) == 0) {
+                "Failed to restore working directory to $originalDirectory"
+            }
+            remove(localPropertiesPath)
+            rmdir(tempDirectory)
+        }
+    }
+
+    @OptIn(ExperimentalForeignApi::class)
+    private fun currentDirectory(): String = memScoped {
+        val buffer = allocArray<ByteVar>(4096)
+        getcwd(buffer, 4096u)?.toKString()
+            ?: error("Failed to resolve current working directory")
     }
 }

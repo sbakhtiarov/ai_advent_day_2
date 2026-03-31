@@ -34,7 +34,12 @@ interface CliIO {
         writeLine(text)
     }
     fun readLine(prompt: String): String?
-    fun readLineInFooter(prompt: String, divider: String, footerLabel: String? = null): String?
+    fun readLineInFooter(
+        prompt: String,
+        divider: String,
+        footerLabel: String? = null,
+        commandDescriptors: List<CliCommandDescriptor> = emptyList(),
+    ): String?
     fun showThinkingIndicator() {}
     fun updateThinkingIndicator(progressText: String) {}
     fun hideThinkingIndicator() {}
@@ -75,10 +80,14 @@ data class InvariantMenuResult(
 
 object StdCliIO : CliIO {
     private var thinkingIndicatorVisible = false
+    private var footerRenderLineCount: Int? = null
+    private var committedFooterSnapshot: FooterSnapshot? = null
 
     override fun clearScreen() {
         // ANSI escape sequence: clear screen and move cursor to top-left.
         print("\u001B[2J\u001B[H")
+        footerRenderLineCount = null
+        committedFooterSnapshot = null
     }
 
     override fun hideCursor() {
@@ -95,6 +104,31 @@ object StdCliIO : CliIO {
 
     @OptIn(ExperimentalForeignApi::class)
     override fun writeLiveDialogLine(text: String) {
+        val footerSnapshot = committedFooterSnapshot
+        if (thinkingIndicatorVisible && footerSnapshot != null) {
+            print('\r')
+            print("\u001B[2K")
+            print("\u001B[${footerSnapshot.totalRenderedLines}A")
+            print('\r')
+            print("\u001B[J")
+            print(text)
+            print('\n')
+            print(footerSnapshot.topDivider)
+            print('\n')
+            print(footerSnapshot.prompt)
+            print(footerSnapshot.inputText)
+            print('\n')
+            print(footerSnapshot.bottomDivider)
+            if (footerSnapshot.footerLabel != null) {
+                print('\n')
+                print(footerSnapshot.footerLabel)
+            }
+            print('\n')
+            fflush(stdout)
+            updateThinkingIndicator(progressText = "")
+            return
+        }
+
         if (!thinkingIndicatorVisible) {
             writeLine(text)
             return
@@ -164,15 +198,36 @@ object StdCliIO : CliIO {
         prompt: String,
         divider: String,
         footerLabel: String?,
+        commandDescriptors: List<CliCommandDescriptor>,
     ): String? {
         val input = StringBuilder()
         val pendingKeys = ArrayDeque<Int>()
+        var transientHint: String? = null
+        committedFooterSnapshot = null
         val terminalWidth = detectTerminalWidth().coerceAtLeast(prompt.length + 1)
         val dividerChar = divider.firstOrNull() ?: '─'
         val dividerLine = dividerChar.toString().repeat(terminalWidth)
         val coloredDividerLine = colorizeDivider(dividerLine)
         val normalizedFooterLabel = sanitizeSingleLineInput(footerLabel).takeIf { it.isNotBlank() }
         val coloredFooterLabel = normalizedFooterLabel?.let(::colorizeFooterLabel)
+
+        fun refreshFooter() {
+            redrawFooterFromPromptAnchor(
+                prompt = prompt,
+                input = input,
+                divider = coloredDividerLine,
+                footerLabel = coloredFooterLabel,
+                width = terminalWidth,
+                transientHint = transientHint,
+            )
+            footerRenderLineCount = calculateFooterRenderLineCount(
+                prompt = prompt,
+                inputText = input.toString(),
+                footerLabel = normalizedFooterLabel,
+                width = terminalWidth,
+                hintText = transientHint,
+            )
+        }
 
         // Initial footer render:
         // divider
@@ -184,13 +239,7 @@ object StdCliIO : CliIO {
             if (normalizedFooterLabel == null) 0 else FOOTER_RESERVED_LABEL_LINES
         ensureMenuFits(requiredMenuLines = reservedFooterLines)
         print("\u001B7")
-        redrawFooterFromPromptAnchor(
-            prompt = prompt,
-            input = input,
-            divider = coloredDividerLine,
-            footerLabel = coloredFooterLabel,
-            width = terminalWidth,
-        )
+        refreshFooter()
 
         return withRawInput<String?> {
             var result: String?
@@ -201,6 +250,26 @@ object StdCliIO : CliIO {
                     null -> {
                         result = null
                         break@loop
+                    }
+
+                    TAB -> {
+                        val previousHint = transientHint
+                        val completion = resolveCliCommandCompletion(
+                            inputText = input.toString(),
+                            commands = commandDescriptors,
+                        )
+                        transientHint = if (completion.isAmbiguous) {
+                            buildCliCommandMatchesHint(completion.matches)
+                        } else {
+                            null
+                        }
+                        if (completion.shouldApply) {
+                            input.setLength(0)
+                            input.append(completion.replacementText)
+                        }
+                        if (completion.shouldApply || transientHint != previousHint) {
+                            refreshFooter()
+                        }
                     }
 
                     ENTER_CR, ENTER_LF -> {
@@ -221,6 +290,19 @@ object StdCliIO : CliIO {
                                         print('\n')
                                         print(coloredFooterLabel)
                                     }
+                                    committedFooterSnapshot = FooterSnapshot(
+                                        topDivider = coloredDividerLine,
+                                        prompt = prompt,
+                                        inputText = input.toString(),
+                                        bottomDivider = coloredDividerLine,
+                                        footerLabel = coloredFooterLabel,
+                                        totalRenderedLines = calculateCommittedFooterRenderedLineCount(
+                                            prompt = prompt,
+                                            inputText = input.toString(),
+                                            footerLabel = normalizedFooterLabel,
+                                            width = terminalWidth,
+                                        ),
+                                    )
                                     result = input.toString()
                                     break@loop
                                 }
@@ -230,13 +312,8 @@ object StdCliIO : CliIO {
                                 input.append('\n')
                                 pendingKeys.addLast(nextKey)
                             }
-                            redrawFooterFromPromptAnchor(
-                                prompt = prompt,
-                                input = input,
-                                divider = coloredDividerLine,
-                                footerLabel = coloredFooterLabel,
-                                width = terminalWidth,
-                            )
+                            transientHint = null
+                            refreshFooter()
                             continue@loop
                         }
 
@@ -251,38 +328,55 @@ object StdCliIO : CliIO {
                             print('\n')
                             print(coloredFooterLabel)
                         }
+                        committedFooterSnapshot = FooterSnapshot(
+                            topDivider = coloredDividerLine,
+                            prompt = prompt,
+                            inputText = input.toString(),
+                            bottomDivider = coloredDividerLine,
+                            footerLabel = coloredFooterLabel,
+                            totalRenderedLines = calculateCommittedFooterRenderedLineCount(
+                                prompt = prompt,
+                                inputText = input.toString(),
+                                footerLabel = normalizedFooterLabel,
+                                width = terminalWidth,
+                            ),
+                        )
+                        footerRenderLineCount = calculateFooterRenderLineCount(
+                            prompt = prompt,
+                            inputText = input.toString(),
+                            footerLabel = normalizedFooterLabel,
+                            width = terminalWidth,
+                        )
                         result = input.toString()
                         break@loop
                     }
 
                     BACKSPACE, DELETE -> {
+                        val shouldRefresh = transientHint != null || input.isNotEmpty()
+                        transientHint = null
                         if (input.isNotEmpty()) {
                             input.deleteAt(input.lastIndex)
-                            redrawFooterFromPromptAnchor(
-                                prompt = prompt,
-                                input = input,
-                                divider = coloredDividerLine,
-                                footerLabel = coloredFooterLabel,
-                                width = terminalWidth,
-                            )
+                        }
+                        if (shouldRefresh) {
+                            refreshFooter()
                         }
                     }
 
                     ESCAPE -> {
+                        val hadHint = transientHint != null
+                        transientHint = null
                         val escNext = readOptionalByte(timeoutDeciseconds = 1)
+                        var shouldRefresh = hadHint
                         if (escNext == CSI) {
                             val csiFirst = readOptionalByte(timeoutDeciseconds = 1) ?: continue@loop
                             val pasted = readBracketedPasteIfPresent(csiFirst)
                             if (!pasted.isNullOrEmpty()) {
                                 input.append(sanitizeMultilineInput(pasted))
-                                redrawFooterFromPromptAnchor(
-                                    prompt = prompt,
-                                    input = input,
-                                    divider = coloredDividerLine,
-                                    footerLabel = coloredFooterLabel,
-                                    width = terminalWidth,
-                                )
+                                shouldRefresh = true
                             }
+                        }
+                        if (shouldRefresh) {
+                            refreshFooter()
                         }
                     }
 
@@ -296,29 +390,22 @@ object StdCliIO : CliIO {
                     }
 
                     CTRL_V -> {
+                        transientHint = null
                         val clipboardText = readClipboardText()
                         if (!clipboardText.isNullOrEmpty()) {
                             input.append(sanitizeMultilineInput(clipboardText))
-                            redrawFooterFromPromptAnchor(
-                                prompt = prompt,
-                                input = input,
-                                divider = coloredDividerLine,
-                                footerLabel = coloredFooterLabel,
-                                width = terminalWidth,
-                            )
+                            refreshFooter()
                         }
                     }
 
                     else -> {
+                        val shouldRefresh = transientHint != null || isPrintableAscii(key)
+                        transientHint = null
                         if (isPrintableAscii(key)) {
                             input.append(key.toChar())
-                            redrawFooterFromPromptAnchor(
-                                prompt = prompt,
-                                input = input,
-                                divider = coloredDividerLine,
-                                footerLabel = coloredFooterLabel,
-                                width = terminalWidth,
-                            )
+                        }
+                        if (shouldRefresh) {
+                            refreshFooter()
                         }
                     }
                 }
@@ -945,6 +1032,7 @@ object StdCliIO : CliIO {
         divider: String,
         footerLabel: String?,
         width: Int,
+        transientHint: String?,
     ) {
         val inputPreview = buildInputPreview(input.toString())
         val continuationPrefix = " ".repeat(prompt.length)
@@ -955,6 +1043,10 @@ object StdCliIO : CliIO {
         print('\r')
         print("\u001B7")
         print("\u001B[J")
+        if (transientHint != null) {
+            print(transientHint)
+            print('\n')
+        }
         print(prompt)
         print(inputPreview.visibleLines.firstOrNull().orEmpty())
         inputPreview.visibleLines.drop(1).forEach { line ->
@@ -974,6 +1066,7 @@ object StdCliIO : CliIO {
             preview = inputPreview,
             continuationPrefix = continuationPrefix,
             width = width,
+            transientHint = transientHint,
         )
         print("\u001B[?25h")
     }
@@ -983,8 +1076,13 @@ object StdCliIO : CliIO {
         preview: InputPreview,
         continuationPrefix: String,
         width: Int,
+        transientHint: String?,
     ) {
         val safeWidth = width.coerceAtLeast(1)
+        val hintRows = transientHint
+            ?.takeIf { it.isNotEmpty() }
+            ?.let { hint -> calculateVisualLineCount(hint.length, safeWidth) }
+            ?: 0
         val visibleLines = preview.visibleLines.ifEmpty { listOf("") }
         val rowsBeforeLastLine = visibleLines.dropLast(1).mapIndexed { index, line ->
             val prefixLength = if (index == 0) prompt.length else continuationPrefix.length
@@ -996,8 +1094,9 @@ object StdCliIO : CliIO {
             width = safeWidth,
         ) - 1
         val column = ((lastLinePrefixLength + visibleLines.last().length) % safeWidth) + 1
-        if (rowOffset > 0) {
-            print("\u001B[${rowOffset}B")
+        val totalRowOffset = hintRows + rowOffset
+        if (totalRowOffset > 0) {
+            print("\u001B[${totalRowOffset}B")
         }
         print("\u001B[${column}G")
     }
@@ -1209,19 +1308,20 @@ object StdCliIO : CliIO {
     private fun stripAnsi(text: String): String = ANSI_ESCAPE_REGEX.replace(text, "")
 
     private fun buildInputPreview(text: String): InputPreview {
-        val lines = text.split('\n')
-        if (lines.size <= MAX_VISIBLE_INPUT_LINES) {
-            return InputPreview(visibleLines = lines)
-        }
-
-        val visible = lines.take(MAX_VISIBLE_INPUT_LINES).toMutableList()
-        val hiddenLines = lines.size - MAX_VISIBLE_INPUT_LINES
-        visible += "[+ $hiddenLines more lines]"
-        return InputPreview(visibleLines = visible)
+        return InputPreview(visibleLines = buildCliInputPreviewLines(text))
     }
 
     private data class InputPreview(
         val visibleLines: List<String>,
+    )
+
+    private data class FooterSnapshot(
+        val topDivider: String,
+        val prompt: String,
+        val inputText: String,
+        val bottomDivider: String,
+        val footerLabel: String?,
+        val totalRenderedLines: Int,
     )
 
     private const val ENTER_CR = 13
@@ -1258,3 +1358,68 @@ object StdCliIO : CliIO {
     private const val MAX_VISIBLE_INPUT_LINES = 10
     private val ANSI_ESCAPE_REGEX = Regex("\u001B\\[[0-9;?]*[ -/]*[@-~]")
 }
+
+internal fun calculateFooterRenderLineCount(
+    prompt: String,
+    inputText: String,
+    footerLabel: String?,
+    width: Int,
+    hintText: String? = null,
+): Int {
+    val safeWidth = width.coerceAtLeast(1)
+    val hintRows = hintText
+        ?.takeIf { it.isNotEmpty() }
+        ?.let { hint -> calculateCliVisualLineCount(hint.length, safeWidth) }
+        ?: 0
+    val previewLines = buildCliInputPreviewLines(inputText)
+    val continuationPrefix = " ".repeat(prompt.length)
+    val inputRows = previewLines.mapIndexed { index, line ->
+        val prefixLength = if (index == 0) prompt.length else continuationPrefix.length
+        calculateCliVisualLineCount(prefixLength + line.length, safeWidth)
+    }.sum()
+    val dividerRows = 1
+    val labelRows = footerLabel
+        ?.takeIf { it.isNotEmpty() }
+        ?.let { calculateCliVisualLineCount(it.length, safeWidth) }
+        ?: 0
+    return hintRows + inputRows + dividerRows + labelRows
+}
+
+internal fun buildCliInputPreviewLines(text: String): List<String> {
+    val lines = text.split('\n')
+    if (lines.size <= CLI_MAX_VISIBLE_INPUT_LINES) {
+        return lines
+    }
+
+    val visible = lines.take(CLI_MAX_VISIBLE_INPUT_LINES).toMutableList()
+    val hiddenLines = lines.size - CLI_MAX_VISIBLE_INPUT_LINES
+    visible += "[+ $hiddenLines more lines]"
+    return visible
+}
+
+internal fun calculateCliVisualLineCount(length: Int, width: Int): Int {
+    if (width <= 0) return 1
+    return maxOf(1, (length + width - 1) / width)
+}
+
+internal fun calculateCommittedFooterRenderedLineCount(
+    prompt: String,
+    inputText: String,
+    footerLabel: String?,
+    width: Int,
+): Int {
+    val safeWidth = width.coerceAtLeast(1)
+    val inputLines = inputText.split('\n')
+    val inputRows = inputLines.mapIndexed { index, line ->
+        val prefixLength = if (index == 0) prompt.length else 0
+        calculateCliVisualLineCount(prefixLength + line.length, safeWidth)
+    }.sum()
+    val dividerRows = 2
+    val labelRows = footerLabel
+        ?.takeIf { it.isNotEmpty() }
+        ?.let { calculateCliVisualLineCount(it.length, safeWidth) }
+        ?: 0
+    return dividerRows + inputRows + labelRows
+}
+
+internal const val CLI_MAX_VISIBLE_INPUT_LINES = 10

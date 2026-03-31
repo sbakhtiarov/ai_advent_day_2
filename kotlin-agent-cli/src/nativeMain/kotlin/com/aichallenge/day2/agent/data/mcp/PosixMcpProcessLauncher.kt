@@ -22,7 +22,9 @@ internal interface ManagedMcpProcess {
 }
 
 @OptIn(ExperimentalForeignApi::class)
-internal class PosixMcpProcessLauncher : McpProcessLauncher {
+internal class PosixMcpProcessLauncher(
+    private val workingDirectory: String? = null,
+) : McpProcessLauncher {
     override fun launch(command: String, args: List<String>): ManagedMcpProcess {
         val stdinPipe = createPipe("stdin")
         val stdoutPipe = createPipe("stdout")
@@ -105,6 +107,12 @@ internal class PosixMcpProcessLauncher : McpProcessLauncher {
         closeFdQuietly(stdinPipe.readEnd)
         closeFdQuietly(stdoutPipe.writeEnd)
         closeFdQuietly(stderrPipe.writeEnd)
+
+        workingDirectory?.let { targetDirectory ->
+            if (chdir(targetDirectory) != 0) {
+                writeChildErrorAndExit(errorPipe.writeEnd, errno)
+            }
+        }
 
         memScoped {
             val allArgs = listOf(command) + args

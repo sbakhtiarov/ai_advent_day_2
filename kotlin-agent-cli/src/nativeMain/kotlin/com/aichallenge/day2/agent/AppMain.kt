@@ -4,6 +4,7 @@ package com.aichallenge.day2.agent
 
 import com.aichallenge.day2.agent.core.config.AppConfig
 import com.aichallenge.day2.agent.core.config.ApiSettings
+import com.aichallenge.day2.agent.core.config.DefaultAppRuntimeEnvironment
 import com.aichallenge.day2.agent.core.config.MutableApiSettingsService
 import com.aichallenge.day2.agent.core.config.ProfileEnvironmentFactsProvider
 import com.aichallenge.day2.agent.core.di.AppContainer
@@ -30,7 +31,10 @@ import com.aichallenge.day2.agent.domain.usecase.SlidingWindowCompactionStrategy
 import com.aichallenge.day2.agent.domain.usecase.WorkingMemoryDistillationUseCase
 import com.aichallenge.day2.agent.presentation.cli.ConsoleChatController
 import com.aichallenge.day2.agent.presentation.cli.SystemPromptBuilder
+import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.cinterop.toKString
 import kotlinx.coroutines.runBlocking
+import platform.posix.getenv
 import kotlin.system.exitProcess
 
 fun main(args: Array<String>) {
@@ -114,9 +118,11 @@ private suspend fun runConfiguredApp(
         return 1
     }
     val apiSettingsService = MutableApiSettingsService(initialApiSettings)
+    val startupWorkingDirectory = resolveStartupWorkingDirectory()
     val container = AppContainer(
         config = config,
         apiSettingsService = apiSettingsService,
+        startupWorkingDirectory = startupWorkingDirectory,
     )
     val sessionMemoryCompactionCoordinators = mapOf(
         SessionCompactionMode.ROLLING_SUMMARY to SessionMemoryCompactionCoordinator(
@@ -191,6 +197,7 @@ private suspend fun runConfiguredApp(
         mcpServerStore = mcpServerStore,
         mcpRuntimeService = container.mcpRuntimeService,
         builtInPrivateToolProvider = BuiltInPrivateToolProvider(container.builtInToolRegistry),
+        wireAppRagRetriever = container.wireAppRagRetriever,
         workingMemoryDistillationUseCase = workingMemoryDistillationUseCase,
         profileMemoryDistillationUseCase = profileMemoryDistillationUseCase,
         profileEnvironmentFactsProvider = ProfileEnvironmentFactsProvider(),
@@ -253,8 +260,25 @@ private fun printEnvironmentHelp() {
 
         Optional logging configuration (environment variable or local.properties):
           OPENAI_API_LOG_FILE  default: ~/.kotlin-agent-cli/openai-api-traffic.log (blank disables)
+          WIRE_APP_RAG_BASE_URL default: http://localhost:8000
         """.trimIndent(),
     )
+}
+
+@OptIn(ExperimentalForeignApi::class)
+private fun resolveStartupWorkingDirectory(): String? {
+    val shellPwd = getenv("PWD")
+        ?.toKString()
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() }
+    if (shellPwd != null) {
+        return shellPwd
+    }
+
+    return DefaultAppRuntimeEnvironment()
+        .currentWorkingDirectory()
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() }
 }
 
 private fun resolveInitialApiSettings(

@@ -26,12 +26,14 @@ data class AppConfig(
     val models: List<ModelProperties>,
     val systemPrompt: String,
     val apiTrafficLogFilePath: String?,
+    val wireAppRagBaseUrl: String,
 ) {
     companion object {
         private const val DEFAULT_OPENAI_MODEL = "gpt-4.1-mini"
         private const val DEFAULT_SYSTEM_PROMPT =
             "You are a concise and pragmatic assistant. Ask for clarification only when needed."
         private const val DEFAULT_API_TRAFFIC_LOG_FILE = ".kotlin-agent-cli/openai-api-traffic.log"
+        private const val DEFAULT_WIRE_APP_RAG_BASE_URL = "http://localhost:8000"
         private const val LOCAL_PROPERTIES_FILE = "local.properties"
         private const val READ_BUFFER_SIZE = 4096
 
@@ -129,11 +131,16 @@ data class AppConfig(
                 configuredApiTrafficLogPath.isBlank() -> null
                 else -> configuredApiTrafficLogPath.trim()
             }
+            val wireAppRagBaseUrl = readConfigAllowingBlank("WIRE_APP_RAG_BASE_URL", localProperties)
+                ?.trim()
+                ?.takeIf { value -> value.isNotEmpty() }
+                ?: DEFAULT_WIRE_APP_RAG_BASE_URL
 
             return AppConfig(
                 models = models,
                 systemPrompt = DEFAULT_SYSTEM_PROMPT,
                 apiTrafficLogFilePath = apiTrafficLogFilePath,
+                wireAppRagBaseUrl = wireAppRagBaseUrl,
             )
         }
 

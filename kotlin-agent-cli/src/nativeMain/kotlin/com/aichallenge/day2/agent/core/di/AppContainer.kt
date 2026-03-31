@@ -3,12 +3,14 @@ package com.aichallenge.day2.agent.core.di
 import com.aichallenge.day2.agent.core.config.AppConfig
 import com.aichallenge.day2.agent.core.config.ApiSettingsService
 import com.aichallenge.day2.agent.core.logging.ApiTrafficFileLogger
+import com.aichallenge.day2.agent.data.remote.HttpWireAppRagRetriever
 import com.aichallenge.day2.agent.data.mcp.SdkMcpRuntimeService
 import com.aichallenge.day2.agent.data.tools.BuiltInToolRegistry
 import com.aichallenge.day2.agent.data.tools.DefaultPrivateToolExecutionService
 import com.aichallenge.day2.agent.data.remote.OpenAiRemoteDataSource
 import com.aichallenge.day2.agent.data.repository.OpenAiAgentRepository
 import com.aichallenge.day2.agent.domain.service.McpRuntimeService
+import com.aichallenge.day2.agent.domain.service.WireAppRagRetriever
 import com.aichallenge.day2.agent.domain.usecase.BuildPromptUseCase
 import com.aichallenge.day2.agent.domain.usecase.SendPromptUseCase
 import io.ktor.client.HttpClient
@@ -23,6 +25,7 @@ import kotlinx.serialization.json.Json
 class AppContainer(
     config: AppConfig,
     apiSettingsService: ApiSettingsService,
+    startupWorkingDirectory: String?,
 ) {
     private val json = Json {
         ignoreUnknownKeys = true
@@ -46,7 +49,10 @@ class AppContainer(
             socketTimeoutMillis = HttpTimeoutConfig.INFINITE_TIMEOUT_MS
         }
     }
-    val mcpRuntimeService: McpRuntimeService = SdkMcpRuntimeService.create(mcpHttpClient)
+    val mcpRuntimeService: McpRuntimeService = SdkMcpRuntimeService.create(
+        httpClient = mcpHttpClient,
+        startupWorkingDirectory = startupWorkingDirectory,
+    )
     val builtInToolRegistry = BuiltInToolRegistry.createDefault()
     private val privateToolExecutionService = DefaultPrivateToolExecutionService(
         mcpRuntimeService = mcpRuntimeService,
@@ -65,6 +71,11 @@ class AppContainer(
 
     val buildPromptUseCase = BuildPromptUseCase()
     val sendPromptUseCase = SendPromptUseCase(repository)
+    val wireAppRagRetriever: WireAppRagRetriever = HttpWireAppRagRetriever(
+        httpClient = openAiHttpClient,
+        baseUrl = config.wireAppRagBaseUrl,
+        json = json,
+    )
 
     suspend fun close() {
         mcpRuntimeService.close()

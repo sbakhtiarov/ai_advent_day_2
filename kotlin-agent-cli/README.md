@@ -105,6 +105,21 @@ Example:
 
 `public` is loaded and persisted as part of MCP server configuration. It is currently schema-only and does not change runtime behavior yet.
 
+Bundled Git MCP example:
+
+```json
+{
+  "name": "Local Git",
+  "type": "stdio",
+  "command": "node",
+  "args": ["/absolute/path/to/tools/git-mcp/server.mjs"],
+  "enabled": true,
+  "public": false
+}
+```
+
+When started without `--repo`, the bundled Git MCP server uses the CLI startup directory as its repository root, preferring the inherited `PWD` environment hint and otherwise falling back to the process `cwd`. It fails fast if that directory is not a Git work tree. `--repo <absolute-path>` is still supported as an explicit override when you want the server pinned to one repository.
+
 In interactive mode, `/mcp` still opens the MCP server menu. You can also invoke a tool directly for connectivity checks:
 
 ```text

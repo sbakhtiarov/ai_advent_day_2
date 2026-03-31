@@ -24,6 +24,8 @@ import com.aichallenge.day2.agent.domain.model.McpToolDefinition
 import com.aichallenge.day2.agent.domain.model.McpTransportConfig
 import com.aichallenge.day2.agent.domain.model.PrivateToolBinding
 import com.aichallenge.day2.agent.domain.model.PublicMcpServerCapability
+import com.aichallenge.day2.agent.domain.model.PromptRequestData
+import com.aichallenge.day2.agent.domain.model.RagRetrievedChunk
 import com.aichallenge.day2.agent.domain.model.ProfileMemoryState
 import com.aichallenge.day2.agent.domain.model.ProfilePreferenceState
 import com.aichallenge.day2.agent.domain.model.SessionCompactionMode
@@ -48,6 +50,7 @@ import com.aichallenge.day2.agent.domain.repository.UserDefinedWorkflowStore
 import com.aichallenge.day2.agent.domain.repository.WorkingMemoryStore
 import com.aichallenge.day2.agent.domain.service.McpRuntimeService
 import com.aichallenge.day2.agent.domain.service.NoOpMcpRuntimeService
+import com.aichallenge.day2.agent.domain.service.WireAppRagRetriever
 import com.aichallenge.day2.agent.domain.usecase.BranchClassificationUseCase
 import com.aichallenge.day2.agent.domain.usecase.BuildPromptRequest
 import com.aichallenge.day2.agent.domain.usecase.BuildPromptUseCase
@@ -99,6 +102,7 @@ class ConsoleChatController(
     private val mcpRuntimeService: McpRuntimeService = NoOpMcpRuntimeService,
     private val mcpPrivateToolProvider: McpPrivateToolProvider = McpPrivateToolProvider(),
     private val builtInPrivateToolProvider: BuiltInPrivateToolProvider = BuiltInPrivateToolProvider(BuiltInToolRegistry.createDefault()),
+    private val wireAppRagRetriever: WireAppRagRetriever,
     private val persistentMemoryEnabled: Boolean = true,
     private val workingMemoryDistillationUseCase: WorkingMemoryDistillationUseCase? = null,
     private val workingMemoryEnabled: Boolean = true,
@@ -151,6 +155,7 @@ class ConsoleChatController(
     private val pendingMcpStartupMessages = mutableListOf<String>()
     private var mcpMenuSelection = 0
     private var workflowModeEnabled = false
+    private var projectInformationModeEnabled = false
     private var activeWorkflow: UserWorkflowDefinition? = null
     private var workflowRuntimeState: WorkflowRuntimeState? = null
     private var workflowUiStep: WorkflowUiStep? = null
@@ -256,7 +261,8 @@ class ConsoleChatController(
                 val input = io.readLineInFooter(
                     prompt = "> ",
                     divider = inputDivider,
-                    footerLabel = workflowFooterLabel(),
+                    footerLabel = activeFooterLabel(),
+                    commandDescriptors = CLI_COMMAND_DESCRIPTORS,
                 ) ?: break
                 if (input.isBlank()) {
                     continue
@@ -320,6 +326,11 @@ class ConsoleChatController(
     }
 
     private suspend fun sendAndStore(prompt: String) {
+        if (projectInformationModeEnabled) {
+            handleProjectInformationPrompt(prompt)
+            return
+        }
+
         val preparedPrompt = buildPromptForRequest(prompt) ?: return
         preparedPrompt.inlineReferences.forEach { path ->
             dialogBlocks += "ref> $path"
@@ -356,6 +367,80 @@ class ConsoleChatController(
         )
     }
 
+    private suspend fun handleProjectInformationPrompt(prompt: String) {
+        val normalizedPrompt = prompt.trim()
+        dialogBlocks += formatUserPrompt(normalizedPrompt)
+        io.updateFooterStatusLabel(activeFooterLabel())
+        io.showThinkingIndicator()
+        val startedAt = TimeSource.Monotonic.markNow()
+        io.updateThinkingIndicator(
+            progressText = formatThinkingProgress(
+                spinnerFrame = THINKING_SPINNER_FRAMES.first(),
+                elapsedMillis = 0L,
+            ),
+        )
+
+        try {
+            val toolContext = prepareMainTurnToolContext()
+            toolContext.systemMessages.forEach { systemMessage ->
+                dialogBlocks += systemMessage
+            }
+            val toolCallTraceObserver = createToolCallTraceObserver()
+            coroutineScope {
+                val progressJob = launch {
+                    var frameIndex = 1
+                    while (isActive) {
+                        delay(THINKING_INDICATOR_UPDATE_INTERVAL_MS)
+                        val spinnerFrame = THINKING_SPINNER_FRAMES[frameIndex % THINKING_SPINNER_FRAMES.size]
+                        frameIndex += 1
+                        val elapsedMillis = startedAt.elapsedNow().inWholeMilliseconds
+                        io.updateThinkingIndicator(
+                            progressText = formatThinkingProgress(
+                                spinnerFrame = spinnerFrame,
+                                elapsedMillis = elapsedMillis,
+                            ),
+                        )
+                    }
+                }
+
+                try {
+                    runCatching {
+                        val retrievedChunks = wireAppRagRetriever.retrieve(normalizedPrompt)
+                        if (retrievedChunks.isEmpty()) {
+                            dialogBlocks += PROJECT_INFORMATION_NO_DATA_MESSAGE
+                            return@runCatching
+                        }
+
+                        val activeModel = requireActiveModel()
+                        val response = sendPromptUseCase.execute(
+                            prompt = PromptRequestData(
+                                systemPrompt = PROJECT_INFORMATION_SYSTEM_PROMPT,
+                                contextSystemMessages = listOf(
+                                    buildProjectInformationContextSystemMessage(retrievedChunks),
+                                ),
+                                messages = listOf(
+                                    ConversationMessage.user(normalizedPrompt),
+                                ),
+                                toolCapabilities = toolContext.capabilities,
+                            ),
+                            temperature = currentTemperatureOverride(),
+                            model = activeModel,
+                            toolCallTraceObserver = toolCallTraceObserver,
+                        )
+                        val elapsedSeconds = startedAt.elapsedNow().inWholeMilliseconds / 1000.0
+                        dialogBlocks += formatAssistantResponse(response.content, response.usage, elapsedSeconds)
+                    }.onFailure { throwable ->
+                        dialogBlocks += "error> ${throwable.message ?: "Unexpected error"}"
+                    }
+                } finally {
+                    progressJob.cancelAndJoin()
+                }
+            }
+        } finally {
+            io.hideThinkingIndicator()
+        }
+    }
+
     private suspend fun executeModelTurn(
         requestPrompt: String,
         userPromptForWorkingMemory: String,
@@ -364,7 +449,7 @@ class ConsoleChatController(
         renderAssistantResponse: Boolean = true,
         validateInvariantConstraints: Boolean = true,
     ): TurnExecutionResult? {
-        io.updateFooterStatusLabel(workflowFooterLabel())
+        io.updateFooterStatusLabel(activeFooterLabel())
         io.showThinkingIndicator()
         val startedAt = TimeSource.Monotonic.markNow()
         io.updateThinkingIndicator(
@@ -380,15 +465,7 @@ class ConsoleChatController(
             toolContext.systemMessages.forEach { systemMessage ->
                 dialogBlocks += systemMessage
             }
-            val toolCallTraceObserver = object : ToolCallTraceObserver {
-                override suspend fun onToolCallTrace(event: ToolCallTraceEvent) {
-                    val dialogLine = when (event) {
-                        is ToolCallTraceEvent.Started -> "system> tool call: ${event.toolLabel}"
-                    }
-                    io.writeLiveDialogLine(dialogLine)
-                    dialogBlocks += dialogLine
-                }
-            }
+            val toolCallTraceObserver = createToolCallTraceObserver()
             coroutineScope {
                 val progressJob = launch {
                     var frameIndex = 1
@@ -469,6 +546,18 @@ class ConsoleChatController(
         }
 
         return result
+    }
+
+    private fun createToolCallTraceObserver(): ToolCallTraceObserver {
+        return object : ToolCallTraceObserver {
+            override suspend fun onToolCallTrace(event: ToolCallTraceEvent) {
+                val dialogLine = when (event) {
+                    is ToolCallTraceEvent.Started -> "system> tool call: ${event.toolLabel}"
+                }
+                io.writeLiveDialogLine(dialogLine)
+                dialogBlocks += dialogLine
+            }
+        }
     }
 
     private suspend fun handleWorkflowInput(
@@ -942,7 +1031,7 @@ class ConsoleChatController(
                     io.readLineInFooter(
                         prompt = "answer ${index + 1}/${normalizedQuestions.size}> ",
                         divider = inputDivider,
-                        footerLabel = workflowFooterLabel(),
+                        footerLabel = activeFooterLabel(),
                     )
                 } finally {
                     io.hideCursor()
@@ -995,7 +1084,7 @@ class ConsoleChatController(
             io.readLineInFooter(
                 prompt = WORKFLOW_APPROVAL_INPUT_PROMPT,
                 divider = inputDivider,
-                footerLabel = workflowFooterLabel(),
+                footerLabel = activeFooterLabel(),
             )
         } finally {
             io.hideCursor()
@@ -1003,7 +1092,10 @@ class ConsoleChatController(
         return parseWorkflowApprovalDecision(input)
     }
 
-    private fun workflowFooterLabel(): String? {
+    private fun activeFooterLabel(): String? {
+        if (projectInformationModeEnabled) {
+            return PROJECT_INFORMATION_FOOTER_LABEL
+        }
         if (!workflowModeEnabled) {
             return null
         }
@@ -2021,6 +2113,11 @@ class ConsoleChatController(
                 true
             }
 
+            input == "/project_help" -> {
+                handleProjectHelpCommand()
+                true
+            }
+
             input == "/api" -> {
                 handleApiCommand()
                 true
@@ -2487,7 +2584,7 @@ class ConsoleChatController(
         io.writeLine()
         io.writeLine("    type your prompt and press Enter")
         io.writeLine(
-            "    commands: /help, /api, /models, /model <id|number>, /temperature [0..2|default], /memory, /compact, /profile, /workflow, /mcp, /invariant, /reset, /exit, @<path>",
+            "    commands: ${buildCliCommandHeaderSummary()}",
         )
         io.writeLine()
 
@@ -2512,25 +2609,16 @@ class ConsoleChatController(
        ╚═╝  ╚═╝╚═╝    ╚═╝  ╚═╝╚═════╝   ╚═══╝  ╚══════╝╚═╝  ╚═══╝   ╚═╝
     """.trimIndent().lineSequence().joinToString(separator = "\n") { line -> "    $line" }
 
-    private fun helpText(): String = """
-        Available commands:
-        /help                show this help message
-        /api                 select the active API from api-settings.json
-        /models              list available models for the active API
-        /model <id|number>   switch active model (must be from /models)
-        /temperature [arg]   show or set global temperature override (arg: 0..2 or default)
-        /memory              show session-memory context usage
-        /compact             choose memory compaction strategy
-        /profile             choose active user profile
-        /workflow            enable workflow mode with workflow selection (toggle off when enabled)
-        /mcp                 configure MCP servers
-        /mcp <n> <tool> [json-object-args]
-                             call an MCP tool on an enabled ready server
-        /invariant           configure invariant constraints
-        /reset               clear conversation and working memory; keep current system prompt
-        /exit                close the application
-        @<path>              attach file for the next prompt
-    """.trimIndent()
+    private fun helpText(): String = buildCliCommandHelpText()
+
+    private fun handleProjectHelpCommand() {
+        projectInformationModeEnabled = !projectInformationModeEnabled
+        dialogBlocks += if (projectInformationModeEnabled) {
+            "system> project information mode enabled: each prompt will use Wire App RAG grounding first and may use available tools for verification or support. Run /project_help again to return to normal chat."
+        } else {
+            "system> project information mode disabled"
+        }
+    }
 
     private fun handleApiCommand() {
         val currentSettings = apiSettingsService.currentSettings()?.normalizedOrNull()
@@ -2951,7 +3039,7 @@ class ConsoleChatController(
             io.readLineInFooter(
                 prompt = "constraint> ",
                 divider = inputDivider,
-                footerLabel = workflowFooterLabel(),
+                footerLabel = activeFooterLabel(),
             )
         } finally {
             io.hideCursor()
@@ -3450,6 +3538,26 @@ class ConsoleChatController(
         return "time> $seconds.$fraction s"
     }
 
+    private fun buildProjectInformationContextSystemMessage(retrievedChunks: List<RagRetrievedChunk>): String {
+        return buildString {
+            appendLine("Wire App RAG retrieval results. Treat this as the primary evidence for your answer.")
+            appendLine("You may use available tools only to verify or supplement the answer when helpful.")
+            appendLine("If the evidence is insufficient, reply exactly with: $PROJECT_INFORMATION_NO_DATA_MESSAGE")
+            retrievedChunks.forEachIndexed { index, chunk ->
+                appendLine()
+                appendLine("Chunk ${index + 1}:")
+                appendLine("chunk_id: ${chunk.chunkId}")
+                appendLine("section_name: ${chunk.sectionName}")
+                appendLine("heading_path: ${chunk.headingPath}")
+                appendLine("source_path: ${chunk.sourcePath}")
+                appendLine("score: ${formatRate(chunk.score)}")
+                appendLine("content:")
+                append(chunk.content.trim())
+                appendLine()
+            }
+        }.trimEnd()
+    }
+
     private data class ResolvedFileReference(
         val path: String,
         val content: String,
@@ -3525,6 +3633,17 @@ class ConsoleChatController(
     }
 
     companion object {
+        private const val PROJECT_INFORMATION_NO_DATA_MESSAGE = "No data available"
+        private const val PROJECT_INFORMATION_FOOTER_LABEL = "Mode: project info"
+        private val PROJECT_INFORMATION_SYSTEM_PROMPT = """
+            You answer questions about the Wire App project using the retrieved RAG context provided in this turn as the primary evidence.
+            Rules:
+            - Use the retrieved context as the main basis for the answer.
+            - You may use available tools only when they help verify or supplement the answer.
+            - Do not rely on prior conversation, memory, or unsupported outside knowledge.
+            - If the retrieved context is missing or insufficient to answer the question, reply exactly with: No data available
+            - Keep answers concise and directly tied to the provided evidence.
+        """.trimIndent()
         private const val WORKFLOW_APPROVAL_INPUT_PROMPT = "choice/comment> "
         private const val INVARIANT_ADD_NEW_CONSTRAINT_LABEL = "Add new constraint"
         private const val INVARIANT_VALIDATION_MAX_RETRIES = 2
