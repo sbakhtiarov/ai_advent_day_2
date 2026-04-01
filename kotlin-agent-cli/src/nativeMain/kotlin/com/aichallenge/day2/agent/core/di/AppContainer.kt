@@ -53,7 +53,10 @@ class AppContainer(
         httpClient = mcpHttpClient,
         startupWorkingDirectory = startupWorkingDirectory,
     )
-    val builtInToolRegistry = BuiltInToolRegistry.createDefault()
+    val builtInToolRegistry = BuiltInToolRegistry.createDefault(
+        httpClient = openAiHttpClient,
+        json = json,
+    )
     private val privateToolExecutionService = DefaultPrivateToolExecutionService(
         mcpRuntimeService = mcpRuntimeService,
         builtInToolRegistry = builtInToolRegistry,

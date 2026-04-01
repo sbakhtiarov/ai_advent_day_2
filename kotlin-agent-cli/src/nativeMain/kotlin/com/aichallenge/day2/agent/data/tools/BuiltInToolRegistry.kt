@@ -7,7 +7,10 @@ import com.aichallenge.day2.agent.core.config.DefaultAppRuntimeEnvironment
 import com.aichallenge.day2.agent.domain.model.PrivateToolBinding
 import com.aichallenge.day2.agent.domain.model.PrivateToolResult
 import com.aichallenge.day2.agent.domain.model.PrivateToolTarget
+import io.ktor.client.HttpClient
+import io.ktor.client.engine.curl.Curl
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.Json
 
 data class BuiltInToolDefinition(
     val toolId: String,
@@ -62,6 +65,22 @@ class BuiltInToolRegistry(
             commandExecutor: CommandExecutor = PosixCommandExecutor(),
             runtimeEnvironment: AppRuntimeEnvironment = DefaultAppRuntimeEnvironment(),
         ): BuiltInToolRegistry {
+            return createDefault(
+                httpClient = HttpClient(Curl),
+                json = Json {
+                    ignoreUnknownKeys = true
+                },
+                commandExecutor = commandExecutor,
+                runtimeEnvironment = runtimeEnvironment,
+            )
+        }
+
+        fun createDefault(
+            httpClient: HttpClient,
+            json: Json,
+            commandExecutor: CommandExecutor = PosixCommandExecutor(),
+            runtimeEnvironment: AppRuntimeEnvironment = DefaultAppRuntimeEnvironment(),
+        ): BuiltInToolRegistry {
             val notificationService = MacOsNotificationService(commandExecutor)
             val schedulerService = LaunchdSchedulerService.createDefault(
                 commandExecutor = commandExecutor,
@@ -76,6 +95,10 @@ class BuiltInToolRegistry(
                     convertToPdfToolRegistration(
                         commandExecutor = commandExecutor,
                         runtimeEnvironment = runtimeEnvironment,
+                    ),
+                    fetchGithubPullRequestToolRegistration(
+                        httpClient = httpClient,
+                        json = json,
                     ),
                 ),
             )
