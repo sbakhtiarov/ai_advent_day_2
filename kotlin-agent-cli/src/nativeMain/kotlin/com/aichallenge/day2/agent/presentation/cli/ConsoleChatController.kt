@@ -71,6 +71,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
@@ -2118,6 +2119,11 @@ class ConsoleChatController(
                 true
             }
 
+            input == "/review_pr" || input.startsWith("/review_pr ") -> {
+                handleReviewPrCommand(input)
+                true
+            }
+
             input == "/api" -> {
                 handleApiCommand()
                 true
@@ -2618,6 +2624,432 @@ class ConsoleChatController(
         } else {
             "system> project information mode disabled"
         }
+    }
+
+    private suspend fun handleReviewPrCommand(input: String) {
+        val prUrl = input.removePrefix("/review_pr").trim()
+        if (prUrl.isEmpty()) {
+            dialogBlocks += REVIEW_PR_COMMAND_USAGE
+            return
+        }
+        if (currentApiId == null || currentModel == null) {
+            dialogBlocks += "system> no API configured. Define APIs in ~/.kotlin-agent-cli/api-settings.json and use /api to select one."
+            return
+        }
+
+        runCatching {
+            emitReviewPrStepMessage(
+                title = REVIEW_PR_FETCH_STEP_TITLE,
+                message = "Loading GitHub pull request metadata and diffs for $prUrl.",
+            )
+            val pullRequest = fetchReviewPullRequest(prUrl)
+            emitReviewPrStepMessage(
+                title = REVIEW_PR_FETCH_STEP_TITLE,
+                message = buildReviewPrFetchSummaryMessage(pullRequest),
+            )
+
+            emitReviewPrStepMessage(
+                title = REVIEW_PR_RAG_STEP_TITLE,
+                message = buildReviewPrRagStartMessage(pullRequest),
+            )
+            val ragContext = retrieveReviewPrWireContext(pullRequest)
+            emitReviewPrStepMessage(
+                title = REVIEW_PR_RAG_STEP_TITLE,
+                message = buildReviewPrRagSummaryMessage(ragContext),
+            )
+
+            val reviewPrompt = buildReviewPrPrompt(pullRequest, ragContext.chunks)
+            emitReviewPrStepMessage(
+                title = REVIEW_PR_REVIEW_STEP_TITLE,
+                message = buildReviewPrReviewPreparationMessage(reviewPrompt),
+            )
+            val reviewStartedAt = TimeSource.Monotonic.markNow()
+            val response = executeReviewPrAssistantTurn(reviewPrompt.contextSystemMessage)
+
+            emitReviewPrStepMessage(
+                title = REVIEW_PR_OUTPUT_STEP_TITLE,
+                message = "Rendering the final pull request review.",
+            )
+            dialogBlocks += formatAssistantResponse(
+                text = response.content,
+                usage = response.usage,
+                elapsedSeconds = reviewStartedAt.elapsedNow().inWholeMilliseconds / 1000.0,
+            )
+        }.onFailure { throwable ->
+            dialogBlocks += "error> ${throwable.message ?: "Unexpected error"}"
+        }
+    }
+
+    private suspend fun fetchReviewPullRequest(prUrl: String): ReviewPullRequestData {
+        val result = builtInPrivateToolProvider.execute(
+            toolId = REVIEW_PR_FETCH_TOOL_ID,
+            arguments = buildJsonObject {
+                put("pr_url", prUrl)
+            },
+        )
+        if (result.isError) {
+            val message = extractPrivateToolText(result.content)
+                .takeIf { value -> value.isNotBlank() }
+                ?: "Built-in tool '$REVIEW_PR_FETCH_TOOL_ID' failed."
+            throw IllegalStateException(message)
+        }
+        val structuredContent = result.structuredContent
+            ?: throw IllegalStateException("Built-in tool '$REVIEW_PR_FETCH_TOOL_ID' returned no structured content.")
+        return parseReviewPullRequest(structuredContent)
+    }
+
+    private suspend fun retrieveReviewPrWireContext(pullRequest: ReviewPullRequestData): ReviewPrRagContext {
+        val queries = buildList {
+            add(pullRequest.title)
+            pullRequest.description
+                ?.trim()
+                ?.takeIf { value -> value.isNotEmpty() }
+                ?.let(::add)
+        }
+        val uniqueChunks = linkedMapOf<String, RagRetrievedChunk>()
+        queries.forEach { query ->
+            wireAppRagRetriever.retrieve(query).forEach { chunk ->
+                if (chunk.chunkId !in uniqueChunks) {
+                    uniqueChunks[chunk.chunkId] = chunk
+                }
+            }
+        }
+        return ReviewPrRagContext(
+            chunks = uniqueChunks.values.toList(),
+            usedTitleOnlyFallback = queries.size == 1,
+            attemptedQueryCount = queries.size,
+        )
+    }
+
+    private suspend fun executeReviewPrAssistantTurn(contextSystemMessage: String): AgentResponse {
+        io.updateFooterStatusLabel(activeFooterLabel())
+        io.showThinkingIndicator()
+        val startedAt = TimeSource.Monotonic.markNow()
+        io.updateThinkingIndicator(
+            progressText = formatThinkingProgress(
+                spinnerFrame = THINKING_SPINNER_FRAMES.first(),
+                elapsedMillis = 0L,
+            ),
+        )
+
+        return try {
+            coroutineScope {
+                val progressJob = launch {
+                    var frameIndex = 1
+                    while (isActive) {
+                        delay(THINKING_INDICATOR_UPDATE_INTERVAL_MS)
+                        val spinnerFrame = THINKING_SPINNER_FRAMES[frameIndex % THINKING_SPINNER_FRAMES.size]
+                        frameIndex += 1
+                        io.updateThinkingIndicator(
+                            progressText = formatThinkingProgress(
+                                spinnerFrame = spinnerFrame,
+                                elapsedMillis = startedAt.elapsedNow().inWholeMilliseconds,
+                            ),
+                        )
+                    }
+                }
+
+                try {
+                    sendPromptUseCase.execute(
+                        prompt = PromptRequestData(
+                            systemPrompt = REVIEW_PR_SYSTEM_PROMPT,
+                            contextSystemMessages = listOf(contextSystemMessage),
+                            messages = listOf(
+                                ConversationMessage.user(REVIEW_PR_USER_PROMPT),
+                            ),
+                            toolCapabilities = LlmToolCapabilities(),
+                        ),
+                        temperature = currentTemperatureOverride(),
+                        model = requireActiveModel(),
+                    )
+                } finally {
+                    progressJob.cancelAndJoin()
+                }
+            }
+        } finally {
+            io.hideThinkingIndicator()
+        }
+    }
+
+    private fun buildReviewPrPrompt(
+        pullRequest: ReviewPullRequestData,
+        retrievedChunks: List<RagRetrievedChunk>,
+    ): ReviewPrPromptContext {
+        val promptBudgetTokens = resolveReviewPrPromptBudgetTokens()
+        val metadataSection = buildReviewPrMetadataSection(
+            pullRequest = pullRequest,
+            retrievedChunks = retrievedChunks,
+        )
+        val fileSections = mutableListOf<String>()
+        val omittedDiffPaths = mutableListOf<String>()
+        var includedDiffCount = 0
+        var omittedDiffCount = 0
+        var unavailableDiffCount = 0
+        var usedTokens = estimateTextTokens(metadataSection) + estimateTextTokens(REVIEW_PR_USER_PROMPT)
+
+        pullRequest.changedFiles.forEachIndexed { index, file ->
+            val summaryBlock = buildReviewPrFileSummaryBlock(index, file)
+            val diffBlock = file.diff?.trim()?.takeIf { value -> value.isNotEmpty() }
+            val includeDiff = diffBlock != null &&
+                usedTokens + estimateTextTokens(summaryBlock) + estimateTextTokens(diffBlock) <= promptBudgetTokens
+
+            val fileBlock = buildString {
+                append(summaryBlock)
+                when {
+                    includeDiff && diffBlock != null -> {
+                        appendLine("diff_included_in_review_prompt: true")
+                        appendLine("diff:")
+                        appendLine(diffBlock)
+                        includedDiffCount += 1
+                        usedTokens += estimateTextTokens(summaryBlock) + estimateTextTokens(diffBlock)
+                    }
+
+                    diffBlock != null -> {
+                        appendLine("diff_included_in_review_prompt: false")
+                        appendLine("diff_omission_reason: omitted_due_to_prompt_budget")
+                        omittedDiffPaths += file.path
+                        omittedDiffCount += 1
+                        usedTokens += estimateTextTokens(summaryBlock)
+                    }
+
+                    else -> {
+                        appendLine("diff_included_in_review_prompt: false")
+                        appendLine("diff_omission_reason: unavailable_from_fetch_result")
+                        unavailableDiffCount += 1
+                        usedTokens += estimateTextTokens(summaryBlock)
+                    }
+                }
+            }.trimEnd()
+            fileSections += fileBlock
+        }
+
+        val coverageNotes = buildString {
+            appendLine("Coverage notes:")
+            appendLine("prompt_budget_tokens: $promptBudgetTokens")
+            appendLine("diffs_included: $includedDiffCount")
+            appendLine("diffs_omitted_due_to_prompt_budget: $omittedDiffCount")
+            appendLine("diffs_unavailable_from_fetch: $unavailableDiffCount")
+            if (omittedDiffPaths.isNotEmpty()) {
+                appendLine("diff_paths_omitted_due_to_prompt_budget:")
+                omittedDiffPaths.forEach { path ->
+                    appendLine("- $path")
+                }
+            }
+        }.trimEnd()
+
+        return ReviewPrPromptContext(
+            contextSystemMessage = buildString {
+                appendLine(metadataSection)
+                appendLine()
+                appendLine("Changed files:")
+                fileSections.forEachIndexed { index, fileSection ->
+                    appendLine()
+                    appendLine("File ${index + 1}:")
+                    appendLine(fileSection)
+                }
+                appendLine()
+                append(coverageNotes)
+            }.trimEnd(),
+            includedDiffCount = includedDiffCount,
+            omittedDiffCount = omittedDiffCount,
+            unavailableDiffCount = unavailableDiffCount,
+        )
+    }
+
+    private fun buildReviewPrMetadataSection(
+        pullRequest: ReviewPullRequestData,
+        retrievedChunks: List<RagRetrievedChunk>,
+    ): String {
+        val ragContext = if (retrievedChunks.isEmpty()) {
+            "Wire App RAG context:\n- No relevant project context was found."
+        } else {
+            buildString {
+                appendLine("Wire App RAG context:")
+                retrievedChunks.forEachIndexed { index, chunk ->
+                    appendLine()
+                    appendLine("Chunk ${index + 1}:")
+                    appendLine("chunk_id: ${chunk.chunkId}")
+                    appendLine("section_name: ${chunk.sectionName}")
+                    appendLine("heading_path: ${chunk.headingPath}")
+                    appendLine("source_path: ${chunk.sourcePath}")
+                    appendLine("score: ${formatRate(chunk.score)}")
+                    appendLine("content:")
+                    appendLine(chunk.content.trim())
+                }
+            }.trimEnd()
+        }
+
+        return buildString {
+            appendLine("Pull request details:")
+            appendLine("pr_url: ${pullRequest.prUrl}")
+            appendLine("repository: ${pullRequest.owner}/${pullRequest.repo}")
+            appendLine("pull_number: ${pullRequest.pullNumber}")
+            appendLine("title: ${pullRequest.title}")
+            appendLine("description: ${pullRequest.description ?: "(blank)"}")
+            appendLine("base_branch: ${pullRequest.baseBranch}")
+            appendLine("head_branch: ${pullRequest.headBranch}")
+            appendLine("changed_files_count: ${pullRequest.changedFilesCount}")
+            appendLine("fetch_warnings:")
+            if (pullRequest.warnings.isEmpty()) {
+                appendLine("- none")
+            } else {
+                pullRequest.warnings.forEach { warning ->
+                    appendLine("- $warning")
+                }
+            }
+            appendLine()
+            append(ragContext)
+        }.trimEnd()
+    }
+
+    private fun buildReviewPrFileSummaryBlock(
+        index: Int,
+        file: ReviewPullRequestFile,
+    ): String {
+        return buildString {
+            appendLine("file_index: ${index + 1}")
+            appendLine("path: ${file.path}")
+            appendLine("previous_path: ${file.previousPath ?: "(none)"}")
+            appendLine("status: ${file.status}")
+            appendLine("additions: ${file.additions}")
+            appendLine("deletions: ${file.deletions}")
+            appendLine("changes: ${file.changes}")
+            appendLine("diff_source: ${file.diffSource}")
+            appendLine("diff_available: ${file.diffAvailable}")
+        }
+    }
+
+    private fun resolveReviewPrPromptBudgetTokens(): Int {
+        val modelContextWindow = currentModel
+            ?.let { modelId -> activeModelsById()[modelId] }
+            ?.contextWindowTokens
+        val scaledBudget = modelContextWindow?.let { contextWindow ->
+            (contextWindow * REVIEW_PR_PROMPT_BUDGET_RATIO).roundToInt()
+        }
+        return if (scaledBudget != null) {
+            scaledBudget.coerceAtLeast(REVIEW_PR_MIN_PROMPT_BUDGET_TOKENS)
+        } else {
+            REVIEW_PR_DEFAULT_PROMPT_BUDGET_TOKENS
+        }
+    }
+
+    private fun buildReviewPrFetchSummaryMessage(pullRequest: ReviewPullRequestData): String {
+        val warnings = if (pullRequest.warnings.isEmpty()) {
+            "Warnings: none."
+        } else {
+            "Warnings: ${pullRequest.warnings.joinToString(separator = " | ")}"
+        }
+        return "Loaded ${pullRequest.owner}/${pullRequest.repo}#${pullRequest.pullNumber} \"${pullRequest.title}\" with ${pullRequest.changedFilesCount} changed file(s). $warnings"
+    }
+
+    private fun buildReviewPrRagStartMessage(pullRequest: ReviewPullRequestData): String {
+        return if (pullRequest.description.isNullOrBlank()) {
+            "Querying Wire App RAG with the PR title. The PR description is blank, so title-only fallback will be used."
+        } else {
+            "Querying Wire App RAG separately with the PR title and description."
+        }
+    }
+
+    private fun buildReviewPrRagSummaryMessage(ragContext: ReviewPrRagContext): String {
+        return when {
+            ragContext.chunks.isEmpty() && ragContext.usedTitleOnlyFallback ->
+                "Retrieved 0 unique Wire App RAG chunk(s). No project context was found, and title-only fallback was used."
+
+            ragContext.chunks.isEmpty() ->
+                "Retrieved 0 unique Wire App RAG chunk(s). No project context was found."
+
+            ragContext.usedTitleOnlyFallback ->
+                "Retrieved ${ragContext.chunks.size} unique Wire App RAG chunk(s) using the PR title only."
+
+            else ->
+                "Retrieved ${ragContext.chunks.size} unique Wire App RAG chunk(s) from ${ragContext.attemptedQueryCount} query/queries."
+        }
+    }
+
+    private fun buildReviewPrReviewPreparationMessage(promptContext: ReviewPrPromptContext): String {
+        return buildString {
+            append("Prepared the review prompt with ")
+            append(promptContext.includedDiffCount)
+            append(" full diff(s)")
+            if (promptContext.omittedDiffCount > 0) {
+                append(", ")
+                append(promptContext.omittedDiffCount)
+                append(" diff(s) omitted due to prompt budget")
+            }
+            if (promptContext.unavailableDiffCount > 0) {
+                append(", ")
+                append(promptContext.unavailableDiffCount)
+                append(" diff(s) unavailable from the fetch result")
+            }
+            append(".")
+        }
+    }
+
+    private fun emitReviewPrStepMessage(title: String, message: String) {
+        val line = "system> $title: $message"
+        io.writeLiveDialogLine(line)
+        dialogBlocks += line
+    }
+
+    private fun extractPrivateToolText(content: JsonArray): String {
+        return content.mapNotNull { item ->
+            item.jsonObject["text"]?.jsonPrimitive?.contentOrNull
+        }.joinToString(separator = "\n")
+    }
+
+    private fun parseReviewPullRequest(structuredContent: JsonObject): ReviewPullRequestData {
+        return ReviewPullRequestData(
+            prUrl = structuredContent.requiredString("pr_url"),
+            owner = structuredContent.requiredString("owner"),
+            repo = structuredContent.requiredString("repo"),
+            pullNumber = structuredContent.requiredLong("pull_number"),
+            title = structuredContent.requiredString("title"),
+            description = structuredContent.optionalString("description"),
+            headBranch = structuredContent.requiredString("head_branch"),
+            baseBranch = structuredContent.requiredString("base_branch"),
+            changedFilesCount = structuredContent.requiredInt("changed_files_count"),
+            warnings = structuredContent.get("warnings")?.jsonArray.orEmpty().map { warning ->
+                warning.jsonPrimitive.content
+            },
+            changedFiles = structuredContent.get("changed_files")?.jsonArray.orEmpty().map { fileElement ->
+                val fileObject = fileElement.jsonObject
+                ReviewPullRequestFile(
+                    path = fileObject.requiredString("path"),
+                    previousPath = fileObject.optionalString("previous_path"),
+                    status = fileObject.requiredString("status"),
+                    additions = fileObject.requiredInt("additions"),
+                    deletions = fileObject.requiredInt("deletions"),
+                    changes = fileObject.requiredInt("changes"),
+                    diff = fileObject.optionalString("diff"),
+                    diffSource = fileObject.requiredString("diff_source"),
+                    diffAvailable = fileObject.requiredBoolean("diff_available"),
+                )
+            },
+        )
+    }
+
+    private fun JsonObject.requiredString(key: String): String {
+        return optionalString(key)
+            ?: throw IllegalStateException("Built-in tool '$REVIEW_PR_FETCH_TOOL_ID' returned malformed data: missing '$key'.")
+    }
+
+    private fun JsonObject.optionalString(key: String): String? {
+        return get(key)?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { value -> value.isNotEmpty() }
+    }
+
+    private fun JsonObject.requiredInt(key: String): Int {
+        return get(key)?.jsonPrimitive?.contentOrNull?.toIntOrNull()
+            ?: throw IllegalStateException("Built-in tool '$REVIEW_PR_FETCH_TOOL_ID' returned malformed data: missing '$key'.")
+    }
+
+    private fun JsonObject.requiredLong(key: String): Long {
+        return get(key)?.jsonPrimitive?.contentOrNull?.toLongOrNull()
+            ?: throw IllegalStateException("Built-in tool '$REVIEW_PR_FETCH_TOOL_ID' returned malformed data: missing '$key'.")
+    }
+
+    private fun JsonObject.requiredBoolean(key: String): Boolean {
+        return get(key)?.jsonPrimitive?.contentOrNull?.toBooleanStrictOrNull()
+            ?: throw IllegalStateException("Built-in tool '$REVIEW_PR_FETCH_TOOL_ID' returned malformed data: missing '$key'.")
     }
 
     private fun handleApiCommand() {
@@ -3635,6 +4067,15 @@ class ConsoleChatController(
     companion object {
         private const val PROJECT_INFORMATION_NO_DATA_MESSAGE = "No data available"
         private const val PROJECT_INFORMATION_FOOTER_LABEL = "Mode: project info"
+        private const val REVIEW_PR_FETCH_TOOL_ID = "fetch_github_pull_request"
+        private const val REVIEW_PR_COMMAND_USAGE = "system> usage: /review_pr <public-pr-url>"
+        private const val REVIEW_PR_FETCH_STEP_TITLE = "Step 1/4 - Fetch PR details"
+        private const val REVIEW_PR_RAG_STEP_TITLE = "Step 2/4 - Retrieve Wire context"
+        private const val REVIEW_PR_REVIEW_STEP_TITLE = "Step 3/4 - Review source code changes"
+        private const val REVIEW_PR_OUTPUT_STEP_TITLE = "Step 4/4 - Provide full PR review"
+        private const val REVIEW_PR_DEFAULT_PROMPT_BUDGET_TOKENS = 24_000
+        private const val REVIEW_PR_MIN_PROMPT_BUDGET_TOKENS = 128
+        private const val REVIEW_PR_PROMPT_BUDGET_RATIO = 0.55
         private val PROJECT_INFORMATION_SYSTEM_PROMPT = """
             You answer questions about the Wire App project using the retrieved RAG context provided in this turn as the primary evidence.
             Rules:
@@ -3644,6 +4085,24 @@ class ConsoleChatController(
             - If the retrieved context is missing or insufficient to answer the question, reply exactly with: No data available
             - Keep answers concise and directly tied to the provided evidence.
         """.trimIndent()
+        private val REVIEW_PR_SYSTEM_PROMPT = """
+            You are reviewing a GitHub pull request using only the PR data and Wire App RAG context provided in this turn.
+            Rules:
+            - Review only the provided evidence. Do not rely on prior conversation, memory, or outside knowledge.
+            - Focus on bugs, architectural issues, and practical improvements or recommendations.
+            - Call out uncertainty when evidence is incomplete or some diffs were omitted or unavailable.
+            - Reference concrete file paths from the provided PR data whenever possible.
+            - Keep the review direct and high signal.
+            - Use exactly these Markdown sections in this order:
+              Summary
+              Bugs
+              Architectural Issues
+              Improvements / Recommendations
+              Open Questions / Coverage Notes
+            - Never omit a section. If a section has no findings, say so briefly.
+            - In Open Questions / Coverage Notes, explicitly disclose any omitted or unavailable diff coverage mentioned in the provided context.
+        """.trimIndent()
+        private const val REVIEW_PR_USER_PROMPT = "Review this pull request and provide the full PR review."
         private const val WORKFLOW_APPROVAL_INPUT_PROMPT = "choice/comment> "
         private const val INVARIANT_ADD_NEW_CONSTRAINT_LABEL = "Add new constraint"
         private const val INVARIANT_VALIDATION_MAX_RETRIES = 2
@@ -3777,5 +4236,44 @@ class ConsoleChatController(
     private data class PreparedMainTurnToolContext(
         val capabilities: LlmToolCapabilities = LlmToolCapabilities(),
         val systemMessages: List<String> = emptyList(),
+    )
+
+    private data class ReviewPullRequestData(
+        val prUrl: String,
+        val owner: String,
+        val repo: String,
+        val pullNumber: Long,
+        val title: String,
+        val description: String?,
+        val headBranch: String,
+        val baseBranch: String,
+        val changedFilesCount: Int,
+        val warnings: List<String>,
+        val changedFiles: List<ReviewPullRequestFile>,
+    )
+
+    private data class ReviewPullRequestFile(
+        val path: String,
+        val previousPath: String?,
+        val status: String,
+        val additions: Int,
+        val deletions: Int,
+        val changes: Int,
+        val diff: String?,
+        val diffSource: String,
+        val diffAvailable: Boolean,
+    )
+
+    private data class ReviewPrRagContext(
+        val chunks: List<RagRetrievedChunk>,
+        val usedTitleOnlyFallback: Boolean,
+        val attemptedQueryCount: Int,
+    )
+
+    private data class ReviewPrPromptContext(
+        val contextSystemMessage: String,
+        val includedDiffCount: Int,
+        val omittedDiffCount: Int,
+        val unavailableDiffCount: Int,
     )
 }

@@ -104,6 +104,16 @@ class CliIOTest {
     }
 
     @Test
+    fun resolveCliCommandCompletionReturnsReviewPrCommand() {
+        val result = resolveCliCommandCompletion("/rev")
+
+        assertEquals("/review_pr ", result.replacementText)
+        assertContentEquals(listOf("/review_pr"), result.matches)
+        assertFalse(result.isAmbiguous)
+        assertTrue(result.shouldApply)
+    }
+
+    @Test
     fun buildCliCommandMatchesHintReturnsReadableHint() {
         assertEquals(
             "matches> /model, /models",
@@ -114,5 +124,13 @@ class CliIOTest {
     @Test
     fun buildCliCommandMatchesHintReturnsNullForEmptyMatches() {
         assertNull(buildCliCommandMatchesHint(emptyList()))
+    }
+
+    @Test
+    fun buildCliCommandHelpTextIncludesReviewPrCommand() {
+        val helpText = buildCliCommandHelpText()
+
+        assertTrue(helpText.contains("/review_pr <public-pr-url>"))
+        assertTrue(helpText.contains("review a public GitHub pull request with Wire context"))
     }
 }

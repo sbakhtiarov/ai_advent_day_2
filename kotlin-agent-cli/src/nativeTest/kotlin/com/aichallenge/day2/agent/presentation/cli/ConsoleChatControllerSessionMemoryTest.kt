@@ -2247,9 +2247,11 @@ class ConsoleChatControllerSessionMemoryTest {
         val output = io.outputText()
         assertContains(
             output,
-            "commands: /help, /project_help, /api, /models, /model <id|number>, /temperature [0..2|default], /memory, /compact, /profile, /workflow, /mcp, /invariant, /reset, /exit, @<path>",
+            "commands: /help, /project_help, /review_pr <public-pr-url>, /api, /models, /model <id|number>, /temperature [0..2|default], /memory, /compact, /profile, /workflow, /mcp, /invariant, /reset, /exit, @<path>",
         )
         assertContains(output, "/project_help        toggle Wire project-information mode")
+        assertContains(output, "/review_pr <public-pr-url>")
+        assertContains(output, "review a public GitHub pull request with Wire context")
         assertContains(output, "/api                 select the active API from api-settings.json")
         assertContains(output, "/temperature [arg]   show or set global temperature override (arg: 0..2 or default)")
         assertContains(output, "/memory              show session-memory context usage")
@@ -2277,6 +2279,328 @@ class ConsoleChatControllerSessionMemoryTest {
             CLI_COMMAND_DESCRIPTORS.map(CliCommandDescriptor::name),
             io.footerCommandDescriptors.single().map(CliCommandDescriptor::name),
         )
+    }
+
+    @Test
+    fun reviewPrWithoutUrlPrintsUsageAndDoesNotCallFetchRagOrLlm() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val fetchTool = RecordingPullRequestFetchTool(results = emptyList())
+        val ragRetriever = RecordingWireAppRagRetriever()
+        val io = FakeCliIO(inputs = listOf("/review_pr", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            builtInPrivateToolProvider = reviewPrBuiltInToolProvider(fetchTool),
+            wireAppRagRetriever = ragRetriever,
+        )
+
+        controller.runInteractive()
+
+        assertContains(io.outputText(), "system> usage: /review_pr <public-pr-url>")
+        assertTrue(fetchTool.requestedUrls.isEmpty())
+        assertTrue(ragRetriever.questions.isEmpty())
+        assertTrue(repository.conversations.isEmpty())
+    }
+
+    @Test
+    fun reviewPrFetchesThenRetrievesRagThenSendsFreshReviewPrompt() = runBlocking {
+        val eventLog = mutableListOf<String>()
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(
+                    AgentResponse(
+                        content = """
+                            ## Summary
+                            Overall looks good.
+                            
+                            ## Bugs
+                            None found.
+                            
+                            ## Architectural Issues
+                            None found.
+                            
+                            ## Improvements / Recommendations
+                            Consider adding one more test.
+                            
+                            ## Open Questions / Coverage Notes
+                            Full coverage of included diffs.
+                        """.trimIndent(),
+                    ),
+                ),
+            ),
+        )
+        val fetchTool = RecordingPullRequestFetchTool(
+            results = listOf(Result.success(samplePullRequestToolResult())),
+            eventLog = eventLog,
+        )
+        val ragRetriever = RecordingWireAppRagRetriever(
+            results = listOf(
+                Result.success(
+                    listOf(
+                        RagRetrievedChunk(
+                            chunkId = "title-1",
+                            sectionName = "Sync",
+                            headingPath = "Architecture > Sync",
+                            sourcePath = "sync.md",
+                            score = 0.91,
+                            content = "Sync uses a coordinator and explicit retry handling.",
+                        ),
+                    ),
+                ),
+                Result.success(
+                    listOf(
+                        RagRetrievedChunk(
+                            chunkId = "title-1",
+                            sectionName = "Sync",
+                            headingPath = "Architecture > Sync",
+                            sourcePath = "sync.md",
+                            score = 0.91,
+                            content = "Sync uses a coordinator and explicit retry handling.",
+                        ),
+                        RagRetrievedChunk(
+                            chunkId = "desc-2",
+                            sectionName = "Messaging",
+                            headingPath = "Features > Messaging",
+                            sourcePath = "messaging.md",
+                            score = 0.82,
+                            content = "Message sending should preserve optimistic UI state.",
+                        ),
+                    ),
+                ),
+            ),
+            eventLog = eventLog,
+        )
+        val io = FakeCliIO(inputs = listOf("/review_pr https://github.com/wireapp/wire-android/pull/4672", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            builtInPrivateToolProvider = reviewPrBuiltInToolProvider(fetchTool),
+            wireAppRagRetriever = ragRetriever,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(
+            listOf(
+                "fetch:https://github.com/wireapp/wire-android/pull/4672",
+                "rag:Improve sync retry handling",
+                "rag:Adds retry handling for failed sync uploads.",
+            ),
+            eventLog,
+        )
+        assertEquals(1, repository.conversations.size)
+        assertEquals(
+            listOf(MessageRole.SYSTEM, MessageRole.SYSTEM, MessageRole.USER),
+            repository.conversations.single().map { it.role },
+        )
+        assertContains(repository.conversations.single()[1].content, "pr_url: https://github.com/wireapp/wire-android/pull/4672")
+        assertContains(repository.conversations.single()[1].content, "source_path: sync.md")
+        assertContains(repository.conversations.single()[2].content, "Review this pull request")
+        assertTrue(repository.prompts.single().toolCapabilities.privateTools.isEmpty())
+        assertTrue(repository.prompts.single().toolCapabilities.publicMcpServers.isEmpty())
+        val output = io.outputText()
+        assertContains(output, "Step 1/4 - Fetch PR details")
+        assertContains(output, "Step 2/4 - Retrieve Wire context")
+        assertContains(output, "Step 3/4 - Review source code changes")
+        assertContains(output, "Step 4/4 - Provide full PR review")
+        assertContains(output, "Overall looks good.")
+    }
+
+    @Test
+    fun reviewPrUsesTitleOnlyRagFallbackWhenDescriptionIsBlank() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(
+                    AgentResponse(
+                        content = """
+                            ## Summary
+                            Looks fine.
+                            
+                            ## Bugs
+                            None found.
+                            
+                            ## Architectural Issues
+                            None found.
+                            
+                            ## Improvements / Recommendations
+                            None.
+                            
+                            ## Open Questions / Coverage Notes
+                            Title-only coverage.
+                        """.trimIndent(),
+                    ),
+                ),
+            ),
+        )
+        val fetchTool = RecordingPullRequestFetchTool(
+            results = listOf(Result.success(samplePullRequestToolResult(description = null))),
+        )
+        val ragRetriever = RecordingWireAppRagRetriever(
+            results = listOf(Result.success(emptyList())),
+        )
+        val io = FakeCliIO(inputs = listOf("/review_pr https://github.com/wireapp/wire-android/pull/4672", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            builtInPrivateToolProvider = reviewPrBuiltInToolProvider(fetchTool),
+            wireAppRagRetriever = ragRetriever,
+        )
+
+        controller.runInteractive()
+
+        assertEquals(listOf("Improve sync retry handling"), ragRetriever.questions)
+        assertContains(io.outputText(), "title-only fallback")
+        assertContains(repository.prompts.single().contextSystemMessages.single(), "description: (blank)")
+    }
+
+    @Test
+    fun reviewPrContinuesWhenRagReturnsNoContext() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(
+                    AgentResponse(
+                        content = """
+                            ## Summary
+                            Review completed.
+                            
+                            ## Bugs
+                            None found.
+                            
+                            ## Architectural Issues
+                            None found.
+                            
+                            ## Improvements / Recommendations
+                            None.
+                            
+                            ## Open Questions / Coverage Notes
+                            No Wire context was available.
+                        """.trimIndent(),
+                    ),
+                ),
+            ),
+        )
+        val fetchTool = RecordingPullRequestFetchTool(
+            results = listOf(Result.success(samplePullRequestToolResult())),
+        )
+        val ragRetriever = RecordingWireAppRagRetriever(
+            results = listOf(Result.success(emptyList()), Result.success(emptyList())),
+        )
+        val io = FakeCliIO(inputs = listOf("/review_pr https://github.com/wireapp/wire-android/pull/4672", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            builtInPrivateToolProvider = reviewPrBuiltInToolProvider(fetchTool),
+            wireAppRagRetriever = ragRetriever,
+        )
+
+        controller.runInteractive()
+
+        assertContains(io.outputText(), "Retrieved 0 unique Wire App RAG chunk(s). No project context was found.")
+        assertContains(repository.prompts.single().contextSystemMessages.single(), "No relevant project context was found.")
+        assertContains(io.outputText(), "Review completed.")
+    }
+
+    @Test
+    fun reviewPrStopsWhenFetchFails() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val fetchTool = RecordingPullRequestFetchTool(
+            results = listOf(Result.failure(IllegalStateException("GitHub unavailable"))),
+        )
+        val ragRetriever = RecordingWireAppRagRetriever()
+        val io = FakeCliIO(inputs = listOf("/review_pr https://github.com/wireapp/wire-android/pull/4672", "/exit"))
+        val controller = createController(
+            repository = repository,
+            io = io,
+            builtInPrivateToolProvider = reviewPrBuiltInToolProvider(fetchTool),
+            wireAppRagRetriever = ragRetriever,
+        )
+
+        controller.runInteractive()
+
+        assertContains(io.outputText(), "error> GitHub unavailable")
+        assertTrue(ragRetriever.questions.isEmpty())
+        assertTrue(repository.conversations.isEmpty())
+    }
+
+    @Test
+    fun reviewPrOmitsLargeDiffsBestEffortAndRequiresCoverageDisclosure() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(
+                    AgentResponse(
+                        content = """
+                            ## Summary
+                            Large PR reviewed best-effort.
+                            
+                            ## Bugs
+                            None found in included diffs.
+                            
+                            ## Architectural Issues
+                            None found.
+                            
+                            ## Improvements / Recommendations
+                            Split this PR into smaller pieces.
+                            
+                            ## Open Questions / Coverage Notes
+                            Some diffs were omitted due to prompt budget and are not fully covered.
+                        """.trimIndent(),
+                    ),
+                ),
+            ),
+        )
+        val fetchTool = RecordingPullRequestFetchTool(
+            results = listOf(
+                Result.success(
+                    samplePullRequestToolResult(
+                        changedFiles = listOf(
+                            sampleChangedFile(path = "src/A.kt", diff = repeatedDiff("A", 80)),
+                            sampleChangedFile(path = "src/B.kt", diff = repeatedDiff("B", 80)),
+                            sampleChangedFile(path = "src/C.kt", diff = repeatedDiff("C", 80)),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        val ragRetriever = RecordingWireAppRagRetriever(
+            results = listOf(Result.success(emptyList()), Result.success(emptyList())),
+        )
+        val io = FakeCliIO(inputs = listOf("/review_pr https://github.com/wireapp/wire-android/pull/4672", "/exit"))
+        val constrainedModels = listOf(
+            ModelProperties(
+                id = "gpt-4.1-mini",
+                pricing = ModelPricing(inputUsdPer1M = 0.40, outputUsdPer1M = 1.60),
+                contextWindowTokens = 220,
+            ),
+        )
+        val constrainedApiSettings = ApiSettings(
+            activeApiId = "prod",
+            apis = listOf(
+                ConfiguredApi(
+                    id = "prod",
+                    name = "Production",
+                    baseUrl = "https://api.openai.com/v1",
+                    apiKey = "test-key",
+                    availableModels = listOf("gpt-4.1-mini"),
+                    defaultModel = "gpt-4.1-mini",
+                    selectedModel = "gpt-4.1-mini",
+                ),
+            ),
+        )
+        val controller = createController(
+            repository = repository,
+            io = io,
+            apiSettingsService = MutableApiSettingsService(constrainedApiSettings),
+            availableModels = constrainedModels,
+            builtInPrivateToolProvider = reviewPrBuiltInToolProvider(fetchTool),
+            wireAppRagRetriever = ragRetriever,
+        )
+
+        controller.runInteractive()
+
+        val contextMessage = repository.prompts.single().contextSystemMessages.single()
+        assertContains(contextMessage, "diff_omission_reason: omitted_due_to_prompt_budget")
+        assertContains(contextMessage, "diff_paths_omitted_due_to_prompt_budget:")
+        assertContains(io.outputText(), "Some diffs were omitted due to prompt budget")
     }
 
     @Test
@@ -2374,7 +2698,7 @@ class ConsoleChatControllerSessionMemoryTest {
         assertContains(projectConversation[1].content, "architecture.md")
         assertContains(projectConversation[1].content, "Navigation is coordinated by the app module.")
         assertEquals("How does navigation work?", projectConversation[2].content)
-        assertEquals(4, repository.prompts[1].toolCapabilities.privateTools.size)
+        assertEquals(5, repository.prompts[1].toolCapabilities.privateTools.size)
         assertTrue(repository.prompts[1].toolCapabilities.publicMcpServers.isEmpty())
         assertTrue(repository.prompts[1].toolCapabilities.privateTools.any { tool -> tool.modelToolName == "notify_user" })
         assertTrue(repository.prompts[1].toolCapabilities.privateTools.any { tool -> tool.modelToolName == "scheduler" })
@@ -2416,7 +2740,7 @@ class ConsoleChatControllerSessionMemoryTest {
 
         assertEquals(1, repository.conversations.size)
         val projectConversation = repository.conversations.single()
-        assertEquals(4, repository.prompts.single().toolCapabilities.privateTools.size)
+        assertEquals(5, repository.prompts.single().toolCapabilities.privateTools.size)
         assertFalse(projectConversation.any { message -> message.content.contains("[FILE]") })
         assertFalse(projectConversation.any { message -> message.content.contains("this should not be injected") })
     }
@@ -2478,7 +2802,7 @@ class ConsoleChatControllerSessionMemoryTest {
 
         assertEquals(1, repository.prompts.size)
         assertEquals(1, repository.prompts.single().toolCapabilities.publicMcpServers.size)
-        assertEquals(5, repository.prompts.single().toolCapabilities.privateTools.size)
+        assertEquals(6, repository.prompts.single().toolCapabilities.privateTools.size)
         assertTrue(repository.prompts.single().toolCapabilities.privateTools.any { tool -> tool.modelToolName == "notify_user" })
         assertTrue(repository.prompts.single().toolCapabilities.privateTools.any { tool -> tool.modelToolName == "scheduler" })
         assertTrue(repository.prompts.single().toolCapabilities.privateTools.any { tool ->
@@ -3699,7 +4023,7 @@ class ConsoleChatControllerSessionMemoryTest {
         controller.runInteractive()
 
         assertEquals(2, repository.prompts.size)
-        assertEquals(5, repository.prompts[0].toolCapabilities.privateTools.size)
+        assertEquals(6, repository.prompts[0].toolCapabilities.privateTools.size)
         assertTrue(repository.prompts[0].toolCapabilities.publicMcpServers.isEmpty())
         assertTrue(repository.prompts[0].toolCapabilities.privateTools.any { tool -> tool.modelToolName == "notify_user" })
         assertTrue(repository.prompts[0].toolCapabilities.privateTools.any { tool -> tool.modelToolName == "scheduler" })
@@ -3757,7 +4081,7 @@ class ConsoleChatControllerSessionMemoryTest {
         assertEquals(1, runtimeService.initializeCalls)
         assertEquals(1, repository.prompts.size)
         assertEquals(1, repository.prompts.single().toolCapabilities.publicMcpServers.size)
-        assertEquals(5, repository.prompts.single().toolCapabilities.privateTools.size)
+        assertEquals(6, repository.prompts.single().toolCapabilities.privateTools.size)
         assertTrue(repository.prompts.single().toolCapabilities.privateTools.any { tool -> tool.modelToolName == "notify_user" })
         assertTrue(repository.prompts.single().toolCapabilities.privateTools.any { tool -> tool.modelToolName == "scheduler" })
         assertContains(io.outputText(), "one-shot answer")
@@ -3779,7 +4103,7 @@ class ConsoleChatControllerSessionMemoryTest {
 
         assertEquals(0, exitCode)
         assertEquals(
-            listOf("notify_user", "scheduler", "save_to_file", "convert_to_pdf"),
+            listOf("notify_user", "scheduler", "save_to_file", "convert_to_pdf", "fetch_github_pull_request"),
             repository.prompts.single().toolCapabilities.privateTools.map { tool -> tool.modelToolName },
         )
         assertTrue(repository.prompts.single().toolCapabilities.publicMcpServers.isEmpty())
@@ -3975,7 +4299,7 @@ class ConsoleChatControllerSessionMemoryTest {
 
         assertEquals(2, runtimeService.initializeCalls)
         assertEquals(listOf(privateServer), runtimeService.initializeRequests[1])
-        assertEquals(5, repository.prompts.single().toolCapabilities.privateTools.size)
+        assertEquals(6, repository.prompts.single().toolCapabilities.privateTools.size)
         assertTrue(repository.prompts.single().toolCapabilities.privateTools.any { tool -> tool.modelToolName == "notify_user" })
         assertTrue(repository.prompts.single().toolCapabilities.privateTools.any { tool -> tool.modelToolName == "scheduler" })
     }
@@ -4021,7 +4345,7 @@ class ConsoleChatControllerSessionMemoryTest {
         controller.runInteractive()
 
         assertEquals(listOf(enabledServer), runtimeService.initializeRequests.last())
-        assertEquals(5, repository.prompts.single().toolCapabilities.privateTools.size)
+        assertEquals(6, repository.prompts.single().toolCapabilities.privateTools.size)
         assertTrue(repository.prompts.single().toolCapabilities.privateTools.any { tool -> tool.modelToolName == "notify_user" })
         assertTrue(repository.prompts.single().toolCapabilities.privateTools.any { tool -> tool.modelToolName == "scheduler" })
     }
@@ -5110,6 +5434,127 @@ internal fun defaultModels(): List<ModelProperties> {
     )
 }
 
+private fun reviewPrBuiltInToolProvider(fetchTool: RecordingPullRequestFetchTool): BuiltInPrivateToolProvider {
+    return BuiltInPrivateToolProvider(
+        BuiltInToolRegistry(
+            registrations = listOf(
+                BuiltInToolRegistration(
+                    definition = BuiltInToolDefinition(
+                        toolId = "fetch_github_pull_request",
+                        modelToolName = "fetch_github_pull_request",
+                        description = "Fetch GitHub pull request details",
+                        parametersSchema = buildJsonObject {
+                            put("type", "object")
+                        },
+                    ),
+                    executor = fetchTool::execute,
+                ),
+            ),
+        ),
+    )
+}
+
+private fun samplePullRequestToolResult(
+    description: String? = "Adds retry handling for failed sync uploads.",
+    changedFiles: List<JsonObject> = listOf(
+        sampleChangedFile(
+            path = "src/main/kotlin/SyncUploader.kt",
+            diff = """
+                @@ -10,6 +10,10 @@ class SyncUploader {
+                -    uploadNow()
+                +    retryQueue.enqueue(message)
+                +    uploadNow()
+                 }
+            """.trimIndent(),
+        ),
+        sampleChangedFile(
+            path = "src/test/kotlin/SyncUploaderTest.kt",
+            diff = """
+                @@ -1,4 +1,8 @@
+                +@Test
+                +fun retriesFailedUploads() {}
+            """.trimIndent(),
+        ),
+    ),
+): PrivateToolResult {
+    return PrivateToolResult(
+        isError = false,
+        content = JsonArray(
+            buildJsonArray {
+                add(
+                    buildJsonObject {
+                        put("type", "text")
+                        put("text", "Fetched GitHub pull request successfully.")
+                    },
+                )
+            },
+        ),
+        structuredContent = buildJsonObject {
+            put("pr_url", "https://github.com/wireapp/wire-android/pull/4672")
+            put("owner", "wireapp")
+            put("repo", "wire-android")
+            put("pull_number", 4672)
+            put("title", "Improve sync retry handling")
+            if (description == null) {
+                put("description", kotlinx.serialization.json.JsonNull)
+            } else {
+                put("description", description)
+            }
+            put("head_branch", "feature/retry-sync")
+            put("base_branch", "develop")
+            put("changed_files_count", changedFiles.size)
+            put("warnings", buildJsonArray {})
+            put(
+                "changed_files",
+                buildJsonArray {
+                    changedFiles.forEach(::add)
+                },
+            )
+        },
+    )
+}
+
+private fun sampleChangedFile(
+    path: String,
+    diff: String?,
+    previousPath: String? = null,
+    status: String = "modified",
+    additions: Int = 4,
+    deletions: Int = 1,
+    changes: Int = additions + deletions,
+    diffSource: String = if (diff == null) "unavailable" else "raw_diff",
+    diffAvailable: Boolean = diff != null,
+): JsonObject {
+    return buildJsonObject {
+        put("path", path)
+        if (previousPath == null) {
+            put("previous_path", kotlinx.serialization.json.JsonNull)
+        } else {
+            put("previous_path", previousPath)
+        }
+        put("status", status)
+        put("additions", additions)
+        put("deletions", deletions)
+        put("changes", changes)
+        if (diff == null) {
+            put("diff", kotlinx.serialization.json.JsonNull)
+        } else {
+            put("diff", diff)
+        }
+        put("diff_source", diffSource)
+        put("diff_available", diffAvailable)
+    }
+}
+
+private fun repeatedDiff(label: String, lines: Int): String {
+    return buildString {
+        appendLine("@@ -1,1 +1,${lines + 1} @@")
+        repeat(lines) { index ->
+            appendLine("+$label line $index")
+        }
+    }.trimEnd()
+}
+
 private class RecordingAgentRepository(
     responses: List<Result<AgentResponse>>,
     toolTraceEvents: List<List<ToolCallTraceEvent>> = emptyList(),
@@ -5191,15 +5636,35 @@ private class RecordingCurrentTimeBuiltInTool {
 
 private class RecordingWireAppRagRetriever(
     results: List<Result<List<RagRetrievedChunk>>> = emptyList(),
+    private val eventLog: MutableList<String>? = null,
 ) : WireAppRagRetriever {
     private val queuedResults = ArrayDeque(results)
     val questions = mutableListOf<String>()
 
     override suspend fun retrieve(question: String): List<RagRetrievedChunk> {
         questions += question
+        eventLog?.add("rag:$question")
         return queuedResults.removeFirstOrNull()
             ?.getOrThrow()
             ?: emptyList()
+    }
+}
+
+private class RecordingPullRequestFetchTool(
+    results: List<Result<PrivateToolResult>>,
+    private val eventLog: MutableList<String>? = null,
+) {
+    private val queuedResults = ArrayDeque(results)
+    val requestedUrls = mutableListOf<String>()
+
+    suspend fun execute(arguments: JsonObject): PrivateToolResult {
+        val prUrl = arguments["pr_url"]?.jsonPrimitive?.contentOrNull
+            ?: error("Missing pr_url argument")
+        requestedUrls += prUrl
+        eventLog?.add("fetch:$prUrl")
+        return queuedResults.removeFirstOrNull()
+            ?.getOrThrow()
+            ?: error("No prepared fetch_github_pull_request result")
     }
 }
 

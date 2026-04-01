@@ -26,6 +26,13 @@ internal val CLI_COMMAND_DESCRIPTORS: List<CliCommandDescriptor> = listOf(
         helpSummary = "toggle Wire project-information mode",
     ),
     CliCommandDescriptor(
+        name = "/review_pr",
+        summaryUsage = "/review_pr <public-pr-url>",
+        helpUsage = "/review_pr <public-pr-url>",
+        helpSummary = "review a public GitHub pull request with Wire context",
+        acceptsArguments = true,
+    ),
+    CliCommandDescriptor(
         name = "/api",
         helpSummary = "select the active API from api-settings.json",
     ),
