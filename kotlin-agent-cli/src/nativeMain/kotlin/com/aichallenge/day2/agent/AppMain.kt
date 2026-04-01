@@ -50,9 +50,18 @@ private suspend fun runApp(args: Array<String>): Int {
         return 0
     }
 
-    val scheduledJobId = parseScheduledJobArgument(args)
-    if (scheduledJobId != null) {
-        return runScheduledJobMode(scheduledJobId)
+    val launchMode = when (val parsed = parseLaunchMode(args)) {
+        is LaunchModeParseResult.Error -> {
+            println("error> ${parsed.message}")
+            return 1
+        }
+
+        is LaunchModeParseResult.Success -> {
+            if (parsed.mode is LaunchMode.ScheduledJob) {
+                return runScheduledJobMode(parsed.mode.scheduleId)
+            }
+            parsed.mode
+        }
     }
 
     val config = runCatching { AppConfig.fromEnvironment() }
@@ -62,15 +71,9 @@ private suspend fun runApp(args: Array<String>): Int {
             return 1
         }
 
-    val prompt = parsePromptArgument(args)
-    if (prompt != null && prompt.isBlank()) {
-        println("error> --prompt requires a non-empty value")
-        return 1
-    }
-
     return runConfiguredApp(
         config = config,
-        prompt = prompt,
+        launchMode = launchMode,
     )
 }
 
@@ -87,7 +90,7 @@ private suspend fun runScheduledJobMode(scheduleId: String): Int {
                 }
             val exitCode = runConfiguredApp(
                 config = config,
-                prompt = job.prompt,
+                launchMode = LaunchMode.Prompt(job.prompt),
                 onSinglePromptSuccess = { response -> responseText = response.content },
             )
             ScheduledJobRunnerResult(
@@ -103,10 +106,10 @@ private suspend fun runScheduledJobMode(scheduleId: String): Int {
 
 private suspend fun runConfiguredApp(
     config: AppConfig,
-    prompt: String?,
+    launchMode: LaunchMode,
     onSinglePromptSuccess: ((AgentResponse) -> Unit)? = null,
 ): Int {
-    val isInteractiveMode = prompt == null
+    val isInteractiveMode = launchMode == LaunchMode.Interactive
     val apiSettingsStore = JsonFileApiSettingsStore.fromDefaultLocation()
     val initialApiSettings = resolveInitialApiSettings(
         config = config,
@@ -209,47 +212,71 @@ private suspend fun runConfiguredApp(
     )
 
     return try {
-        if (prompt != null) {
-            controller.runSinglePrompt(
-                prompt = prompt,
+        when (launchMode) {
+            is LaunchMode.Prompt -> controller.runSinglePrompt(
+                prompt = launchMode.prompt,
                 onSuccess = onSinglePromptSuccess,
             )
-        } else {
-            controller.runInteractive()
-            0
+
+            is LaunchMode.ReviewPr -> controller.runSingleReviewPr(launchMode.prUrl)
+            LaunchMode.Interactive -> {
+                controller.runInteractive()
+                0
+            }
+
+            is LaunchMode.ScheduledJob -> error("Scheduled job mode is handled before runConfiguredApp.")
         }
     } finally {
         container.close()
     }
 }
 
-private fun parsePromptArgument(args: Array<String>): String? {
-    val index = args.indexOf("--prompt")
-    if (index == -1) {
-        return null
+internal fun parseLaunchMode(args: Array<String>): LaunchModeParseResult {
+    val scheduledJobId = parseFlagValue(args, "--run-scheduled-job")
+    if (scheduledJobId != null) {
+        return if (scheduledJobId.isBlank()) {
+            LaunchModeParseResult.Error("--run-scheduled-job requires a non-empty value")
+        } else {
+            LaunchModeParseResult.Success(LaunchMode.ScheduledJob(scheduledJobId))
+        }
     }
-    return args.drop(index + 1).joinToString(separator = " ").trim()
+
+    val prompt = parseFlagValue(args, "--prompt")
+    val reviewPrUrl = parseFlagValue(args, "--review-pr")
+    if (prompt != null && reviewPrUrl != null) {
+        return LaunchModeParseResult.Error("--prompt and --review-pr cannot be used together")
+    }
+    if (prompt != null) {
+        return if (prompt.isBlank()) {
+            LaunchModeParseResult.Error("--prompt requires a non-empty value")
+        } else {
+            LaunchModeParseResult.Success(LaunchMode.Prompt(prompt))
+        }
+    }
+    if (reviewPrUrl != null) {
+        return if (reviewPrUrl.isBlank()) {
+            LaunchModeParseResult.Error("--review-pr requires a non-empty value")
+        } else {
+            LaunchModeParseResult.Success(LaunchMode.ReviewPr(reviewPrUrl))
+        }
+    }
+
+    return LaunchModeParseResult.Success(LaunchMode.Interactive)
 }
 
-private fun parseScheduledJobArgument(args: Array<String>): String? {
-    val index = args.indexOf("--run-scheduled-job")
+private fun parseFlagValue(args: Array<String>, flag: String): String? {
+    val index = args.indexOf(flag)
     if (index == -1) {
         return null
     }
-    return args.getOrNull(index + 1)?.trim()?.takeIf { value -> value.isNotEmpty() }
+    return args.slice(index + 1 until args.size)
+        .takeWhile { candidate -> candidate !in RESERVED_ARGUMENT_FLAGS }
+        .joinToString(separator = " ")
+        .trim()
 }
 
 private fun printUsage() {
-    println(
-        """
-        agent-cli usage:
-          ./agent-cli.kexe                 # interactive mode
-          ./agent-cli.kexe --prompt "..."  # one-shot mode
-        
-        options:
-          -h, --help                       show this message
-        """.trimIndent(),
-    )
+    println(buildUsageText())
 }
 
 private fun printEnvironmentHelp() {
@@ -301,3 +328,39 @@ internal fun normalizeApiSettingsForCatalog(
 ): ApiSettings? {
     return settings.normalizedOrNull()
 }
+
+internal fun buildUsageText(): String {
+    return """
+        agent-cli usage:
+          ./agent-cli.kexe                                  # interactive mode
+          ./agent-cli.kexe --prompt "..."                   # one-shot prompt mode
+          ./agent-cli.kexe --review-pr <public-pr-url>      # one-shot PR review mode
+        
+        options:
+          -h, --help                                        show this message
+        """.trimIndent()
+}
+
+internal sealed interface LaunchMode {
+    data object Interactive : LaunchMode
+
+    data class Prompt(val prompt: String) : LaunchMode
+
+    data class ReviewPr(val prUrl: String) : LaunchMode
+
+    data class ScheduledJob(val scheduleId: String) : LaunchMode
+}
+
+internal sealed interface LaunchModeParseResult {
+    data class Success(val mode: LaunchMode) : LaunchModeParseResult
+
+    data class Error(val message: String) : LaunchModeParseResult
+}
+
+private val RESERVED_ARGUMENT_FLAGS = setOf(
+    "-h",
+    "--help",
+    "--prompt",
+    "--review-pr",
+    "--run-scheduled-job",
+)

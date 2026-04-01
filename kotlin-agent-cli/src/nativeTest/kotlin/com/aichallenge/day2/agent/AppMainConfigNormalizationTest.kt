@@ -5,9 +5,94 @@ import com.aichallenge.day2.agent.core.config.AppConfig
 import com.aichallenge.day2.agent.core.config.ConfiguredApi
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertContains
 import kotlin.test.assertNotNull
 
 class AppMainConfigNormalizationTest {
+    @Test
+    fun parseLaunchModeReturnsInteractiveByDefault() {
+        val result = parseLaunchMode(emptyArray())
+
+        assertEquals(
+            LaunchModeParseResult.Success(LaunchMode.Interactive),
+            result,
+        )
+    }
+
+    @Test
+    fun parseLaunchModeReturnsPromptMode() {
+        val result = parseLaunchMode(arrayOf("--prompt", "Summarize", "this", "architecture"))
+
+        assertEquals(
+            LaunchModeParseResult.Success(LaunchMode.Prompt("Summarize this architecture")),
+            result,
+        )
+    }
+
+    @Test
+    fun parseLaunchModeReturnsReviewPrMode() {
+        val result = parseLaunchMode(arrayOf("--review-pr", "https://github.com/wireapp/wire-android/pull/4672"))
+
+        assertEquals(
+            LaunchModeParseResult.Success(
+                LaunchMode.ReviewPr("https://github.com/wireapp/wire-android/pull/4672"),
+            ),
+            result,
+        )
+    }
+
+    @Test
+    fun parseLaunchModeRejectsBlankReviewPrValue() {
+        val result = parseLaunchMode(arrayOf("--review-pr"))
+
+        assertEquals(
+            LaunchModeParseResult.Error("--review-pr requires a non-empty value"),
+            result,
+        )
+    }
+
+    @Test
+    fun parseLaunchModeRejectsPromptAndReviewPrTogether() {
+        val result = parseLaunchMode(
+            arrayOf(
+                "--prompt",
+                "Summarize this architecture",
+                "--review-pr",
+                "https://github.com/wireapp/wire-android/pull/4672",
+            ),
+        )
+
+        assertEquals(
+            LaunchModeParseResult.Error("--prompt and --review-pr cannot be used together"),
+            result,
+        )
+    }
+
+    @Test
+    fun parseLaunchModePreservesScheduledJobBehavior() {
+        val result = parseLaunchMode(
+            arrayOf(
+                "--run-scheduled-job",
+                "job-123",
+                "--review-pr",
+                "https://github.com/wireapp/wire-android/pull/4672",
+            ),
+        )
+
+        assertEquals(
+            LaunchModeParseResult.Success(LaunchMode.ScheduledJob("job-123")),
+            result,
+        )
+    }
+
+    @Test
+    fun buildUsageTextIncludesReviewPrMode() {
+        val usage = buildUsageText()
+
+        assertContains(usage, "--review-pr <public-pr-url>")
+        assertContains(usage, "--prompt")
+    }
+
     @Test
     fun normalizeApiSettingsForCatalogPreservesUnknownModelsAndKeepsSelectedModelWhenValid() {
         val result = normalizeApiSettingsForCatalog(

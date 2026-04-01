@@ -162,6 +162,7 @@ One-shot mode:
 
 ```bash
 ./build/bin/native/releaseExecutable/agent-cli.kexe --prompt "Summarize this architecture"
+./build/bin/native/releaseExecutable/agent-cli.kexe --review-pr https://github.com/org/repo/pull/123
 ```
 
 Internal scheduled runs reuse the same one-shot pipeline through a hidden `--run-scheduled-job <schedule-id>` mode that is intended for `launchd`, not for interactive use.

@@ -2604,6 +2604,218 @@ class ConsoleChatControllerSessionMemoryTest {
     }
 
     @Test
+    fun runSingleReviewPrFetchesThenRetrievesRagThenSendsFreshReviewPrompt() = runBlocking {
+        val eventLog = mutableListOf<String>()
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(
+                    AgentResponse(
+                        content = """
+                            ## Summary
+                            Overall looks good.
+                            
+                            ## Bugs
+                            None found.
+                            
+                            ## Architectural Issues
+                            None found.
+                            
+                            ## Improvements / Recommendations
+                            Consider adding one more test.
+                            
+                            ## Open Questions / Coverage Notes
+                            Full coverage of included diffs.
+                        """.trimIndent(),
+                    ),
+                ),
+            ),
+        )
+        val fetchTool = RecordingPullRequestFetchTool(
+            results = listOf(Result.success(samplePullRequestToolResult())),
+            eventLog = eventLog,
+        )
+        val ragRetriever = RecordingWireAppRagRetriever(
+            results = listOf(
+                Result.success(
+                    listOf(
+                        RagRetrievedChunk(
+                            chunkId = "title-1",
+                            sectionName = "Sync",
+                            headingPath = "Architecture > Sync",
+                            sourcePath = "sync.md",
+                            score = 0.91,
+                            content = "Sync uses a coordinator and explicit retry handling.",
+                        ),
+                    ),
+                ),
+                Result.success(
+                    listOf(
+                        RagRetrievedChunk(
+                            chunkId = "title-1",
+                            sectionName = "Sync",
+                            headingPath = "Architecture > Sync",
+                            sourcePath = "sync.md",
+                            score = 0.91,
+                            content = "Sync uses a coordinator and explicit retry handling.",
+                        ),
+                        RagRetrievedChunk(
+                            chunkId = "desc-2",
+                            sectionName = "Messaging",
+                            headingPath = "Features > Messaging",
+                            sourcePath = "messaging.md",
+                            score = 0.82,
+                            content = "Message sending should preserve optimistic UI state.",
+                        ),
+                    ),
+                ),
+            ),
+            eventLog = eventLog,
+        )
+        val store = RecordingSessionMemoryStore(
+            loadedState = SessionMemoryState(
+                messages = listOf(
+                    ConversationMessage.user("old question"),
+                    ConversationMessage.assistant("old answer"),
+                ),
+                usage = MemoryUsageSnapshot(
+                    estimatedTokens = 300,
+                    source = MemoryEstimateSource.HYBRID,
+                    messageCount = 3,
+                ),
+            ),
+        )
+        val io = FakeCliIO(inputs = emptyList())
+        val controller = createController(
+            repository = repository,
+            io = io,
+            sessionMemoryStore = store,
+            builtInPrivateToolProvider = reviewPrBuiltInToolProvider(fetchTool),
+            wireAppRagRetriever = ragRetriever,
+            persistentMemoryEnabled = false,
+        )
+
+        val exitCode = controller.runSingleReviewPr("https://github.com/wireapp/wire-android/pull/4672")
+
+        assertEquals(0, exitCode)
+        assertEquals(
+            listOf(
+                "fetch:https://github.com/wireapp/wire-android/pull/4672",
+                "rag:Improve sync retry handling",
+                "rag:Adds retry handling for failed sync uploads.",
+            ),
+            eventLog,
+        )
+        assertEquals(1, repository.conversations.size)
+        assertEquals(
+            listOf(MessageRole.SYSTEM, MessageRole.SYSTEM, MessageRole.USER),
+            repository.conversations.single().map { it.role },
+        )
+        assertContains(repository.conversations.single()[1].content, "pr_url: https://github.com/wireapp/wire-android/pull/4672")
+        assertContains(repository.conversations.single()[1].content, "source_path: sync.md")
+        assertContains(repository.conversations.single()[2].content, "Review this pull request")
+        assertEquals(0, store.loadCalls)
+        assertEquals(0, store.saveStates.size)
+        assertEquals(0, store.clearCalls)
+        val liveOutput = io.liveDialogLines.joinToString(separator = "\n")
+        assertContains(liveOutput, "Step 1/4 - Fetch PR details")
+        assertContains(liveOutput, "Step 2/4 - Retrieve Wire context")
+        assertContains(liveOutput, "Step 3/4 - Review source code changes")
+        assertContains(liveOutput, "Step 4/4 - Provide full PR review")
+        assertContains(io.outputText(), "Overall looks good.")
+    }
+
+    @Test
+    fun runSingleReviewPrUsesTitleOnlyRagFallbackWhenDescriptionIsBlank() = runBlocking {
+        val repository = RecordingAgentRepository(
+            responses = listOf(
+                Result.success(
+                    AgentResponse(
+                        content = """
+                            ## Summary
+                            Looks fine.
+                            
+                            ## Bugs
+                            None found.
+                            
+                            ## Architectural Issues
+                            None found.
+                            
+                            ## Improvements / Recommendations
+                            None.
+                            
+                            ## Open Questions / Coverage Notes
+                            Title-only coverage.
+                        """.trimIndent(),
+                    ),
+                ),
+            ),
+        )
+        val fetchTool = RecordingPullRequestFetchTool(
+            results = listOf(Result.success(samplePullRequestToolResult(description = null))),
+        )
+        val ragRetriever = RecordingWireAppRagRetriever(
+            results = listOf(Result.success(emptyList())),
+        )
+        val io = FakeCliIO(inputs = emptyList())
+        val controller = createController(
+            repository = repository,
+            io = io,
+            builtInPrivateToolProvider = reviewPrBuiltInToolProvider(fetchTool),
+            wireAppRagRetriever = ragRetriever,
+            persistentMemoryEnabled = false,
+        )
+
+        val exitCode = controller.runSingleReviewPr("https://github.com/wireapp/wire-android/pull/4672")
+
+        assertEquals(0, exitCode)
+        assertEquals(listOf("Improve sync retry handling"), ragRetriever.questions)
+        assertContains(io.liveDialogLines.joinToString(separator = "\n"), "title-only fallback")
+        assertContains(repository.prompts.single().contextSystemMessages.single(), "description: (blank)")
+    }
+
+    @Test
+    fun runSingleReviewPrStopsWhenFetchFails() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val fetchTool = RecordingPullRequestFetchTool(
+            results = listOf(Result.failure(IllegalStateException("GitHub unavailable"))),
+        )
+        val ragRetriever = RecordingWireAppRagRetriever()
+        val io = FakeCliIO(inputs = emptyList())
+        val controller = createController(
+            repository = repository,
+            io = io,
+            builtInPrivateToolProvider = reviewPrBuiltInToolProvider(fetchTool),
+            wireAppRagRetriever = ragRetriever,
+            persistentMemoryEnabled = false,
+        )
+
+        val exitCode = controller.runSingleReviewPr("https://github.com/wireapp/wire-android/pull/4672")
+
+        assertEquals(1, exitCode)
+        assertContains(io.outputText(), "error> GitHub unavailable")
+        assertTrue(ragRetriever.questions.isEmpty())
+        assertTrue(repository.conversations.isEmpty())
+    }
+
+    @Test
+    fun runSingleReviewPrWithoutConfiguredApiReturnsError() = runBlocking {
+        val repository = RecordingAgentRepository(responses = emptyList())
+        val io = FakeCliIO(inputs = emptyList())
+        val controller = createController(
+            repository = repository,
+            io = io,
+            apiSettingsService = MutableApiSettingsService(),
+            persistentMemoryEnabled = false,
+        )
+
+        val exitCode = controller.runSingleReviewPr("https://github.com/wireapp/wire-android/pull/4672")
+
+        assertEquals(1, exitCode)
+        assertContains(io.outputText(), "error> No API is configured.")
+        assertTrue(repository.conversations.isEmpty())
+    }
+
+    @Test
     fun projectHelpTogglesProjectInformationModeAndShowsFooterLabel() = runBlocking {
         val repository = RecordingAgentRepository(
             responses = listOf(Result.success(AgentResponse(content = "Grounded answer"))),

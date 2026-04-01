@@ -233,10 +233,12 @@ class ConsoleChatController(
 
     private fun currentTemperatureOverride(): Double? = apiSettingsService.currentSettings()?.temperature
 
+    private fun noApiConfiguredMessage(): String {
+        return "No API is configured. Define APIs in ~/.kotlin-agent-cli/api-settings.json and use /api to select one."
+    }
+
     private fun requireActiveModel(): String {
-        return currentModel ?: throw IllegalStateException(
-            "No API is configured. Define APIs in ~/.kotlin-agent-cli/api-settings.json and use /api to select one.",
-        )
+        return currentModel ?: throw IllegalStateException(noApiConfiguredMessage())
     }
 
     private fun currentApi(): ConfiguredApi? = apiSettingsService.currentApi()
@@ -319,6 +321,28 @@ class ConsoleChatController(
             onSuccess?.invoke(response)
             val elapsedSeconds = startedAt.elapsedNow().inWholeMilliseconds / 1000.0
             io.writeLine(formatAssistantResponse(response.content, response.usage, elapsedSeconds))
+            0
+        }.getOrElse { throwable ->
+            io.writeLine("error> ${throwable.message ?: "Unexpected error"}")
+            1
+        }
+    }
+
+    suspend fun runSingleReviewPr(prUrl: String): Int {
+        if (prUrl.isBlank()) {
+            io.writeLine("error> --review-pr must not be empty")
+            return 1
+        }
+        initializeUserDefinedProfile()
+        initializeUserDefinedWorkflow()
+        initializeInvariantConstraints()
+        if (currentApiId == null || currentModel == null) {
+            io.writeLine("error> ${noApiConfiguredMessage()}")
+            return 1
+        }
+
+        return runCatching {
+            io.writeLine(executeReviewPrFlow(prUrl))
             0
         }.getOrElse { throwable ->
             io.writeLine("error> ${throwable.message ?: "Unexpected error"}")
@@ -2638,46 +2662,50 @@ class ConsoleChatController(
         }
 
         runCatching {
-            emitReviewPrStepMessage(
-                title = REVIEW_PR_FETCH_STEP_TITLE,
-                message = "Loading GitHub pull request metadata and diffs for $prUrl.",
-            )
-            val pullRequest = fetchReviewPullRequest(prUrl)
-            emitReviewPrStepMessage(
-                title = REVIEW_PR_FETCH_STEP_TITLE,
-                message = buildReviewPrFetchSummaryMessage(pullRequest),
-            )
-
-            emitReviewPrStepMessage(
-                title = REVIEW_PR_RAG_STEP_TITLE,
-                message = buildReviewPrRagStartMessage(pullRequest),
-            )
-            val ragContext = retrieveReviewPrWireContext(pullRequest)
-            emitReviewPrStepMessage(
-                title = REVIEW_PR_RAG_STEP_TITLE,
-                message = buildReviewPrRagSummaryMessage(ragContext),
-            )
-
-            val reviewPrompt = buildReviewPrPrompt(pullRequest, ragContext.chunks)
-            emitReviewPrStepMessage(
-                title = REVIEW_PR_REVIEW_STEP_TITLE,
-                message = buildReviewPrReviewPreparationMessage(reviewPrompt),
-            )
-            val reviewStartedAt = TimeSource.Monotonic.markNow()
-            val response = executeReviewPrAssistantTurn(reviewPrompt.contextSystemMessage)
-
-            emitReviewPrStepMessage(
-                title = REVIEW_PR_OUTPUT_STEP_TITLE,
-                message = "Rendering the final pull request review.",
-            )
-            dialogBlocks += formatAssistantResponse(
-                text = response.content,
-                usage = response.usage,
-                elapsedSeconds = reviewStartedAt.elapsedNow().inWholeMilliseconds / 1000.0,
-            )
+            dialogBlocks += executeReviewPrFlow(prUrl)
         }.onFailure { throwable ->
             dialogBlocks += "error> ${throwable.message ?: "Unexpected error"}"
         }
+    }
+
+    private suspend fun executeReviewPrFlow(prUrl: String): String {
+        emitReviewPrStepMessage(
+            title = REVIEW_PR_FETCH_STEP_TITLE,
+            message = "Loading GitHub pull request metadata and diffs for $prUrl.",
+        )
+        val pullRequest = fetchReviewPullRequest(prUrl)
+        emitReviewPrStepMessage(
+            title = REVIEW_PR_FETCH_STEP_TITLE,
+            message = buildReviewPrFetchSummaryMessage(pullRequest),
+        )
+
+        emitReviewPrStepMessage(
+            title = REVIEW_PR_RAG_STEP_TITLE,
+            message = buildReviewPrRagStartMessage(pullRequest),
+        )
+        val ragContext = retrieveReviewPrWireContext(pullRequest)
+        emitReviewPrStepMessage(
+            title = REVIEW_PR_RAG_STEP_TITLE,
+            message = buildReviewPrRagSummaryMessage(ragContext),
+        )
+
+        val reviewPrompt = buildReviewPrPrompt(pullRequest, ragContext.chunks)
+        emitReviewPrStepMessage(
+            title = REVIEW_PR_REVIEW_STEP_TITLE,
+            message = buildReviewPrReviewPreparationMessage(reviewPrompt),
+        )
+        val reviewStartedAt = TimeSource.Monotonic.markNow()
+        val response = executeReviewPrAssistantTurn(reviewPrompt.contextSystemMessage)
+
+        emitReviewPrStepMessage(
+            title = REVIEW_PR_OUTPUT_STEP_TITLE,
+            message = "Rendering the final pull request review.",
+        )
+        return formatAssistantResponse(
+            text = response.content,
+            usage = response.usage,
+            elapsedSeconds = reviewStartedAt.elapsedNow().inWholeMilliseconds / 1000.0,
+        )
     }
 
     private suspend fun fetchReviewPullRequest(prUrl: String): ReviewPullRequestData {
