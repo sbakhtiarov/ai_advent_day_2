@@ -1,6 +1,6 @@
 # kotlin-agent-cli
 
-Native macOS CLI chat application (Kotlin/Native + Ktor) that calls an OpenAI-compatible Responses API.
+Native macOS CLI chat application plus a JVM HTTP PR-review API that call an OpenAI-compatible Responses API.
 
 ## Build
 
@@ -14,7 +14,110 @@ Binary output:
 build/bin/native/releaseExecutable/agent-cli.kexe
 ```
 
+JVM HTTP API fat jar:
+
+```bash
+./gradlew jvmFatJar
+```
+
+Output:
+
+```text
+build/libs/kotlin-agent-cli-0.1.0-all.jar
+```
+
 ## Run
+
+## HTTP PR Review API
+
+The JVM server exposes one unauthenticated endpoint:
+
+```text
+POST /review-pr
+```
+
+Request body:
+
+```json
+{
+  "pr_url": "https://github.com/org/repo/pull/123"
+}
+```
+
+Required environment variables:
+
+```bash
+PORT=8080
+AGENT_API_BASE_URL=https://api.openai.com/v1
+AGENT_API_KEY=sk-...
+AGENT_API_MODEL=gpt-5.2-codex
+WIRE_APP_RAG_BASE_URL=http://127.0.0.1:8000
+```
+
+Optional environment variables:
+
+```bash
+AGENT_API_TEMPERATURE=0.2
+OPENAI_API_LOG_FILE=/var/log/kotlin-agent-cli/openai-api.log
+```
+
+Run the server:
+
+```bash
+java -jar build/libs/kotlin-agent-cli-0.1.0-all.jar
+```
+
+Example request:
+
+```bash
+curl -X POST http://127.0.0.1:8080/review-pr \
+  -H 'Content-Type: application/json' \
+  -d '{"pr_url":"https://github.com/org/repo/pull/123"}'
+```
+
+Example GitHub Action step:
+
+```yaml
+- name: Request PR review
+  run: |
+    curl -fsS "$REVIEW_API_BASE_URL/review-pr" \
+      -H 'Content-Type: application/json' \
+      -d "{\"pr_url\":\"${{ github.event.pull_request.html_url }}\"}" \
+      -o review-response.json
+```
+
+The endpoint is intentionally unauthenticated in v1. Anyone who can reach it can spend your model quota.
+
+## Docker Deployment
+
+This repo includes a production `Dockerfile`, `.env.example`, and `docker-compose.yml`.
+
+Prepare env vars:
+
+```bash
+cp .env.example .env
+```
+
+Agent-only mode with an existing external RAG service:
+
+1. Set `WIRE_APP_RAG_BASE_URL` in `.env` to your remote RAG base URL.
+2. Start:
+
+```bash
+docker compose up --build -d
+```
+
+Full stack mode with both containers:
+
+1. Set `WIRE_RAG_IMAGE` in `.env` to your actual Wire App RAG image.
+2. Leave `WIRE_APP_RAG_BASE_URL=http://wire-rag:8000`.
+3. Start:
+
+```bash
+docker compose --profile rag up --build -d
+```
+
+The agent API will be exposed on `http://localhost:${AGENT_PUBLIC_PORT}` and the RAG container stays internal to the Compose network by default.
 
 `/api` opens a menu of APIs loaded from `~/.kotlin-agent-cli/api-settings.json`. Each entry needs an `id`, `name`, `base_url`, `api_key`, `available_models`, `default_model`, and `selected_model`.
 

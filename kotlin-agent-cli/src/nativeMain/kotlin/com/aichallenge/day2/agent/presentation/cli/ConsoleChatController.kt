@@ -64,6 +64,10 @@ import com.aichallenge.day2.agent.domain.usecase.SessionMemoryCompactionCoordina
 import com.aichallenge.day2.agent.domain.usecase.RollingSummaryCompactionStrategy
 import com.aichallenge.day2.agent.domain.usecase.SendPromptUseCase
 import com.aichallenge.day2.agent.domain.usecase.WorkingMemoryDistillationUseCase
+import com.aichallenge.day2.agent.review.NativePullRequestFetcher
+import com.aichallenge.day2.agent.review.NativePullRequestReviewModelClient
+import com.aichallenge.day2.agent.review.NativeReviewRagRetriever
+import com.aichallenge.day2.agent.review.PullRequestReviewService
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -2669,41 +2673,34 @@ class ConsoleChatController(
     }
 
     private suspend fun executeReviewPrFlow(prUrl: String): String {
-        emitReviewPrStepMessage(
-            title = REVIEW_PR_FETCH_STEP_TITLE,
-            message = "Loading GitHub pull request metadata and diffs for $prUrl.",
-        )
-        val pullRequest = fetchReviewPullRequest(prUrl)
-        emitReviewPrStepMessage(
-            title = REVIEW_PR_FETCH_STEP_TITLE,
-            message = buildReviewPrFetchSummaryMessage(pullRequest),
-        )
-
-        emitReviewPrStepMessage(
-            title = REVIEW_PR_RAG_STEP_TITLE,
-            message = buildReviewPrRagStartMessage(pullRequest),
-        )
-        val ragContext = retrieveReviewPrWireContext(pullRequest)
-        emitReviewPrStepMessage(
-            title = REVIEW_PR_RAG_STEP_TITLE,
-            message = buildReviewPrRagSummaryMessage(ragContext),
-        )
-
-        val reviewPrompt = buildReviewPrPrompt(pullRequest, ragContext.chunks)
-        emitReviewPrStepMessage(
-            title = REVIEW_PR_REVIEW_STEP_TITLE,
-            message = buildReviewPrReviewPreparationMessage(reviewPrompt),
+        val reviewService = PullRequestReviewService(
+            pullRequestFetcher = NativePullRequestFetcher(builtInPrivateToolProvider),
+            ragRetriever = NativeReviewRagRetriever(wireAppRagRetriever),
+            modelClient = NativePullRequestReviewModelClient(
+                sendPromptUseCase = sendPromptUseCase,
+                modelId = requireActiveModel(),
+                contextWindowTokens = currentModel
+                    ?.let { modelId -> activeModelsById()[modelId] }
+                    ?.contextWindowTokens,
+                temperature = currentTemperatureOverride(),
+            ),
         )
         val reviewStartedAt = TimeSource.Monotonic.markNow()
-        val response = executeReviewPrAssistantTurn(reviewPrompt.contextSystemMessage)
-
-        emitReviewPrStepMessage(
-            title = REVIEW_PR_OUTPUT_STEP_TITLE,
-            message = "Rendering the final pull request review.",
-        )
+        val response = reviewService.review(prUrl) { progress ->
+            emitReviewPrStepMessage(
+                title = progress.title,
+                message = progress.message,
+            )
+        }
         return formatAssistantResponse(
-            text = response.content,
-            usage = response.usage,
+            text = response.reviewMarkdown,
+            usage = response.usage?.let { usage ->
+                TokenUsage(
+                    totalTokens = usage.totalTokens,
+                    inputTokens = usage.inputTokens,
+                    outputTokens = usage.outputTokens,
+                )
+            },
             elapsedSeconds = reviewStartedAt.elapsedNow().inWholeMilliseconds / 1000.0,
         )
     }

@@ -1,0 +1,30 @@
+services:
+  agent-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${AGENT_IMAGE:-kotlin-agent-cli-agent-api:latest}
+    restart: unless-stopped
+    ports:
+      - "${AGENT_PUBLIC_PORT:-8080}:8080"
+    environment:
+      PORT: "8080"
+      AGENT_API_BASE_URL: ${AGENT_API_BASE_URL}
+      AGENT_API_KEY: ${AGENT_API_KEY}
+      AGENT_API_MODEL: ${AGENT_API_MODEL}
+      AGENT_API_TEMPERATURE: ${AGENT_API_TEMPERATURE:-}
+      WIRE_APP_RAG_BASE_URL: ${WIRE_APP_RAG_BASE_URL:-http://wire-rag:8000}
+      OPENAI_API_LOG_FILE: ${OPENAI_API_LOG_FILE:-/var/log/kotlin-agent-cli/openai-api.log}
+    volumes:
+      - agent_logs:/var/log/kotlin-agent-cli
+
+  wire-rag:
+    image: ${WIRE_RAG_IMAGE:-ghcr.io/replace-me/wire-app-rag:latest}
+    restart: unless-stopped
+    expose:
+      - "${WIRE_RAG_PORT:-8000}"
+    profiles:
+      - rag
+
+volumes:
+  agent_logs:
