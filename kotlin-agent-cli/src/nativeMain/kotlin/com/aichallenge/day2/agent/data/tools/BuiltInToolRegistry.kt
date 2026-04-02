@@ -91,7 +91,14 @@ class BuiltInToolRegistry(
                 registrations = listOf(
                     notifyUserToolRegistration(notificationService),
                     schedulerToolRegistration(schedulerService),
-                    saveToFileToolRegistration(runtimeEnvironment),
+                    createFileToolRegistration(runtimeEnvironment),
+                    listFilesToolRegistration(runtimeEnvironment),
+                    readFileToolRegistration(runtimeEnvironment),
+                    findFileByNameToolRegistration(runtimeEnvironment),
+                    searchFileContentToolRegistration(runtimeEnvironment),
+                    editFileToolRegistration(runtimeEnvironment),
+                    deleteFileToolRegistration(runtimeEnvironment),
+                    diffFilesToolRegistration(),
                     convertToPdfToolRegistration(
                         commandExecutor = commandExecutor,
                         runtimeEnvironment = runtimeEnvironment,

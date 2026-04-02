@@ -242,18 +242,27 @@ All scheduler timestamps use RFC3339 with an explicit UTC offset; repeating jobs
 Scheduled runs are backed by macOS `launchd`, survive app exit/reboot, write to per-job log files, and send completion/failure notifications through the same local notification backend as `notify_user`.
 Like `notify_user`, this tool is model-only: it is not shown in `/mcp` and is not manually invokable from the interactive CLI in v1.
 
-The agent also exposes a built-in private tool named `save_to_file` to the model on macOS turns.
-It writes text content to disk with schema `{ "file_name": string, "content": string, "overwrite"?: boolean }`.
-`file_name` is required and must resolve inside the current workspace root; relative paths are resolved from the current working directory and paths outside the workspace are rejected.
-The tool auto-creates missing parent directories, fails by default when the target file already exists, and overwrites only when `overwrite: true`.
-Like `notify_user` and `scheduler`, this tool is model-only: it is not shown in `/mcp` and is not manually invokable from the interactive CLI in v1.
+The agent also exposes a built-in workspace file tool suite to the model on macOS turns:
+
+- `create_file` with schema `{ "path": string, "content": string, "overwrite"?: boolean }`
+- `list_files` with schema `{ "path"?: string, "offset"?: integer, "limit"?: integer }`
+- `read_file` with schema `{ "path": string, "start_line"?: integer, "max_lines"?: integer }`
+- `find_file_by_name` with schema `{ "query": string, "path"?: string, "offset"?: integer, "limit"?: integer, "case_sensitive"?: boolean }`
+- `search_file_content` with schema `{ "query": string, "path"?: string, "offset"?: integer, "limit"?: integer, "case_sensitive"?: boolean, "context_lines"?: integer }`
+- `edit_file` with schema `{ "path": string, "find_text": string, "replace_text": string, "diff_offset"?: integer, "diff_limit"?: integer }`
+- `delete_file` with schema `{ "path": string }`
+- `diff_files` with schema `{ "before_content": string, "after_content": string, "path_hint"?: string, "diff_offset"?: integer, "diff_limit"?: integer }`
+
+All file tool paths are workspace-scoped: relative paths resolve from the current working directory, absolute paths are allowed only when they still resolve inside the workspace, and paths outside the workspace are rejected. Text-oriented tools operate on UTF-8 files only, `list_files` is non-recursive, recursive discovery lives in the two search tools, and large `read/search/diff` outputs are paginated.
+
+Like `notify_user` and `scheduler`, these file tools are model-only: they are not shown in `/mcp` and are not manually invokable from the interactive CLI in v1.
 
 The agent also exposes a built-in private tool named `convert_to_pdf` to the model on macOS turns.
 It converts a workspace file to PDF with schema `{ "input_file": string, "output_file": string, "overwrite"?: boolean }`.
 Both paths are required to resolve inside the current workspace; `input_file` must exist and be valid UTF-8 text, and markdown files (`.md`/`.markdown`) are rendered with basic heading/list/code-block/table support.
 The tool fails by default when `output_file` exists and overwrites only when `overwrite: true`; output directories are created automatically.
 Conversion backend is `python3` + `reportlab`, so `python3` and the Python package `reportlab` must be installed (`python3 -m pip install reportlab`).
-Like `notify_user`, `scheduler`, and `save_to_file`, this tool is model-only: it is not shown in `/mcp` and is not manually invokable from the interactive CLI in v1.
+Like `notify_user`, `scheduler`, and the file tools, this tool is model-only: it is not shown in `/mcp` and is not manually invokable from the interactive CLI in v1.
 
 Interactive mode:
 

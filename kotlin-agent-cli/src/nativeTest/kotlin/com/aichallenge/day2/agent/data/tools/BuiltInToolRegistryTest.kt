@@ -22,7 +22,20 @@ class BuiltInToolRegistryTest {
         ).listPrivateToolBindings()
 
         assertEquals(
-            listOf("notify_user", "scheduler", "save_to_file", "convert_to_pdf", "fetch_github_pull_request"),
+            listOf(
+                "notify_user",
+                "scheduler",
+                "create_file",
+                "list_files",
+                "read_file",
+                "find_file_by_name",
+                "search_file_content",
+                "edit_file",
+                "delete_file",
+                "diff_files",
+                "convert_to_pdf",
+                "fetch_github_pull_request",
+            ),
             bindings.map { binding -> binding.modelToolName },
         )
         assertEquals(bindings.size, bindings.map { binding -> binding.target }.distinct().size)

@@ -247,7 +247,7 @@ class ConsoleChatControllerSessionMemoryTest {
             toolTraceEvents = listOf(
                 listOf(
                     ToolCallTraceEvent.Started(toolLabel = "MCP 'Linear/search_issues'"),
-                    ToolCallTraceEvent.Started(toolLabel = "built-in 'save_to_file'"),
+                    ToolCallTraceEvent.Started(toolLabel = "built-in 'create_file'"),
                 ),
             ),
         )
@@ -262,7 +262,7 @@ class ConsoleChatControllerSessionMemoryTest {
         assertEquals(
             listOf(
                 "system> tool call: MCP 'Linear/search_issues'",
-                "system> tool call: built-in 'save_to_file'",
+                "system> tool call: built-in 'create_file'",
             ),
             io.liveDialogLines,
         )
@@ -2910,7 +2910,7 @@ class ConsoleChatControllerSessionMemoryTest {
         assertContains(projectConversation[1].content, "architecture.md")
         assertContains(projectConversation[1].content, "Navigation is coordinated by the app module.")
         assertEquals("How does navigation work?", projectConversation[2].content)
-        assertEquals(5, repository.prompts[1].toolCapabilities.privateTools.size)
+        assertEquals(12, repository.prompts[1].toolCapabilities.privateTools.size)
         assertTrue(repository.prompts[1].toolCapabilities.publicMcpServers.isEmpty())
         assertTrue(repository.prompts[1].toolCapabilities.privateTools.any { tool -> tool.modelToolName == "notify_user" })
         assertTrue(repository.prompts[1].toolCapabilities.privateTools.any { tool -> tool.modelToolName == "scheduler" })
@@ -2952,7 +2952,7 @@ class ConsoleChatControllerSessionMemoryTest {
 
         assertEquals(1, repository.conversations.size)
         val projectConversation = repository.conversations.single()
-        assertEquals(5, repository.prompts.single().toolCapabilities.privateTools.size)
+        assertEquals(12, repository.prompts.single().toolCapabilities.privateTools.size)
         assertFalse(projectConversation.any { message -> message.content.contains("[FILE]") })
         assertFalse(projectConversation.any { message -> message.content.contains("this should not be injected") })
     }
@@ -3014,7 +3014,7 @@ class ConsoleChatControllerSessionMemoryTest {
 
         assertEquals(1, repository.prompts.size)
         assertEquals(1, repository.prompts.single().toolCapabilities.publicMcpServers.size)
-        assertEquals(6, repository.prompts.single().toolCapabilities.privateTools.size)
+        assertEquals(13, repository.prompts.single().toolCapabilities.privateTools.size)
         assertTrue(repository.prompts.single().toolCapabilities.privateTools.any { tool -> tool.modelToolName == "notify_user" })
         assertTrue(repository.prompts.single().toolCapabilities.privateTools.any { tool -> tool.modelToolName == "scheduler" })
         assertTrue(repository.prompts.single().toolCapabilities.privateTools.any { tool ->
@@ -4235,7 +4235,7 @@ class ConsoleChatControllerSessionMemoryTest {
         controller.runInteractive()
 
         assertEquals(2, repository.prompts.size)
-        assertEquals(6, repository.prompts[0].toolCapabilities.privateTools.size)
+        assertEquals(13, repository.prompts[0].toolCapabilities.privateTools.size)
         assertTrue(repository.prompts[0].toolCapabilities.publicMcpServers.isEmpty())
         assertTrue(repository.prompts[0].toolCapabilities.privateTools.any { tool -> tool.modelToolName == "notify_user" })
         assertTrue(repository.prompts[0].toolCapabilities.privateTools.any { tool -> tool.modelToolName == "scheduler" })
@@ -4293,7 +4293,7 @@ class ConsoleChatControllerSessionMemoryTest {
         assertEquals(1, runtimeService.initializeCalls)
         assertEquals(1, repository.prompts.size)
         assertEquals(1, repository.prompts.single().toolCapabilities.publicMcpServers.size)
-        assertEquals(6, repository.prompts.single().toolCapabilities.privateTools.size)
+        assertEquals(13, repository.prompts.single().toolCapabilities.privateTools.size)
         assertTrue(repository.prompts.single().toolCapabilities.privateTools.any { tool -> tool.modelToolName == "notify_user" })
         assertTrue(repository.prompts.single().toolCapabilities.privateTools.any { tool -> tool.modelToolName == "scheduler" })
         assertContains(io.outputText(), "one-shot answer")
@@ -4315,7 +4315,20 @@ class ConsoleChatControllerSessionMemoryTest {
 
         assertEquals(0, exitCode)
         assertEquals(
-            listOf("notify_user", "scheduler", "save_to_file", "convert_to_pdf", "fetch_github_pull_request"),
+            listOf(
+                "notify_user",
+                "scheduler",
+                "create_file",
+                "list_files",
+                "read_file",
+                "find_file_by_name",
+                "search_file_content",
+                "edit_file",
+                "delete_file",
+                "diff_files",
+                "convert_to_pdf",
+                "fetch_github_pull_request",
+            ),
             repository.prompts.single().toolCapabilities.privateTools.map { tool -> tool.modelToolName },
         )
         assertTrue(repository.prompts.single().toolCapabilities.publicMcpServers.isEmpty())
@@ -4511,7 +4524,7 @@ class ConsoleChatControllerSessionMemoryTest {
 
         assertEquals(2, runtimeService.initializeCalls)
         assertEquals(listOf(privateServer), runtimeService.initializeRequests[1])
-        assertEquals(6, repository.prompts.single().toolCapabilities.privateTools.size)
+        assertEquals(13, repository.prompts.single().toolCapabilities.privateTools.size)
         assertTrue(repository.prompts.single().toolCapabilities.privateTools.any { tool -> tool.modelToolName == "notify_user" })
         assertTrue(repository.prompts.single().toolCapabilities.privateTools.any { tool -> tool.modelToolName == "scheduler" })
     }
@@ -4557,7 +4570,7 @@ class ConsoleChatControllerSessionMemoryTest {
         controller.runInteractive()
 
         assertEquals(listOf(enabledServer), runtimeService.initializeRequests.last())
-        assertEquals(6, repository.prompts.single().toolCapabilities.privateTools.size)
+        assertEquals(13, repository.prompts.single().toolCapabilities.privateTools.size)
         assertTrue(repository.prompts.single().toolCapabilities.privateTools.any { tool -> tool.modelToolName == "notify_user" })
         assertTrue(repository.prompts.single().toolCapabilities.privateTools.any { tool -> tool.modelToolName == "scheduler" })
     }
