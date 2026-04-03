@@ -581,7 +581,7 @@ class ConsoleChatController(
         return object : ToolCallTraceObserver {
             override suspend fun onToolCallTrace(event: ToolCallTraceEvent) {
                 val dialogLine = when (event) {
-                    is ToolCallTraceEvent.Started -> "system> tool call: ${event.toolLabel}"
+                    is ToolCallTraceEvent.Started -> event.statusMessage.ifBlank { event.toolLabel }
                 }
                 io.writeLiveDialogLine(dialogLine)
                 dialogBlocks += dialogLine

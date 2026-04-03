@@ -123,12 +123,29 @@ class OpenAiRemoteDataSource(
                 }
                 val binding = privateToolBindings[functionCall.name]
                     ?: throw IllegalStateException("API '${activeApi.name}' requested unknown private MCP tool '${functionCall.name}'.")
-                toolCallTraceObserver?.onToolCallTrace(
-                    ToolCallTraceEvent.Started(
-                        toolLabel = buildToolTraceLabel(binding),
-                    ),
+                val parsedArguments = runCatching { parseFunctionCallArguments(functionCall.arguments) }
+                parsedArguments.fold(
+                    onSuccess = { arguments ->
+                        toolCallTraceObserver?.onToolCallTrace(
+                            ToolCallTraceEvent.Started(
+                                toolLabel = buildToolTraceLabel(binding),
+                                statusMessage = ToolCallStatusMessageFormatter.format(binding, arguments),
+                            ),
+                        )
+                        buildFunctionCallOutput(
+                            binding = binding,
+                            functionCall = functionCall,
+                            arguments = arguments,
+                        )
+                    },
+                    onFailure = { throwable ->
+                        buildFailedFunctionCallOutput(
+                            binding = binding,
+                            functionCall = functionCall,
+                            throwable = throwable,
+                        )
+                    },
                 )
-                buildFunctionCallOutput(binding, functionCall)
             }
 
             requestPayload = ResponsesApiRequest(
@@ -267,9 +284,9 @@ class OpenAiRemoteDataSource(
     private suspend fun buildFunctionCallOutput(
         binding: PrivateToolBinding,
         functionCall: PendingFunctionCall,
+        arguments: JsonObject,
     ): ResponsesApiFunctionCallOutput {
         val output = runCatching {
-            val arguments = parseFunctionCallArguments(functionCall.arguments)
             val result = privateToolExecutionService.execute(binding, arguments)
             serializeSuccessfulFunctionOutput(
                 binding = binding,
@@ -285,6 +302,20 @@ class OpenAiRemoteDataSource(
         return ResponsesApiFunctionCallOutput(
             callId = functionCall.callId,
             output = output,
+        )
+    }
+
+    private fun buildFailedFunctionCallOutput(
+        binding: PrivateToolBinding,
+        functionCall: PendingFunctionCall,
+        throwable: Throwable,
+    ): ResponsesApiFunctionCallOutput {
+        return ResponsesApiFunctionCallOutput(
+            callId = functionCall.callId,
+            output = serializeFailedFunctionOutput(
+                binding = binding,
+                throwable = throwable,
+            ),
         )
     }
 

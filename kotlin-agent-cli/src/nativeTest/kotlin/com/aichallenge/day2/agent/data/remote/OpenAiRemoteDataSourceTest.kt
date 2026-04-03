@@ -37,6 +37,7 @@ import kotlinx.serialization.json.put
 import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
@@ -320,7 +321,215 @@ class OpenAiRemoteDataSourceTest {
         )
 
         assertEquals(
-            listOf<ToolCallTraceEvent>(ToolCallTraceEvent.Started(toolLabel = "built-in 'notify_user'")),
+            listOf<ToolCallTraceEvent>(
+                ToolCallTraceEvent.Started(
+                    toolLabel = "built-in 'notify_user'",
+                    statusMessage = "Sending notification...",
+                ),
+            ),
+            events,
+        )
+    }
+
+    @Test
+    fun fetchAssistantReplyEmitsWorkspaceBrowsingStatusMessages() = runSuspendTest {
+        val events = mutableListOf<ToolCallTraceEvent>()
+        val dataSource = createDataSource(
+            requestBodies = mutableListOf(),
+            responses = listOf(
+                """
+                    {
+                      "id": "resp_1",
+                      "output": [
+                        {
+                          "type": "function_call",
+                          "call_id": "call_1",
+                          "name": "list_files",
+                          "arguments": "{\"path\":\"src\"}"
+                        }
+                      ]
+                    }
+                """.trimIndent(),
+                """
+                    {
+                      "id": "resp_2",
+                      "output": [
+                        {
+                          "type": "function_call",
+                          "call_id": "call_2",
+                          "name": "search_file_content",
+                          "arguments": "{\"query\":\"api key\",\"path\":\".\"}"
+                        }
+                      ]
+                    }
+                """.trimIndent(),
+                """
+                    {
+                      "id": "resp_3",
+                      "output": [
+                        {
+                          "type": "function_call",
+                          "call_id": "call_3",
+                          "name": "read_file",
+                          "arguments": "{\"path\":\"local.properties\"}"
+                        }
+                      ]
+                    }
+                """.trimIndent(),
+                """
+                    {
+                      "id": "resp_4",
+                      "output_text": "Done"
+                    }
+                """.trimIndent(),
+            ),
+            privateToolExecutionService = RecordingPrivateToolExecutionService(
+                toolResultsByName = mapOf(
+                    "list_files" to Result.success(successfulPrivateToolResult("list")),
+                    "search_file_content" to Result.success(successfulPrivateToolResult("search")),
+                    "read_file" to Result.success(successfulPrivateToolResult("read")),
+                ),
+            ),
+        )
+
+        dataSource.fetchAssistantReply(
+            prompt = promptWithPrivateTools(
+                privateTools = listOf(
+                    builtInToolBinding("list_files"),
+                    builtInToolBinding("search_file_content"),
+                    builtInToolBinding("read_file"),
+                ),
+            ),
+            model = "gpt-4.1-mini",
+            toolCallTraceObserver = RecordingToolCallTraceObserver(events),
+        )
+
+        assertEquals(
+            listOf<ToolCallTraceEvent>(
+                ToolCallTraceEvent.Started(
+                    toolLabel = "built-in 'list_files'",
+                    statusMessage = "Listing files in 'src'...",
+                ),
+                ToolCallTraceEvent.Started(
+                    toolLabel = "built-in 'search_file_content'",
+                    statusMessage = "Searching file contents for 'api key' in '.'...",
+                ),
+                ToolCallTraceEvent.Started(
+                    toolLabel = "built-in 'read_file'",
+                    statusMessage = "Reading file 'local.properties'...",
+                ),
+            ),
+            events,
+        )
+    }
+
+    @Test
+    fun fetchAssistantReplyEmitsWorkspaceMutationStatusMessages() = runSuspendTest {
+        val events = mutableListOf<ToolCallTraceEvent>()
+        val dataSource = createDataSource(
+            requestBodies = mutableListOf(),
+            responses = listOf(
+                """
+                    {
+                      "id": "resp_1",
+                      "output": [
+                        {
+                          "type": "function_call",
+                          "call_id": "call_1",
+                          "name": "create_file",
+                          "arguments": "{\"path\":\"notes.md\",\"content\":\"secret body\"}"
+                        }
+                      ]
+                    }
+                """.trimIndent(),
+                """
+                    {
+                      "id": "resp_2",
+                      "output": [
+                        {
+                          "type": "function_call",
+                          "call_id": "call_2",
+                          "name": "edit_file",
+                          "arguments": "{\"path\":\"README.md\",\"find_text\":\"old\",\"replace_text\":\"new\"}"
+                        }
+                      ]
+                    }
+                """.trimIndent(),
+                """
+                    {
+                      "id": "resp_3",
+                      "output": [
+                        {
+                          "type": "function_call",
+                          "call_id": "call_3",
+                          "name": "delete_file",
+                          "arguments": "{\"path\":\"temp.txt\"}"
+                        }
+                      ]
+                    }
+                """.trimIndent(),
+                """
+                    {
+                      "id": "resp_4",
+                      "output": [
+                        {
+                          "type": "function_call",
+                          "call_id": "call_4",
+                          "name": "diff_files",
+                          "arguments": "{\"before_content\":\"a\",\"after_content\":\"b\",\"path_hint\":\"README.md\"}"
+                        }
+                      ]
+                    }
+                """.trimIndent(),
+                """
+                    {
+                      "id": "resp_5",
+                      "output_text": "Done"
+                    }
+                """.trimIndent(),
+            ),
+            privateToolExecutionService = RecordingPrivateToolExecutionService(
+                toolResultsByName = mapOf(
+                    "create_file" to Result.success(successfulPrivateToolResult("create")),
+                    "edit_file" to Result.success(successfulPrivateToolResult("edit")),
+                    "delete_file" to Result.success(successfulPrivateToolResult("delete")),
+                    "diff_files" to Result.success(successfulPrivateToolResult("diff")),
+                ),
+            ),
+        )
+
+        dataSource.fetchAssistantReply(
+            prompt = promptWithPrivateTools(
+                privateTools = listOf(
+                    builtInToolBinding("create_file"),
+                    builtInToolBinding("edit_file"),
+                    builtInToolBinding("delete_file"),
+                    builtInToolBinding("diff_files"),
+                ),
+            ),
+            model = "gpt-4.1-mini",
+            toolCallTraceObserver = RecordingToolCallTraceObserver(events),
+        )
+
+        assertEquals(
+            listOf<ToolCallTraceEvent>(
+                ToolCallTraceEvent.Started(
+                    toolLabel = "built-in 'create_file'",
+                    statusMessage = "Writing file 'notes.md'...",
+                ),
+                ToolCallTraceEvent.Started(
+                    toolLabel = "built-in 'edit_file'",
+                    statusMessage = "Editing file 'README.md'...",
+                ),
+                ToolCallTraceEvent.Started(
+                    toolLabel = "built-in 'delete_file'",
+                    statusMessage = "Deleting file 'temp.txt'...",
+                ),
+                ToolCallTraceEvent.Started(
+                    toolLabel = "built-in 'diff_files'",
+                    statusMessage = "Generating diff for 'README.md'...",
+                ),
+            ),
             events,
         )
     }
@@ -460,10 +669,165 @@ class OpenAiRemoteDataSourceTest {
 
         assertEquals(
             listOf<ToolCallTraceEvent>(
-                ToolCallTraceEvent.Started(toolLabel = "MCP 'Linear/search_issues'"),
-                ToolCallTraceEvent.Started(toolLabel = "MCP 'Linear/create_issue'"),
+                ToolCallTraceEvent.Started(
+                    toolLabel = "MCP 'Linear/search_issues'",
+                    statusMessage = "Searching via MCP tool 'Linear/search_issues' for 'bug'...",
+                ),
+                ToolCallTraceEvent.Started(
+                    toolLabel = "MCP 'Linear/create_issue'",
+                    statusMessage = "Creating via MCP tool 'Linear/create_issue' named 'Bug'...",
+                ),
             ),
             events,
+        )
+    }
+
+    @Test
+    fun fetchAssistantReplyRedactsSensitiveAndHeavyMcpArgumentsInStatusMessage() = runSuspendTest {
+        val events = mutableListOf<ToolCallTraceEvent>()
+        val dataSource = createDataSource(
+            requestBodies = mutableListOf(),
+            responses = listOf(
+                """
+                    {
+                      "id": "resp_1",
+                      "output": [
+                        {
+                          "type": "function_call",
+                          "call_id": "call_1",
+                          "name": "linear__create_issue",
+                          "arguments": "{\"title\":\"Bug\",\"token\":\"top-secret\",\"description\":\"very long private description\"}"
+                        }
+                      ]
+                    }
+                """.trimIndent(),
+                """
+                    {
+                      "id": "resp_2",
+                      "output_text": "Created follow-up issue"
+                    }
+                """.trimIndent(),
+            ),
+            privateToolExecutionService = RecordingPrivateToolExecutionService(
+                toolResultsByName = mapOf(
+                    "linear__create_issue" to Result.success(successfulPrivateToolResult("issue-2")),
+                ),
+            ),
+        )
+
+        dataSource.fetchAssistantReply(
+            prompt = promptWithPrivateTools(
+                privateTools = listOf(
+                    privateToolBinding(
+                        modelToolName = "linear__create_issue",
+                        sourceToolName = "create_issue",
+                    ),
+                ),
+            ),
+            model = "gpt-4.1-mini",
+            toolCallTraceObserver = RecordingToolCallTraceObserver(events),
+        )
+
+        val message = (events.single() as ToolCallTraceEvent.Started).statusMessage
+        assertEquals("Creating via MCP tool 'Linear/create_issue' named 'Bug'...", message)
+        assertFalse(message.contains("top-secret"))
+        assertFalse(message.contains("private description"))
+    }
+
+    @Test
+    fun fetchAssistantReplyTruncatesLongValuesInStatusMessage() = runSuspendTest {
+        val events = mutableListOf<ToolCallTraceEvent>()
+        val dataSource = createDataSource(
+            requestBodies = mutableListOf(),
+            responses = listOf(
+                """
+                    {
+                      "id": "resp_1",
+                      "output": [
+                        {
+                          "type": "function_call",
+                          "call_id": "call_1",
+                          "name": "linear__search_issues",
+                          "arguments": "{\"query\":\"This query is intentionally much longer than sixty characters so it must be truncated in the status line\"}"
+                        }
+                      ]
+                    }
+                """.trimIndent(),
+                """
+                    {
+                      "id": "resp_2",
+                      "output_text": "Found issue"
+                    }
+                """.trimIndent(),
+            ),
+            privateToolExecutionService = RecordingPrivateToolExecutionService(
+                toolResultsByName = mapOf(
+                    "linear__search_issues" to Result.success(successfulPrivateToolResult("issue-1")),
+                ),
+            ),
+        )
+
+        dataSource.fetchAssistantReply(
+            prompt = promptWithPrivateTools(),
+            model = "gpt-4.1-mini",
+            toolCallTraceObserver = RecordingToolCallTraceObserver(events),
+        )
+
+        val message = (events.single() as ToolCallTraceEvent.Started).statusMessage
+        assertContains(message, "Searching via MCP tool 'Linear/search_issues' for 'This query")
+        assertContains(message, "...")
+        assertFalse(message.contains("must be truncated in the status line"))
+    }
+
+    @Test
+    fun fetchAssistantReplyUsesGenericFallbackForUnknownMcpToolName() = runSuspendTest {
+        val events = mutableListOf<ToolCallTraceEvent>()
+        val dataSource = createDataSource(
+            requestBodies = mutableListOf(),
+            responses = listOf(
+                """
+                    {
+                      "id": "resp_1",
+                      "output": [
+                        {
+                          "type": "function_call",
+                          "call_id": "call_1",
+                          "name": "linear__do_magic",
+                          "arguments": "{\"query\":\"bug\"}"
+                        }
+                      ]
+                    }
+                """.trimIndent(),
+                """
+                    {
+                      "id": "resp_2",
+                      "output_text": "Done"
+                    }
+                """.trimIndent(),
+            ),
+            privateToolExecutionService = RecordingPrivateToolExecutionService(
+                toolResultsByName = mapOf(
+                    "linear__do_magic" to Result.success(successfulPrivateToolResult("done")),
+                ),
+            ),
+        )
+
+        dataSource.fetchAssistantReply(
+            prompt = promptWithPrivateTools(
+                privateTools = listOf(
+                    privateToolBinding(
+                        modelToolName = "linear__do_magic",
+                        sourceToolName = "do_magic",
+                    ),
+                ),
+            ),
+            model = "gpt-4.1-mini",
+            toolCallTraceObserver = RecordingToolCallTraceObserver(events),
+        )
+
+        assertEquals(
+            "Calling MCP tool 'Linear/do_magic'...",
+            (events.single() as ToolCallTraceEvent.Started).statusMessage,
         )
     }
 
@@ -852,6 +1216,17 @@ class OpenAiRemoteDataSourceTest {
             modelToolName = "notify_user",
             target = PrivateToolTarget.BuiltIn(toolId = "notify_user"),
             description = "Send a local macOS notification to the user.",
+            parametersSchema = buildJsonObject {
+                put("type", "object")
+            },
+        )
+    }
+
+    private fun builtInToolBinding(toolId: String): PrivateToolBinding {
+        return PrivateToolBinding(
+            modelToolName = toolId,
+            target = PrivateToolTarget.BuiltIn(toolId = toolId),
+            description = "Built-in tool '$toolId'",
             parametersSchema = buildJsonObject {
                 put("type", "object")
             },

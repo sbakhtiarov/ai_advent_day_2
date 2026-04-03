@@ -217,7 +217,10 @@ class ConsoleChatControllerSessionMemoryTest {
             ),
             toolTraceEvents = listOf(
                 listOf(
-                    ToolCallTraceEvent.Started(toolLabel = "built-in 'scheduler'"),
+                    ToolCallTraceEvent.Started(
+                        toolLabel = "built-in 'scheduler'",
+                        statusMessage = "Checking local time...",
+                    ),
                 ),
             ),
         )
@@ -230,12 +233,13 @@ class ConsoleChatControllerSessionMemoryTest {
         controller.runInteractive()
 
         assertEquals(
-            listOf("system> tool call: built-in 'scheduler'"),
+            listOf("Checking local time..."),
             io.liveDialogLines,
         )
         val output = io.outputText()
-        assertContains(output, "system> tool call: built-in 'scheduler'")
-        assertTrue(output.indexOf("system> tool call: built-in 'scheduler'") < output.indexOf("⏺ answer one"))
+        assertContains(output, "Checking local time...")
+        assertFalse(output.contains("system> tool call:"))
+        assertTrue(output.indexOf("Checking local time...") < output.indexOf("⏺ answer one"))
     }
 
     @Test
@@ -246,8 +250,14 @@ class ConsoleChatControllerSessionMemoryTest {
             ),
             toolTraceEvents = listOf(
                 listOf(
-                    ToolCallTraceEvent.Started(toolLabel = "MCP 'Linear/search_issues'"),
-                    ToolCallTraceEvent.Started(toolLabel = "built-in 'create_file'"),
+                    ToolCallTraceEvent.Started(
+                        toolLabel = "MCP 'Linear/search_issues'",
+                        statusMessage = "Searching via MCP tool 'Linear/search_issues' for 'bug'...",
+                    ),
+                    ToolCallTraceEvent.Started(
+                        toolLabel = "built-in 'create_file'",
+                        statusMessage = "Writing file 'notes.md'...",
+                    ),
                 ),
             ),
         )
@@ -261,8 +271,8 @@ class ConsoleChatControllerSessionMemoryTest {
 
         assertEquals(
             listOf(
-                "system> tool call: MCP 'Linear/search_issues'",
-                "system> tool call: built-in 'create_file'",
+                "Searching via MCP tool 'Linear/search_issues' for 'bug'...",
+                "Writing file 'notes.md'...",
             ),
             io.liveDialogLines,
         )
@@ -3028,7 +3038,10 @@ class ConsoleChatControllerSessionMemoryTest {
             responses = listOf(Result.success(AgentResponse(content = "Grounded answer"))),
             toolTraceEvents = listOf(
                 listOf(
-                    ToolCallTraceEvent.Started(toolLabel = "built-in 'scheduler'"),
+                    ToolCallTraceEvent.Started(
+                        toolLabel = "built-in 'scheduler'",
+                        statusMessage = "Checking local time...",
+                    ),
                 ),
             ),
         )
@@ -3057,12 +3070,13 @@ class ConsoleChatControllerSessionMemoryTest {
         controller.runInteractive()
 
         assertEquals(
-            listOf("system> tool call: built-in 'scheduler'"),
+            listOf("Checking local time..."),
             io.liveDialogLines,
         )
         val output = io.outputText()
-        assertContains(output, "system> tool call: built-in 'scheduler'")
-        assertTrue(output.indexOf("system> tool call: built-in 'scheduler'") < output.indexOf("⏺ Grounded answer"))
+        assertContains(output, "Checking local time...")
+        assertFalse(output.contains("system> tool call:"))
+        assertTrue(output.indexOf("Checking local time...") < output.indexOf("⏺ Grounded answer"))
     }
 
     @Test
